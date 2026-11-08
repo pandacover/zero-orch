@@ -124,11 +124,15 @@ $5 per improver, and $10 per `solve`.
 
 ## Safety
 
-- Every tool call passes through `src/Policy.ts`, which decides in code. The
-  improver can write only `genome/`. Its shell is limited to an allowlist
-  (checks, read-only git, singularity), and chained, piped and redirected
-  commands are always denied. It can commit only in the resumed commit
-  stage, and only `genome/`.
+- Every tool call Claude Code would ask permission for goes through
+  `src/Policy.ts`, which decides in code. The improver can write only
+  `genome/`. A shell command that could change anything must be on an
+  allowlist (checks, read-only git, singularity), and chained, piped or
+  redirected ones are denied. It can commit only in the resumed commit stage,
+  and only `genome/`. (Claude Code itself runs commands it recognizes as
+  read-only, such as `ls`, `cat` or `git log`, without asking, even chained;
+  dogfooding showed the improver doing this freely. They can't write, and the
+  next guard checks anyway.)
 - After the session, git independently checks which files changed. Anything
   outside `genome/` is reverted without being measured.
 - The benchmark and the judge (`bench/`, `src/Fitness.ts`) sit outside the

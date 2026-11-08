@@ -111,6 +111,8 @@ describe("generation", () => {
       // The improver was handed the scorecard and singularity's recall, and its own instructions.
       const improver = calls.find((c) => c.outputSchema !== undefined)!
       expect(improver.prompt).toContain("intervals: 3/8 hidden cases")
+      // It's told every setting it may change, and what each accepts.
+      expect(improver.prompt).toContain("solverModel: claude-opus-5-5 (one of: claude-opus-5-5, claude-sonnet-5-5")
       expect(improver.prompt).toContain("git show abc1234567")
       expect(improver.systemAppend).toContain("You are zero's improver")
       expect(improver.persist).toBe(true)

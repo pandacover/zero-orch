@@ -7,12 +7,13 @@
  * everything else waits for the person to allow it in the thread.
  */
 import { type CanUseTool, query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk"
+import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside } from "../../Policy.ts"
 import type { Provider, TurnEvent, TurnInput } from "./Provider.ts"
 import { keepOutput, short } from "./Provider.ts"
 
-export const CLAUDE_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+export const CLAUDE_MODELS = [...MODELS]
 
 const TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch"]
 const READS = new Set(["Read", "Glob", "Grep", "WebSearch", "WebFetch"])

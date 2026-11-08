@@ -17,17 +17,21 @@ import { Effect, FileSystem, Path, Schema } from "effect"
 import { createHash } from "node:crypto"
 import { GenomeError } from "./Errors.ts"
 
+/** The Claude models a genome may run on. */
+export const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"] as const
+export const Model = Schema.Literals(MODELS)
+
 export const Effort = Schema.Literals(["low", "medium", "high", "xhigh", "max"])
 export type Effort = typeof Effort.Type
 
 export const Knobs = Schema.Struct({
   /** The model the solver runs on. */
-  solverModel: Schema.String,
+  solverModel: Model,
   solverEffort: Effort,
   /** The solver's turn limit on one task. */
   maxTurns: Schema.Int.check(Schema.isBetween({ minimum: 4, maximum: 80 })),
   /** The model the improver runs on. */
-  improverModel: Schema.String,
+  improverModel: Model,
   improverEffort: Effort
 })
 export type Knobs = typeof Knobs.Type

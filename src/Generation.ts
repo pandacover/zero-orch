@@ -24,7 +24,7 @@ import { Agent } from "./Claude.ts"
 import { BENCH_WORK_DIR, loadTasks, runBench } from "./Bench.ts"
 import { GitError } from "./Errors.ts"
 import { judge } from "./Fitness.ts"
-import { GENOME_DIR, type Genome, loadGenome } from "./Genome.ts"
+import { GENOME_DIR, type Genome, loadGenome, MODELS } from "./Genome.ts"
 import { changes, head, revert, git } from "./Git.ts"
 import { appendLedger, type Attempt, attempts, lastMeasure, readLedger, type Scorecard } from "./Ledger.ts"
 import { improverPolicy } from "./Policy.ts"
@@ -88,6 +88,23 @@ export const pointsAtTests = (genome: Genome, root: string): string | undefined 
 
 const pct = (x: number) => `${(x * 100).toFixed(1)}%`
 
+/**
+ * Each setting the improver may change, its value now and what it accepts.
+ * The improver can't choose what it doesn't know exists (gen 1 of the first
+ * dogfood run only ever thought of effort).
+ */
+export const knobLines = (genome: Genome): Array<string> => {
+  const k = genome.knobs
+  const models = MODELS.join(", ")
+  return [
+    `- solverModel: ${k.solverModel} (one of: ${models}; prices differ a lot between them)`,
+    `- solverEffort: ${k.solverEffort} (low, medium, high, xhigh, max)`,
+    `- maxTurns: ${k.maxTurns} (4–80)`,
+    `- improverModel: ${k.improverModel} (one of: ${models}): the model you run on`,
+    `- improverEffort: ${k.improverEffort} (low, medium, high, xhigh, max)`
+  ]
+}
+
 /** What the improver is told about where the genome stands. */
 export const improverPrompt = (input: {
   readonly generation: number
@@ -102,6 +119,10 @@ export const improverPrompt = (input: {
     "",
     `The current genome (${input.genome.id}) scores ${pct(card.score)} on the benchmark: ` +
     `${card.solved} of ${card.tasks} tasks fully solved, $${card.costUsd.toFixed(2)} spent.`,
+    "",
+    "## The genome's settings (genome/genome.json)",
+    "",
+    ...knobLines(input.genome),
     "",
     "## Scorecard",
     ""
