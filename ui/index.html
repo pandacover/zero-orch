@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="zero-token" content="__ZERO_TOKEN__">
+  <title>zero</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23db2777'/%3E%3Ctext x='32' y='32' dy='0.35em' text-anchor='middle' font-family='sans-serif' font-size='32' font-weight='600' fill='%23fff'%3EZ%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..700&family=Hanken+Grotesk:wght@400..600&family=Martian+Mono:wght@400..500&display=swap">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="side" id="side" aria-label="Projects and threads">
+      <div class="side-top">
+        <a class="brand" href="#/" aria-label="zero home">
+          <span class="brand-mark" aria-hidden="true">Z</span>
+          <span class="brand-name">zero</span>
+        </a>
+        <button class="icon-btn only-narrow" id="side-close" type="button" aria-label="Close sidebar">✕</button>
+      </div>
+      <button class="new-thread" id="new-thread" type="button">
+        <span>New thread</span><kbd>Alt N</kbd>
+      </button>
+      <nav class="tree" id="tree"></nav>
+      <button class="add-project" id="add-project" type="button">+ Add project</button>
+      <div class="side-foot">
+        <a class="foot-link" href="#/evolution" data-route="evolution"><span class="foot-dot"></span>Evolution</a>
+        <a class="foot-link" href="#/settings" data-route="settings"><span class="foot-gear" aria-hidden="true">⚙</span>Settings</a>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+    <main class="main" id="main" tabindex="-1"></main>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form">
+      <h3 id="dialog-title"></h3>
+      <p id="dialog-text"></p>
+      <div id="dialog-body"></div>
+      <div class="dialog-actions">
+        <button class="btn btn-quiet" value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button class="btn btn-primary" value="ok" id="dialog-ok" type="submit"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
