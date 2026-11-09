@@ -21,7 +21,16 @@ export type TurnEvent =
     readonly status: "running" | "done" | "failed"
     readonly output?: string | undefined
   }
-  | { readonly type: "usage"; readonly costUsd: number | null; readonly tokens: number | null }
+  | {
+    readonly type: "usage"
+    readonly costUsd: number | null
+    readonly tokens: number | null
+    /**
+     * `costUsd` is the session's running total, not this turn's. The Agent
+     * SDK reports a resumed session's cost that way.
+     */
+    readonly cumulative?: boolean | undefined
+  }
 
 export interface TurnInput {
   readonly cwd: string

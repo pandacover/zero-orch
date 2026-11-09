@@ -34,6 +34,15 @@ interface Live {
 const now = () => new Date().toISOString()
 
 /** The commit subject from a recall's text: `committed as abc123: "Subject"`. */
+/**
+ * One turn's cost. A provider that reports its session's running total (the
+ * Agent SDK, when a thread is resumed) is charged only the difference from
+ * the total after the last turn. (Dogfooding found a thread's third turn,
+ * 38 seconds long, recorded at $4.03: every earlier turn counted again.)
+ */
+export const turnCost = (reported: number | null, cumulative: boolean, before: number): number | null =>
+  reported === null ? null : cumulative ? Math.max(0, reported - before) : reported
+
 export const recalledTitle = (text: string): string => /committed as \w+: "([^"]+)"/.exec(text)?.[1] ?? "a past change"
 
 export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: Hub }) =>
@@ -80,6 +89,7 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
       if (patch.provider && patch.provider !== t.provider) {
         t.provider = patch.provider
         t.resume = null
+        t.sessionCostUsd = 0
         t.model = patch.model || PROVIDERS[patch.provider].defaultModel(store.settings())
       } else if (patch.model) {
         t.model = patch.model
@@ -153,6 +163,8 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
             Effect.sync(() => {
               if (e.type === "session") {
                 if (t.resume !== e.resume) {
+                  // A different session (the old one couldn't be resumed) starts its running total at zero.
+                  t.sessionCostUsd = 0
                   t.resume = e.resume
                   store.saveThread(t, true)
                 }
@@ -170,7 +182,8 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
               } else if (e.type === "tool") {
                 put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output: e.output ?? "" })
               } else {
-                costUsd = e.costUsd
+                costUsd = turnCost(e.costUsd, e.cumulative === true, t.sessionCostUsd ?? 0)
+                if (e.cumulative && e.costUsd !== null) t.sessionCostUsd = e.costUsd
                 tokens = e.tokens
               }
             })

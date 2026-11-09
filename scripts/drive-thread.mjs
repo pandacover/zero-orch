@@ -45,7 +45,7 @@ const SAFE = [
   /^node [\w./\\-]+( .*)?$/,
   /^git (status|diff|log|show|add|commit|rev-parse|ls-files)\b/,
   /^singularity (recall|changes)\b/,
-  /^(ls|cat|head|tail|wc|pwd)\b/
+  /^(ls|cat|head|tail|wc|pwd|echo)\b/
 ]
 const decide = (tool, detail) => {
   // A leading `cd "<the project>" &&` is just Claude being explicit about where it is.

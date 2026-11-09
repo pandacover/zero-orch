@@ -116,6 +116,8 @@ export interface ThreadMeta {
   status: "idle" | "running"
   /** The provider's own session or thread id, to continue it. */
   resume: string | null
+  /** What the provider reported that session has cost so far, for providers that report a running total. */
+  sessionCostUsd?: number | undefined
   readonly createdAt: string
   updatedAt: string
 }
