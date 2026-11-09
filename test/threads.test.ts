@@ -5,8 +5,8 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { DEFAULT_SETTINGS, type Item } from "../src/app/Model.ts"
-import { gate } from "../src/app/providers/Claude.ts"
+import { compactionOffered, DEFAULT_SETTINGS, isCompact, type Item, needsCompaction, type Thread } from "../src/app/Model.ts"
+import { cleanTitle, gate, summaryOf } from "../src/app/providers/Claude.ts"
 import type { Provider, TurnInput } from "../src/app/providers/Provider.ts"
 import * as StoreModule from "../src/app/Store.ts"
 import { Store } from "../src/app/Store.ts"
@@ -111,7 +111,7 @@ describe("memory at each task start", () => {
     const layer = Layer.mergeAll(memory, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
     const t = await Effect.gen(function*() {
       const store = yield* Store
-      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: () => {} } })
+      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: () => {} }, nameThread: async () => "" })
       const project = yield* store.addProject(proj)
       const t = threads.create(project, { access: "ask" })
       for (const message of options.messages ?? ["add a retry to the fetch helper"]) yield* threads.turn(t, project, message)
@@ -199,7 +199,7 @@ describe("a running turn", () => {
     const layer = Layer.mergeAll(Singularity.empty, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
     return Effect.gen(function*() {
       const store = yield* Store
-      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub })
+      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub, nameThread: async () => "" })
       const project = yield* store.addProject(proj)
       const t = threads.create(project, { access: "ask" })
       const turn = Effect.runPromise(threads.turn(t, project, "go").pipe(Effect.provide(layer)))
@@ -266,3 +266,220 @@ const threads_pending = (t: { id: string; items?: Array<Item> }) => {
   const ask = (t as { items: Array<Item> }).items.find((i) => i.kind === "permission" && i.state === "pending")
   return ask!.id
 }
+
+describe("titles and compaction", () => {
+  const dirs: Array<string> = []
+  const real = { claude: PROVIDERS.claude, codex: PROVIDERS.codex }
+  afterEach(() => {
+    Object.assign(PROVIDERS, real)
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+  })
+
+  /** Messages in one thread (not a git repo) on a fake provider; `name` stands in for the small model. */
+  const thread = async (options: {
+    messages: ReadonlyArray<string>
+    name?: (message: string, model: string) => Promise<string>
+    settings?: Partial<typeof DEFAULT_SETTINGS>
+    provider?: "claude" | "codex"
+    resume?: string
+    script?: (input: TurnInput) => AsyncGenerator<any, void>
+    between?: (t: Thread) => void
+    compactFirst?: boolean
+    hub?: (event: string, data: any) => void
+  }) => {
+    const home = mkdtempSync(join(tmpdir(), "zero-home-"))
+    const proj = mkdtempSync(join(tmpdir(), "zero-proj-"))
+    dirs.push(home, proj)
+    const given: Array<TurnInput> = []
+    const id = options.provider ?? "claude"
+    PROVIDERS[id] = { ...real[id], turn: (async function*(input: TurnInput) {
+      given.push(input)
+      if (options.script) yield* options.script(input)
+    }) as Provider["turn"] }
+    const layer = Layer.mergeAll(Singularity.empty, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
+    const t = await Effect.gen(function*() {
+      const store = yield* Store
+      yield* store.saveSettings({ ...DEFAULT_SETTINGS, ...options.settings })
+      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: options.hub ?? (() => {}) }, nameThread: options.name ?? (async () => "") })
+      const project = yield* store.addProject(proj)
+      const t = threads.create(project, { provider: id })
+      if (options.resume) t.resume = options.resume
+      for (const m of options.messages) {
+        yield* threads.turn(t, project, m, [], { compactFirst: options.compactFirst === true })
+        options.between?.(t)
+        // Let a title the small model is still working on land.
+        yield* Effect.promise(() => new Promise((r) => setTimeout(r, 5)))
+      }
+      return store.thread(t.id)!
+    }).pipe(Effect.provide(layer), Effect.runPromise)
+    return { t, given }
+  }
+
+  it("has the small model name a new thread from its first message, once", async () => {
+    const asked: Array<[string, string]> = []
+    const { t } = await thread({
+      messages: ["the login test fails on CI about half the time, can you look", "and the signup one?"],
+      name: async (m, model) => (asked.push([m, model]), "Fix flaky login test")
+    })
+    expect(asked).toEqual([["the login test fails on CI about half the time, can you look", "claude-haiku-5-5"]])
+    expect(t.title).toBe("Fix flaky login test")
+  })
+
+  it("keeps the first line when naming is off, or the small model can't answer", async () => {
+    let called = false
+    const off = await thread({ messages: ["add a retry to the fetch helper"], settings: { titles: { auto: false, model: "claude-haiku-5-5" } }, name: async () => (called = true, "Nope") })
+    expect(called).toBe(false)
+    expect(off.t.title).toBe("add a retry to the fetch helper")
+    const failed = await thread({ messages: ["add a retry to the fetch helper"], name: async () => { throw new Error("offline") } })
+    expect(failed.t.title).toBe("add a retry to the fetch helper")
+  })
+
+  it("doesn't name over a title the person gave meanwhile", async () => {
+    let answer!: (s: string) => void
+    const late = new Promise<string>((r) => (answer = r))
+    const { t } = await thread({
+      messages: ["add a retry to the fetch helper"],
+      name: () => late,
+      between: (t) => { t.title = "My own name"; answer("Add fetch retries") }
+    })
+    expect(t.title).toBe("My own name")
+  })
+
+  it("cleans a model's answer into a title", () => {
+    expect(cleanTitle('Title: "Fix flaky login test."\nBecause…')).toBe("Fix flaky login test")
+    expect(cleanTitle("**Add dark mode toggle**")).toBe("Add dark mode toggle")
+    expect(cleanTitle("x".repeat(80))).toHaveLength(58)
+  })
+
+  it("knows /compact", () => {
+    expect(isCompact("/compact")).toBe(true)
+    expect(isCompact("  /compact keep the API notes ")).toBe(true)
+    expect(isCompact("/compaction")).toBe(false)
+    expect(isCompact("please /compact")).toBe(false)
+  })
+
+  it("passes /compact to Claude's session as it is, without memory or a title, and shows the compaction", async () => {
+    const { t, given } = await thread({
+      messages: ["/compact keep the API notes"],
+      resume: "session-1",
+      name: async () => "Should not be named",
+      script: async function*() {
+        yield { type: "compact", trigger: "manual", state: "running" }
+        yield { type: "compact", trigger: "manual", state: "done", preTokens: 151000, postTokens: 12000 }
+      }
+    })
+    expect(given.map((g) => [g.prompt, g.resume])).toEqual([["/compact keep the API notes", "session-1"]])
+    expect(t.title).toBe("New thread")
+    expect(t.items.filter((i) => i.kind === "memory")).toEqual([])
+    const cards = t.items.filter((i) => i.kind === "compact")
+    expect(cards).toMatchObject([{ trigger: "manual", state: "done", preTokens: 151000, postTokens: 12000 }])
+    expect(t.items.at(-1)).toMatchObject({ kind: "turn", outcome: "done" })
+  })
+
+  it("shows a compaction Claude did on its own mid-turn", async () => {
+    const { t } = await thread({
+      messages: ["refactor the parser"],
+      script: async function*() {
+        yield { type: "text", key: "a", delta: "Working on it\n" }
+        yield { type: "compact", trigger: "auto", state: "running" }
+      }
+    })
+    // The turn ended with the compaction still open: it's closed, not left spinning.
+    expect(t.items.filter((i) => i.kind === "compact")).toMatchObject([{ trigger: "auto", state: "done" }])
+  })
+
+  it("says why /compact can't run, instead of sending it as a task", async () => {
+    const fresh = await thread({ messages: ["/compact"] })
+    expect(fresh.given).toEqual([])
+    expect(fresh.t.items.at(-1)).toMatchObject({ kind: "turn", outcome: "failed", error: "Nothing to compact yet: this thread has no session." })
+    const codex = await thread({ messages: ["/compact"], provider: "codex", resume: "thread-1" })
+    expect(codex.given).toEqual([])
+    expect(codex.t.items.at(-1)).toMatchObject({ outcome: "failed", error: expect.stringContaining("compacts its context on its own") })
+    expect(codex.t.status).toBe("idle")
+  })
+
+  it("keeps how full the context is, as the provider reports it", async () => {
+    const { t } = await thread({
+      messages: ["refactor the parser"],
+      script: async function*() {
+        yield { type: "context", used: 700000, limit: 967000 }
+      }
+    })
+    expect(t.context).toEqual({ used: 700000, limit: 967000 })
+    expect(needsCompaction(t.context)).toBe(true)
+    expect(needsCompaction({ used: 100000, limit: 967000 })).toBe(false)
+    expect(needsCompaction(undefined)).toBe(false)
+  })
+
+  it("compacts first and queues the message, then runs it, as one turn", async () => {
+    const queuedWhileCompacting: Array<string | undefined> = []
+    let shown: string | undefined
+    const { t, given } = await thread({
+      messages: ["now add the retry"],
+      resume: "session-1",
+      compactFirst: true,
+      hub: (event, data) => { if (event === "thread" && data.queued) shown = data.queued },
+      script: async function*(input) {
+        if (input.prompt === "/compact") {
+          yield { type: "compact", trigger: "manual", state: "running" }
+          yield { type: "compact", trigger: "manual", state: "done", preTokens: 700000, postTokens: 30000 }
+          yield { type: "usage", costUsd: 0.5, tokens: 10, cumulative: false }
+        } else {
+          yield { type: "text", key: "a", delta: "Added it\n" }
+          yield { type: "usage", costUsd: 0.25, tokens: 5, cumulative: false }
+        }
+      },
+      between: (t) => queuedWhileCompacting.push(t.queued)
+    })
+    expect(given.map((g) => g.prompt)).toEqual(["/compact", "now add the retry"])
+    expect(shown).toBe("now add the retry")
+    expect(queuedWhileCompacting).toEqual([undefined])
+    // The compaction, then the message, then its answer, then one turn that counts both.
+    expect(t.items.map((i) => i.kind)).toEqual(["compact", "user", "assistant", "turn"])
+    expect(t.items.at(-1)).toMatchObject({ kind: "turn", outcome: "done", costUsd: 0.75, tokens: 15 })
+  })
+
+  it("doesn't compact first where it can't: no session yet, or a provider that takes no /compact", async () => {
+    const fresh = await thread({ messages: ["start"], compactFirst: true })
+    expect(fresh.given.map((g) => g.prompt)).toEqual(["start"])
+    const codex = await thread({ messages: ["go on"], provider: "codex", resume: "thread-1", compactFirst: true })
+    expect(codex.given.map((g) => g.prompt)).toEqual(["go on"])
+  })
+
+  it("offers compacting first when the context is filling or the thread sat idle an hour", () => {
+    const at = (iso: string) => ({ kind: "turn", id: "end", at: iso } as unknown as Item)
+    const base = { items: [at("2026-11-09T10:00:00.000Z")] } as unknown as Thread
+    const t0 = Date.parse("2026-11-09T10:00:00.000Z")
+    expect(compactionOffered(base, t0 + 59 * 60_000)).toBe(false)
+    expect(compactionOffered(base, t0 + 60 * 60_000)).toBe(true)
+    expect(compactionOffered({ ...base, context: { used: 700, limit: 1000 } }, t0)).toBe(true)
+    expect(compactionOffered({ items: [] } as unknown as Thread, t0)).toBe(false)
+  })
+
+  it("shows a compaction the moment it starts, sized from the last turn, then fills it in", async () => {
+    let seenBeforeProvider: unknown
+    const { t } = await thread({
+      messages: ["now add the retry"],
+      resume: "session-1",
+      compactFirst: true,
+      hub: (event, data) => { if (event === "item" && data.item.kind === "compact" && seenBeforeProvider === undefined) seenBeforeProvider = data.item },
+      between: () => {},
+      script: async function*(input) {
+        if (input.prompt !== "/compact") return
+        yield { type: "compact", trigger: "manual", state: "running" }
+        yield { type: "compact", trigger: "manual", state: "done", preTokens: 700000, postTokens: 30000, durationMs: 6600, summary: "Kept: the parser plan." }
+      },
+      settings: {}
+    }).catch((e) => { throw e })
+    expect(seenBeforeProvider).toMatchObject({ kind: "compact", state: "running", trigger: "manual" })
+    const cards = t.items.filter((i) => i.kind === "compact")
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ state: "done", preTokens: 700000, postTokens: 30000, durationMs: 6600, summary: "Kept: the parser plan." })
+  })
+
+  it("reads a compaction summary without the model's analysis", () => {
+    expect(summaryOf("<analysis>\nthinking\n</analysis>\n<summary>\n1. Goal: spans\n</summary>")).toBe("1. Goal: spans")
+    expect(summaryOf("<analysis>x</analysis> plain words")).toBe("plain words")
+    expect(summaryOf(undefined)).toBe("")
+  })
+})

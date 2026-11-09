@@ -31,6 +31,8 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
 
 // ---------- state ----------
 const S = {
+  /** Threads where the person turned Compact off; it's on by default whenever it shows. */
+  compactOff: new Set(),
   settings: null,
   projects: [],
   threads: [],
@@ -250,6 +252,8 @@ function renderMain() {
   const main = $("main")
   const r = S.route
   if (r.name === "thread" && S.open) return main.replaceChildren(...threadView(S.open))
+  // Off a thread, its Git panel goes (and stops looking).
+  if (gitPanel) { clearInterval(gitPanel.timer); gitPanel = null }
   if (r.name === "evolution") return main.replaceChildren(evolutionView())
   const project = S.projects.find((p) => p.id === r.projectId) ?? S.projects[0]
   main.replaceChildren(startView(project))
@@ -559,7 +563,7 @@ function startView(project) {
   const box = composer({
     controls: [models.node],
     onSend: async (text) => {
-      const projectId = pick.value
+      const projectId = project.id
       const { provider, model, effort, access } = models.value()
       const t = await api("POST", "threads", { projectId, provider, model, effort, access })
       await api("POST", `threads/${t.id}/messages`, { text })
@@ -572,8 +576,6 @@ function startView(project) {
     box.setAttach(status(p)?.tools !== false, `${providerLabel(p)} can't open files`)
   }
   readyFor(first)
-  const pick = el("select", { class: "select", "aria-label": "Project", title: "Project for the new thread", onchange: () => go(`#/new/${pick.value}`) },
-    S.projects.map((p) => el("option", { value: p.id, selected: p.id === project.id }, p.name)))
   const ready = status(first)?.available
   const list = el("div", { class: "suggest", role: "list" })
   const kinds = el("div", { class: "kinds", role: "tablist", "aria-label": "Kinds of things to ask" })
@@ -589,7 +591,7 @@ function startView(project) {
   }
   paintIdeas()
   return el("div", { class: "main-col" },
-    el("div", { class: "bar bar-quiet" }, el("div", { class: "title-wrap" }), el("div", { class: "pickers" }, pick)),
+    el("div", { class: "bar bar-quiet" }, el("div", { class: "title-wrap" })),
     el("div", { class: "start" }, el("div", { class: "start-inner" },
       el("h1", {}, "What should we do in ", el("em", { text: project.name }), "?"),
       el("p", { class: "lede", text: ready
@@ -656,8 +658,30 @@ function plainText(item) {
   return item.text.replace(ATT, (_, id) => known.get(id)?.name ?? "a file")
 }
 /** A sent message: click it (or Enter on it) to edit it and send it again. */
+/** How many lines of a sent prompt show before Show more. */
+const USER_LINES = 5
 function userMessage(item) {
-  const bubble = el("div", { class: "msg-user", tabindex: "0" }, userNodes(item))
+  // A long prompt shows its first 5 lines; Show more opens the rest (and stays open while the page is).
+  const body = el("div", { class: "msg-user-body" }, userNodes(item))
+  const key = `msg:${item.id}`
+  const more = el("button", { class: "msg-more", type: "button", hidden: true })
+  const bubble = el("div", { class: "msg-user", tabindex: "0" }, body, more)
+  const paintMore = () => {
+    const open = S.expanded.has(key)
+    const lines = parseFloat(getComputedStyle(body).lineHeight) * USER_LINES
+    more.hidden = !(body.scrollHeight > lines + 2)
+    bubble.classList.toggle("clamped", !more.hidden && !open)
+    // Opened in full, it reads in the feed: not stuck to the top, not scrolling inside itself.
+    bubble.parentElement?.classList.toggle("expanded", !more.hidden && open)
+    more.textContent = open ? "Show less" : "Show more"
+    more.setAttribute("aria-expanded", String(open))
+  }
+  more.addEventListener("click", (e) => {
+    e.stopPropagation() // not an edit
+    S.expanded.has(key) ? S.expanded.delete(key) : S.expanded.add(key)
+    paintMore()
+  })
+  new ResizeObserver(paintMore).observe(body)
   const wrap = el("div", { class: "msg msg-u" }, bubble, msgActions(() => plainText(item)))
   const start = () => { if (!wrap.classList.contains("editing")) editMessage(item, wrap, bubble) }
   bubble.addEventListener("click", (e) => {
@@ -957,29 +981,40 @@ function threadView(t) {
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
   const working = el("div", { class: "working", hidden: true }, el("i"), el("i"), el("i"), el("span", { text: "Working" }))
   const scroll = el("div", { class: "scroll" }, list)
+  // Compact: shown when the context is filling. On, the next message waits while the session compacts first.
+  const compact = el("button", { class: "pill-btn compact-toggle", type: "button", role: "switch", onclick: () => {
+    S.compactOff.has(t.id) ? S.compactOff.delete(t.id) : S.compactOff.add(t.id)
+    paintCompact(S.open)
+  } }, el("span", { class: "compact-knob", "aria-hidden": "true" }), el("span", { text: "Compact" }))
   const box = composer({
     running: t.status === "running",
-    controls: [models.node],
-    onSend: (text) => api("POST", `threads/${t.id}/messages`, { text }),
+    controls: [compact, models.node],
+    onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
-  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, composer: box, stick: true, models, title }
+  const queued = el("div", { class: "queued", hidden: true })
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact }
   paintReady(t)
   scroll.addEventListener("scroll", () => { feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60 })
   renderFeed()
   paintWorking()
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight })
+  const git = makeGitPanel(t)
   return [
-    el("div", { class: "bar" },
-      // One line: the project (click it for a new thread there), a middle dot, the thread's title (editable in place).
-      el("div", { class: "title-wrap title-line" },
-        project
-          ? el("button", { class: "title-project", type: "button", title: `New thread in ${project.name}\n${project.path}`, onclick: () => go(`#/new/${project.id}`) }, project.name)
-          : el("span", { class: "title-project gone", text: "removed project" }),
-        el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
-        title)),
-    scroll,
-    el("div", { class: "composer-wrap" }, box.node)
+    el("div", { class: "thread-cols" },
+      el("div", { class: "main-col" },
+        el("div", { class: "bar" },
+          // One line: the project (click it for a new thread there), a middle dot, the thread's title (editable in place).
+          el("div", { class: "title-wrap title-line" },
+            project
+              ? el("button", { class: "title-project", type: "button", title: `New thread in ${project.name}\n${project.path}`, onclick: () => go(`#/new/${project.id}`) }, project.name)
+              : el("span", { class: "title-project gone", text: "removed project" }),
+            el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
+            title)),
+        scroll,
+        el("div", { class: "composer-wrap" }, box.node)),
+      git.node,
+      git.toggle)
   ]
 }
 
@@ -988,6 +1023,37 @@ function paintReady(t) {
   const ready = status(t.provider)?.available === true
   feed.composer.setReady(ready, ready ? "Reply…" : `${providerLabel(t.provider)} is turned off in Settings`)
   feed.composer.setAttach(status(t.provider)?.tools !== false, `${providerLabel(t.provider)} can't open files`)
+  paintCompact(t)
+}
+
+/**
+ * When the context is this full (of where the provider compacts on its own), Compact shows in the
+ * composer. The server keeps the same number (COMPACT_SOON, src/app/Model.ts).
+ */
+const COMPACT_SOON = 0.7
+const needsCompaction = (t) => !!t?.context && t.context.limit > 0 && t.context.used >= COMPACT_SOON * t.context.limit
+/** A thread left this long has a cold cache: compacting first makes the next turn cheaper. Same as IDLE_COMPACT_MS on the server. */
+const IDLE_COMPACT_MS = 60 * 60 * 1000
+const idleMs = (t) => { const at = t?.items?.at(-1)?.at; return at ? Date.now() - Date.parse(at) : 0 }
+const idleLong = (t) => t?.status !== "running" && idleMs(t) >= IDLE_COMPACT_MS
+/** Compact shows only for a provider that takes `/compact`, in a session whose context is filling or that has sat idle an hour. */
+const compactShown = (t) => !!t && status(t.provider)?.compaction === "manual" && !!t.resume && (needsCompaction(t) || idleLong(t))
+const compactOn = (t) => compactShown(t) && !S.compactOff.has(t.id)
+function paintCompact(t) {
+  if (!feed?.compact || !t) return
+  const shown = compactShown(t)
+  feed.compact.hidden = !shown
+  if (!shown) return
+  const on = !S.compactOff.has(t.id)
+  const hours = Math.floor(idleMs(t) / IDLE_COMPACT_MS)
+  const why = needsCompaction(t)
+    ? `Context ${Math.round((t.context.used / t.context.limit) * 100)}% full.`
+    : `Idle for ${hours} hour${hours === 1 ? "" : "s"}: the next message would reload the whole thread.`
+  feed.compact.setAttribute("aria-checked", String(on))
+  feed.compact.classList.toggle("on", on)
+  feed.compact.title = on
+    ? `${why} Your next message waits while ${providerLabel(t.provider)} compacts this thread, then runs. Click to send as is.`
+    : `${why} Your next message is sent as is; ${providerLabel(t.provider)} still compacts on its own when the context is full. Click to compact first.`
 }
 
 function paintWorking() {
@@ -995,9 +1061,19 @@ function paintWorking() {
   const running = S.open.status === "running"
   const asking = S.open.items.some((i) => i.kind === "permission" && i.state === "pending")
   feed.working.hidden = !running || asking
-  feed.list.append(feed.working)
+  // While a compaction runs, the working line says so (its card in the feed shows the detail).
+  const compacting = running && S.open.items.some((i) => i.kind === "compact" && i.state === "running")
+  feed.working.querySelector("span").textContent = compacting ? "Compacting context" : "Working"
+  // A message waiting for the session to compact first.
+  feed.queued.hidden = !S.open.queued
+  if (S.open.queued && feed.queued.dataset.text !== S.open.queued) {
+    feed.queued.dataset.text = S.open.queued
+    feed.queued.replaceChildren(el("span", { class: "queued-label", text: "Queued · runs once the context is compacted" }), el("div", { class: "queued-text", text: S.open.queued }))
+  }
+  feed.list.append(feed.queued, feed.working)
   feed.composer.setBusy(running)
   feed.models.setBusy(running)
+  paintCompact(S.open)
 }
 const follow = () => { if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight }
 
@@ -1057,7 +1133,7 @@ function renderFeed() {
     reconcile(section, nodes)
     return section
   })
-  reconcile(feed.list, [...sections, feed.working])
+  reconcile(feed.list, [...sections, feed.queued, feed.working])
   // Only a turn's last agent response (its answer, not the narration between tool calls) has the
   // action row, and the turn's details (model, time, cost, tokens) sit in that row beside Copy.
   for (const [id, { node }] of feed.cache) {
@@ -1120,12 +1196,45 @@ function paintGroup(g, key) {
   g.node.className = `tool-group ${state}${open ? " open" : ""}`
   g.body.inert = !open
   g.head.setAttribute("aria-expanded", String(open))
-  g.head.title = last.detail ?? ""
+  const line = (item) => el("span", { class: "reel-line" },
+    el("span", { class: "tool-name", text: item.kind === "tool" ? item.name : item.tool }),
+    el("span", { class: "tool-detail", text: rel(item.detail) }))
+  // The reel stays put across repaints, so a call finishing mid-spin doesn't cut the spin short.
+  if (!g.reel) g.win = el("span", { class: "reel-window" }, (g.reel = el("span", { class: "reel" })))
   g.head.replaceChildren(
     el("span", { class: "tool-state", "aria-label": state }),
-    el("span", { class: "tool-name", text: last.kind === "tool" ? last.name : last.tool }),
-    el("span", { class: "tool-detail", text: rel(last.detail) }),
+    g.win,
     el("span", { class: "tool-count", text: `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}` }))
+  // A new call spins the row like a lottery drum and lands on it; the same call just repaints.
+  const was = g.shown === undefined ? undefined : g.items.find((i) => i.id === g.shown)
+  const spin = was !== undefined && g.shown !== last.id && !matchMedia("(prefers-reduced-motion: reduce)").matches
+  g.shown = last.id
+  if (spin) spinReel(g, [was, ...blurs(tools, last), last].map(line))
+  else if (!g.spinning) g.reel.replaceChildren(line(last))
+  else g.landing = line(last) // lands on the latest text once the spin ends
+}
+/** A few other calls from the run (or the same one again) for the drum to flick past. */
+function blurs(tools, last) {
+  const pool = tools.filter((i) => i.id !== last.id)
+  return Array.from({ length: 4 }, () => pool[Math.floor(Math.random() * pool.length)] ?? last)
+}
+/** Roll the drum from the first line to the last: fast and blurred, then easing to a stop with a small bounce. */
+function spinReel(g, lines) {
+  g.spinning?.cancel()
+  g.landing = lines.at(-1)
+  g.reel.replaceChildren(...lines)
+  const run = g.reel.animate([
+    { transform: "translateY(0)", filter: "blur(0)" },
+    { offset: 0.2, filter: "blur(1.4px)" },
+    { offset: 0.75, filter: "blur(0.4px)" },
+    { transform: `translateY(-${((lines.length - 1) / lines.length) * 100}%)`, filter: "blur(0)" }
+  ], { duration: 720, easing: "cubic-bezier(.12,.75,.22,1.12)" })
+  g.spinning = run
+  run.onfinish = () => {
+    if (g.spinning !== run) return
+    g.spinning = null
+    g.reel.replaceChildren(g.landing)
+  }
 }
 function upsertItem(item) {
   const t = S.open
@@ -1173,7 +1282,7 @@ function renderItem(item) {
       const open = S.expanded.has(item.id)
       const out = el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
       const node = el("div", { class: `tool ${item.status}${open ? " open" : ""}` })
-      const row = el("button", { class: "tool-row", type: "button", "aria-expanded": String(open), title: item.detail, onclick: () => {
+      const row = el("button", { class: "tool-row", type: "button", "aria-expanded": String(open), onclick: () => {
         const now = !node.classList.contains("open")
         node.classList.toggle("open", now)
         out.inert = !now
@@ -1202,6 +1311,7 @@ function renderItem(item) {
       // A recall shows what singularity handed the agent, word for word.
       return el("div", { class: `mem ${item.action}` }, head, item.text ? el("pre", { class: "mem-text", text: item.text }) : null)
     }
+    case "compact": return compactCard(item)
     case "turn": {
       if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
       return el("div", { class: "turn-meta" }, turnMeta(item))
@@ -1209,6 +1319,39 @@ function renderItem(item) {
   }
   return el("div")
 }
+/**
+ * A compaction, as it happens: while it runs, a moving bar, how much it's summarizing and for how long;
+ * once done, how much smaller the context got, how long it took, and the summary the session goes on from.
+ */
+function compactCard(item) {
+  const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k` : String(n))
+  const why = item.trigger === "auto" ? `${providerLabel(S.open?.provider)} compacted on its own as the context filled` : "Compacted as asked"
+  const head = (title, ...rest) => el("div", { class: "compact-head" }, el("span", { class: "compact-icon", "aria-hidden": "true" }), el("b", { text: title }), ...rest)
+  if (item.state === "running") {
+    const size = item.preTokens !== null ? `Summarizing about ${k(item.preTokens)} tokens of this thread` : "Summarizing this thread so far"
+    return el("div", { class: "compact-card running", role: "status", "aria-live": "polite" },
+      head("Compacting context", el("span", { class: "compact-time", "data-since": item.at, text: elapsed(item.at) })),
+      el("div", { class: "compact-bar", "aria-hidden": "true" }, el("i")),
+      el("div", { class: "compact-sub", text: `${size}. ${item.trigger === "auto" ? "Claude started this on its own; the turn goes on after." : "Your next step waits for it."}` }))
+  }
+  if (item.state === "failed") {
+    return el("div", { class: "compact-card failed", role: "status" }, head("Compaction failed"), el("div", { class: "compact-sub", text: item.error || "The provider didn't finish compacting. The thread goes on as it was." }))
+  }
+  const facts = [
+    item.preTokens !== null && item.postTokens !== null ? `${k(item.preTokens)} → ${k(item.postTokens)} tokens` : null,
+    item.preTokens && item.postTokens !== null ? `${Math.max(0, Math.round((1 - item.postTokens / item.preTokens) * 100))}% smaller` : null,
+    item.durationMs ? `${(item.durationMs / 1000).toFixed(1)}s` : null
+  ].filter(Boolean)
+  return el("div", { class: "compact-card done", role: "status" },
+    head("Context compacted", el("span", { class: "compact-facts", text: facts.join(" · ") })),
+    el("div", { class: "compact-sub", text: `${why}. What came before is now this summary.` }),
+    item.summary ? el("details", { class: "compact-summary" }, el("summary", { text: "What Claude kept" }), el("div", { class: "prose" }, mdNodes(item.summary))) : null)
+}
+/** m:ss since an ISO time. */
+const elapsed = (iso) => { const s = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` }
+// A running compaction's clock ticks every second.
+setInterval(() => { for (const n of document.querySelectorAll(".compact-time[data-since]")) n.textContent = elapsed(n.dataset.since) }, 1000)
+
 /** What singularity told the agent when it asked mid-task: the question, the commit it pointed to, and its words. */
 function memoryCard(item) {
   const command = /singularity (recall|changes)\b.*/.exec(item.detail ?? "")?.[0] ?? item.detail
@@ -1219,10 +1362,430 @@ function memoryCard(item) {
   const asked = command.replace(/^singularity recall\s*/, "").replace(/^(["'])(.*)\1$/, "$2")
   const label = !recall ? "Agent listed memory" : commit ? "Agent recalled" : "Agent asked memory"
   const title = !recall ? "the changes stored in this repo" : subject ? `${subject} (asked: ${asked})` : `asked: ${asked}`
-  const head = el("div", { class: "mem-head", title: command }, el("span", { class: "mem-label", text: label }), commit ? el("code", { text: commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: title }))
+  const head = el("div", { class: "mem-head" }, el("span", { class: "mem-label", text: label }), commit ? el("code", { text: commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: title }))
   return el("div", { class: `mem ${commit ? "recalled" : "checked"}` }, head, el("pre", { class: "mem-text", text: out }))
 }
 const verb = (tool) =>({ Bash: "run a command", Edit: "edit a file", Write: "write a file", MultiEdit: "edit a file", NotebookEdit: "edit a notebook" })[tool] ?? `use ${tool}`
+
+// ---------- git panel: a right sidebar with the thread's branch and its pull request ----------
+const BRANCH_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="4.5" r="1.5"/><path d="M4.5 5v6M11.5 6c0 3.5-7 2.5-7 5"/>'
+const PR_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7M8.5 3 7 4.5 8.5 6"/>'
+const REFRESH_PATHS = '<path d="M13.2 8A5.2 5.2 0 1 1 11.6 4.3M13.2 2.3v3.2H10"/>'
+const OUT_PATHS = '<path d="M9.5 2.5h4v4M13.5 2.5 8 8M6.5 3.5h-3v9h9v-3"/>'
+const GIT = { min: 300, max: 680, base: 380 }
+/** The one panel on screen (the open thread's), or null. */
+let gitPanel = null
+
+const prState = (pr) => (pr.state === "OPEN" && pr.isDraft ? "draft" : pr.state.toLowerCase())
+const PR_STATE_LABEL = { open: "Open", draft: "Draft", merged: "Merged", closed: "Closed" }
+const CHECK_MARK = { passed: "✓", failed: "×", running: "", pending: "", skipped: "–", cancelled: "⊘", neutral: "–" }
+const REVIEW_LABEL = { APPROVED: "Approved", CHANGES_REQUESTED: "Changes requested", REVIEW_REQUIRED: "Review required" }
+const MERGE_STATE = {
+  CLEAN: "Ready to merge", BLOCKED: "Merging is blocked", BEHIND: "Behind its base", DIRTY: "Has conflicts",
+  UNSTABLE: "Some checks aren't passing", DRAFT: "Draft", HAS_HOOKS: "Ready to merge (hooks)", UNKNOWN: ""
+}
+/** A `git status --short` code in words. */
+const changeWord = (s) => s === "??" ? "new" : /D/.test(s) ? "deleted" : /R/.test(s) ? "renamed" : /A/.test(s) ? "added" : /U/.test(s) || s === "AA" || s === "DD" ? "conflict" : "modified"
+/** ago() as words: "just now", "5m ago". */
+const agoText = (iso) => { const a = ago(iso); return a === "now" ? "just now" : `${a} ago` }
+/**
+ * GitHub text mixes markdown with HTML (templates' comments, <details>, links, badges). The common tags
+ * become the markdown md() reads and the rest are dropped; md() escapes everything, so nothing runs.
+ */
+const githubMd = (s) => s
+  .replace(/\r\n/g, "\n")
+  .replace(/<!--[\s\S]*?-->/g, "")
+  .replace(/^\[\/\/\]: #.*$/gm, "")
+  .replace(/<br\s*\/?>/gi, "\n")
+  .replace(/<summary>([\s\S]*?)<\/summary>/gi, "\n$1\n")
+  .replace(/<a\s[^>]*?href="(https?:[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_, url, label) => `[${label.replace(/<[^>]+>/g, "").trim() || url}](${url})`)
+  .replace(/<\/?(?:code|tt)>/gi, "`")
+  .replace(/<\/?(?:strong|b)>/gi, "**")
+  .replace(/<li>/gi, "\n- ")
+  .replace(/<img\s[^>]*?alt="([^"]*)"[^>]*>/gi, "$1")
+  .replace(/<\/?[a-z][a-z0-9-]*(?:\s[^>]*)?\/?>/gi, "")
+  .replace(/!\[([^\]]*)\]\((?:https?:[^)\s]+)\)/g, "$1")
+  .replace(/\n\s*\n(?=- )/g, "\n")
+  .replace(/\n{3,}/g, "\n\n")
+  .trim()
+const prose = (body) => mdNodes(githubMd(body))
+
+function makeGitPanel(t) {
+  if (gitPanel) clearInterval(gitPanel.timer)
+  // One toggle for open and closed, fixed at the window's top right like the left sidebar's: it never moves.
+  const badge = el("span", { class: "git-badge", hidden: true })
+  const toggle = el("button", { class: "icon-btn git-toggle", type: "button", "aria-controls": "git-panel", onclick: () => setGitOpen(!gitOpenNow()),
+    html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BRANCH_PATHS}</svg>` }, badge)
+  const body = el("div", { class: "git-body" }, el("p", { class: "git-empty", text: "Loading…" }))
+  const refresh = el("button", { class: "icon-btn git-refresh", type: "button", title: "Refresh", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${REFRESH_PATHS}</svg>`, onclick: () => loadGit() })
+  const resize = el("div", { class: "git-resize", role: "separator", "aria-orientation": "vertical", "aria-label": "Resize Git panel", tabindex: "0", title: "Drag to resize · double-click to reset" })
+  const node = el("aside", { class: "git-panel", id: "git-panel", "aria-label": "Git", hidden: !load("gitOpen", false) },
+    resize,
+    el("div", { class: "git-head" },
+      el("h2", { text: "Git" }),
+      el("span", { class: "git-at" }),
+      refresh),
+    body)
+  gitPanel = { node, body, toggle, badge, refresh, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "", folds: new Map() }
+  setGitWidth(load("gitWidth", GIT.base), false)
+  wireGitResize(resize)
+  paintGitToggle()
+  loadGit()
+  // While it's open, look again: often while checks run, now and then otherwise.
+  gitPanel.timer = setInterval(() => {
+    const g = gitPanel
+    if (!g || node.hidden || document.hidden || g.loading) return
+    const waiting = g.data?.pr?.checks.some((c) => c.state === "running" || c.state === "pending")
+    if (Date.now() - g.at > (waiting ? 15_000 : 90_000)) loadGit()
+  }, 5_000)
+  return { node, toggle }
+}
+const gitOpenNow = () => !!gitPanel && !gitPanel.node.hidden
+function setGitOpen(open) {
+  if (!gitPanel) return
+  gitPanel.node.hidden = !open
+  save("gitOpen", open)
+  paintGitToggle()
+  if (open && Date.now() - gitPanel.at > 10_000) loadGit()
+}
+function setGitWidth(w, persist = true) {
+  const width = Math.round(Math.min(GIT.max, Math.max(GIT.min, w)))
+  document.querySelector(".shell").style.setProperty("--git-w", `${width}px`)
+  if (persist) save("gitWidth", width)
+}
+function wireGitResize(handle) {
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    handle.setPointerCapture(e.pointerId)
+    const right = handle.parentElement.getBoundingClientRect().right
+    document.body.classList.add("resizing")
+    const move = (ev) => setGitWidth(right - ev.clientX, false)
+    const up = (ev) => {
+      handle.removeEventListener("pointermove", move)
+      handle.removeEventListener("pointerup", up)
+      handle.removeEventListener("pointercancel", up)
+      document.body.classList.remove("resizing")
+      setGitWidth(right - ev.clientX)
+    }
+    handle.addEventListener("pointermove", move)
+    handle.addEventListener("pointerup", up)
+    handle.addEventListener("pointercancel", up)
+  })
+  handle.addEventListener("dblclick", () => setGitWidth(GIT.base))
+  handle.addEventListener("keydown", (e) => {
+    const now = handle.parentElement.getBoundingClientRect().width
+    const step = e.shiftKey ? 48 : 16
+    const next = { ArrowLeft: now + step, ArrowRight: now - step }[e.key]
+    if (next === undefined) return
+    e.preventDefault()
+    setGitWidth(next)
+  })
+}
+
+/** The Git toggle says what it will do, and a dot on it gives the PR's state (and its checks') at a glance. */
+function paintGitToggle() {
+  const g = gitPanel
+  if (!g) return
+  const open = !g.node.hidden
+  g.toggle.classList.toggle("on", open)
+  g.toggle.setAttribute("aria-expanded", String(open))
+  const d = g.data
+  const pr = d?.pr
+  g.badge.hidden = !pr
+  if (pr) {
+    const failing = pr.checks.some((c) => c.state === "failed")
+    const running = pr.checks.some((c) => c.state === "running" || c.state === "pending")
+    g.badge.dataset.state = prState(pr)
+    g.badge.dataset.checks = failing ? "failed" : running ? "running" : pr.checks.length ? "passed" : ""
+  }
+  const branch = d?.repo ? d.branch || "detached HEAD" : S.open?.branch || ""
+  const label = `${open ? "Hide" : "Show"} Git`
+  g.toggle.setAttribute("aria-label", label)
+  g.toggle.title = [label, branch, pr ? `PR #${pr.number} · ${PR_STATE_LABEL[prState(pr)]}` : ""].filter(Boolean).join("\n")
+}
+
+async function loadGit() {
+  const g = gitPanel
+  if (!g || g.loading) return
+  g.loading = true
+  g.refresh.classList.add("spinning")
+  try {
+    const data = await api("GET", `threads/${g.threadId}/git`)
+    if (gitPanel !== g) return
+    g.data = data
+    g.error = ""
+  } catch (e) {
+    if (gitPanel !== g) return
+    g.error = e.message
+  } finally {
+    g.loading = false
+    g.at = Date.now()
+    g.refresh.classList.remove("spinning")
+  }
+  paintGitToggle()
+  paintGit()
+}
+
+/** Run one of the panel's actions; the panel looks again after. */
+async function gitAction(kind, body, done = "") {
+  const g = gitPanel
+  if (!g) return false
+  try {
+    await api("POST", `threads/${g.threadId}/git/${kind}`, body)
+    if (done) toast(done)
+    loadGit()
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+/** Put words in the composer for the agent: the person reads them and sends. */
+function askAgent(text) {
+  if (!feed?.composer) return
+  feed.composer.fill(text)
+  if (narrow.matches || innerWidth < 1100) setGitOpen(false)
+}
+
+function paintGit() {
+  const g = gitPanel
+  if (!g) return
+  const d = g.data
+  g.node.querySelector(".git-at").textContent = g.at ? `updated ${agoText(new Date(g.at).toISOString())}` : ""
+  // Keep where the person was: a comment half-written and the scroll position.
+  const draft = g.body.querySelector(".git-comment textarea")
+  if (draft) g.draft = draft.value
+  const top = g.body.scrollTop
+  if (!d) return g.body.replaceChildren(el("p", { class: "git-empty", text: g.error || "Loading…" }))
+  if (!d.repo) {
+    return g.body.replaceChildren(el("div", { class: "git-empty" },
+      el("b", { text: "Not a git repository" }),
+      el("p", { text: "This thread's project folder isn't in git, so there's no branch or pull request to show." })))
+  }
+  const kids = [
+    g.error ? el("p", { class: "git-note warn", text: g.error }) : null,
+    branchCard(d),
+    d.pr ? prCard(d.pr) : noPrCard(d),
+    ...(d.pr ? prSections(d.pr) : []),
+    gitSec("commits", d.pr ? "Commits on this branch" : "Commits", d.commits.length, d.commits.length
+      ? el("ol", { class: "git-list" }, d.commits.map((c) => el("li", { class: "git-commit" },
+        el("code", { class: "git-sha", text: c.sha.slice(0, 7), title: c.sha }),
+        el("span", { class: "git-subject", text: c.subject, title: c.subject }),
+        el("span", { class: "git-when", text: ago(c.at), title: `${c.author} · ${new Date(c.at).toLocaleString()}` }))))
+      : el("p", { class: "git-none", text: "No commits yet." })),
+    gitSec("changes", d.current && d.current !== d.branch ? `Uncommitted on ${d.current}` : "Uncommitted changes", d.changes.length, d.changes.length
+      ? el("ul", { class: "git-list" }, d.changes.map((c) => el("li", { class: "git-file" },
+        el("span", { class: `git-chg chg-${changeWord(c.status)}`, text: changeWord(c.status), title: `git status: ${c.status}` }),
+        el("span", { class: "git-path", text: c.path, title: c.path }))))
+      : el("p", { class: "git-none", text: "The working tree is clean." }), d.changes.length > 0 && d.changes.length <= 30)
+  ]
+  g.body.replaceChildren(...kids.filter(Boolean))
+  // A section the person folded or unfolded stays that way through refreshes.
+  for (const s of g.body.querySelectorAll("details.git-sec")) {
+    if (g.folds.has(s.dataset.key)) s.open = g.folds.get(s.dataset.key)
+    s.addEventListener("toggle", () => g.folds.set(s.dataset.key, s.open))
+  }
+  const ta = g.body.querySelector(".git-comment textarea")
+  if (ta && g.draft) ta.value = g.draft
+  g.body.scrollTop = top
+}
+
+/** A section that folds: a title, a count, then its content. */
+function gitSec(key, title, count, content, openByDefault = true) {
+  return el("details", { class: "git-sec", "data-key": key, open: openByDefault },
+    el("summary", {}, el("span", { text: title }), count !== null && count !== undefined ? el("span", { class: "git-count", text: String(count) }) : null),
+    el("div", { class: "git-sec-body" }, content))
+}
+
+function branchCard(d) {
+  const facts = []
+  if (d.upstream) {
+    facts.push(el("span", { class: "git-fact", title: `Tracks ${d.upstream}` }, d.upstream))
+    if (d.ahead) facts.push(el("span", { class: "git-fact ahead", title: `${d.ahead} commit${d.ahead === 1 ? "" : "s"} not pushed` }, `↑${d.ahead}`))
+    if (d.behind) facts.push(el("span", { class: "git-fact", title: `${d.behind} commit${d.behind === 1 ? "" : "s"} on ${d.upstream} not here` }, `↓${d.behind}`))
+    if (!d.ahead && !d.behind) facts.push(el("span", { class: "git-fact", text: "up to date" }))
+  } else if (d.branch) {
+    facts.push(el("span", { class: "git-fact", text: "not pushed" }))
+  }
+  const canPush = d.branch && (!d.upstream || d.ahead > 0)
+  return el("div", { class: "git-card git-branch" },
+    el("div", { class: "git-branch-line" },
+      icon(BRANCH_PATHS, "git-branch-ico"),
+      el("code", { class: "git-branch-name", text: d.branch || "detached HEAD", title: d.branch }),
+      canPush ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("push", { branch: d.branch }, `Pushed ${d.branch}.`)) }, "Push") : null),
+    facts.length ? el("div", { class: "git-facts" }, facts) : null,
+    d.current && d.branch !== d.current
+      ? el("p", { class: "git-note", text: `The project is on ${d.current} now; this thread last worked on ${d.branch}.` })
+      : null)
+}
+
+function noPrCard(d) {
+  const baseName = d.base?.replace(/^origin\//, "") ?? ""
+  if (!d.gh.ok) return el("div", { class: "git-card" }, el("p", { class: "git-note", text: d.gh.detail || "GitHub isn't reachable from here." }))
+  const onBase = !d.branch || d.branch === baseName
+  return el("div", { class: "git-card git-nopr" },
+    el("div", { class: "git-nopr-line" }, icon(PR_PATHS, "git-pr-ico"), el("span", { text: "No pull request yet" })),
+    onBase
+      ? el("p", { class: "git-note", text: d.branch ? `${d.branch} is the default branch; a pull request comes from a branch of its own.` : "Check out a branch to open a pull request." })
+      : el("div", { class: "git-actions" },
+        el("button", { class: "btn btn-primary btn-xs", type: "button", onclick: () => createPr(d) }, d.upstream ? "Create pull request" : "Push and create pull request"),
+        el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(`Open a pull request for the branch ${d.branch}${baseName ? ` into ${baseName}` : ""}: push it if needed, and write a clear title and description from its commits.`) }, "Ask the agent")))
+}
+
+async function createPr(d) {
+  const baseName = d.base?.replace(/^origin\//, "") ?? ""
+  const first = d.commits.at(-1)?.subject ?? d.branch
+  const body = el("div", {},
+    el("label", { class: "field" }, "Title", el("input", { name: "title", value: d.commits.length === 1 ? d.commits[0].subject : first, autocomplete: "off" })),
+    el("label", { class: "field" }, "Description", el("textarea", { name: "body", rows: "7", placeholder: "What changed, and why" },
+      d.commits.length > 1 ? d.commits.slice().reverse().map((c) => `- ${c.subject}`).join("\n") : "")),
+    el("label", { class: "field" }, "Into", el("input", { name: "base", value: baseName, placeholder: "The repository's default branch", autocomplete: "off", spellcheck: "false" })),
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "draft" }), "Open as a draft"))
+  if (!(await dialog({ title: `Pull request for ${d.branch}`, text: d.upstream ? "" : `${d.branch} is pushed to origin first.`, ok: "Create pull request", body }))) return
+  const v = (n) => body.querySelector(`[name=${n}]`)
+  await gitAction("create", { branch: d.branch, base: v("base").value.trim(), title: v("title").value, body: v("body").value, draft: v("draft").checked }, "Pull request created.")
+}
+
+function prCard(pr) {
+  const state = prState(pr)
+  const pills = []
+  if (pr.reviewDecision && REVIEW_LABEL[pr.reviewDecision]) pills.push(el("span", { class: `git-pill review-${pr.reviewDecision.toLowerCase()}`, text: REVIEW_LABEL[pr.reviewDecision] }))
+  if (state === "open" && MERGE_STATE[pr.mergeState]) pills.push(el("span", { class: `git-pill merge-${pr.mergeState.toLowerCase()}`, text: MERGE_STATE[pr.mergeState] }))
+  for (const l of pr.labels) pills.push(el("span", { class: "git-pill label", text: l }))
+  const actions = [
+    el("a", { class: "btn btn-quiet btn-xs", href: pr.url, target: "_blank", rel: "noopener noreferrer" }, icon(OUT_PATHS), "GitHub")
+  ]
+  if (pr.state === "OPEN") {
+    actions.push(pr.isDraft
+      ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("ready", { number: pr.number }, "Marked ready for review.")) }, "Ready for review")
+      : el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("ready", { number: pr.number, draft: true }, "Converted to a draft.")) }, "Convert to draft"))
+    actions.push(el("button", { class: "btn btn-primary btn-xs", type: "button", disabled: pr.isDraft, title: pr.isDraft ? "A draft can't be merged" : null, onclick: () => mergePr(pr) }, "Merge…"))
+  }
+  return el("div", { class: `git-card git-pr pr-${state}` },
+    el("div", { class: "git-pr-top" },
+      el("span", { class: `git-state st-${state}` }, icon(PR_PATHS), PR_STATE_LABEL[state] ?? pr.state),
+      el("span", { class: "git-when", text: state === "merged" && pr.mergedAt ? `merged ${agoText(pr.mergedAt)}` : `updated ${agoText(pr.updatedAt)}` })),
+    el("a", { class: "git-pr-title", href: pr.url, target: "_blank", rel: "noopener noreferrer" }, el("span", { class: "git-pr-num", text: `#${pr.number}` }), " ", pr.title),
+    el("div", { class: "git-pr-meta" },
+      el("span", { text: pr.author }),
+      el("span", { class: "git-refs" }, el("code", { text: pr.base }), " ← ", el("code", { text: pr.head }))),
+    el("div", { class: "git-pr-meta" },
+      el("span", { class: "git-add", text: `+${pr.additions}` }),
+      el("span", { class: "git-del", text: `−${pr.deletions}` }),
+      el("span", { text: `${pr.changedFiles} file${pr.changedFiles === 1 ? "" : "s"}` }),
+      pr.reviewers.length ? el("span", { text: `review asked of ${pr.reviewers.join(", ")}` }) : null),
+    pills.length ? el("div", { class: "git-pills" }, pills) : null,
+    el("div", { class: "git-actions" }, actions))
+}
+
+async function mergePr(pr) {
+  const body = el("div", {},
+    el("label", { class: "field" }, "How", el("select", { class: "select", name: "method" },
+      el("option", { value: "squash" }, "Squash and merge"),
+      el("option", { value: "merge" }, "Create a merge commit"),
+      el("option", { value: "rebase" }, "Rebase and merge"))),
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "delete" }), `Delete ${pr.head} after`))
+  if (!(await dialog({ title: `Merge #${pr.number} into ${pr.base}?`, text: pr.title, ok: "Merge", body }))) return
+  await gitAction("merge", { number: pr.number, method: body.querySelector("[name=method]").value, deleteBranch: body.querySelector("[name=delete]").checked }, `Merged #${pr.number}.`)
+}
+
+/** Checks in the order they matter: what failed, what's still going, then what passed or didn't run. */
+const CHECK_ORDER = ["failed", "running", "pending", "cancelled", "passed", "neutral", "skipped"]
+const QUIET_CHECK = new Set(["passed", "neutral", "skipped"])
+function prSections(pr) {
+  const checks = [...pr.checks].sort((a, b) => CHECK_ORDER.indexOf(a.state) - CHECK_ORDER.indexOf(b.state))
+  // Many checks: the ones that passed or were skipped fold away behind a button.
+  const fold = checks.length > 10 && !gitPanel?.allChecks
+  const quiet = fold ? checks.filter((c) => QUIET_CHECK.has(c.state)) : []
+  const shown = fold ? checks.filter((c) => !QUIET_CHECK.has(c.state)) : checks
+  const count = (s) => checks.filter((c) => c.state === s).length
+  const failed = checks.filter((c) => c.state === "failed")
+  const runs = [...new Set(failed.map((c) => c.runId).filter(Boolean))]
+  const summary = [["passed", "passed"], ["failed", "failed"], ["running", "running"], ["pending", "waiting"], ["skipped", "skipped"], ["cancelled", "cancelled"]]
+    .map(([s, w]) => [count(s), w, s]).filter(([n]) => n > 0)
+  const checksSec = gitSec("checks", "Checks", checks.length, checks.length
+    ? [
+      el("p", { class: "git-check-sum" }, summary.map(([n, w, s]) => el("span", { class: `sum-${s}`, text: `${n} ${w}` }))),
+      el("ul", { class: "git-list" }, shown.map((c) => el("li", { class: `git-check ck-${c.state}` },
+        el("span", { class: "ck-mark", "aria-label": c.state, title: c.state, text: CHECK_MARK[c.state] }),
+        c.url ? el("a", { class: "ck-name", href: c.url, target: "_blank", rel: "noopener noreferrer", title: c.workflow ? `${c.workflow} / ${c.name}` : c.name }, c.workflow ? el("span", { class: "ck-wf", text: `${c.workflow} / ` }) : null, c.name)
+          : el("span", { class: "ck-name", text: c.name }),
+        el("span", { class: "git-when", text: c.completedAt && c.startedAt ? took(c.startedAt, c.completedAt) : c.state === "running" && c.startedAt ? `${ago(c.startedAt)}` : "" })))),
+      quiet.length
+        ? el("button", { class: "git-more", type: "button", onclick: () => { gitPanel.allChecks = true; paintGit() } }, `Show ${quiet.length} more (passed or skipped)`)
+        : null,
+      failed.length
+        ? el("div", { class: "git-actions" },
+          runs.length ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, async () => { for (const id of runs) if (!(await gitAction("rerun", { runId: id }))) return; toast(`Re-running ${runs.length === 1 ? "the failed jobs" : `${runs.length} runs' failed jobs`}.`) }) }, "Re-run failed") : null,
+          el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(fixChecksPrompt(pr, failed)) }, "Ask the agent to fix"))
+        : null
+    ]
+    : el("p", { class: "git-none", text: "No checks ran on this pull request." }), true)
+  const description = gitSec("description", "Description", null, pr.body.trim()
+    ? el("div", { class: "prose git-prose" }, prose(pr.body))
+    : el("p", { class: "git-none", text: "No description." }), true)
+  const notes = pr.notes
+  const conversation = gitSec("conversation", "Conversation", notes.length, [
+    notes.length
+      ? el("ol", { class: "git-notes" }, notes.map(noteNode))
+      : el("p", { class: "git-none", text: "No comments or reviews yet." }),
+    notes.some((n) => n.kind === "inline" || n.state === "CHANGES_REQUESTED" || n.kind === "comment")
+      ? el("div", { class: "git-actions" }, el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(addressPrompt(pr)) }, "Ask the agent to address these"))
+      : null,
+    pr.state !== "CLOSED" ? commentBox(pr) : null
+  ], true)
+  const files = gitSec("files", "Files changed", pr.files.length, el("ul", { class: "git-list" }, pr.files.map((f) => el("li", { class: "git-file" },
+    el("span", { class: "git-path", text: f.path, title: f.path }),
+    el("span", { class: "git-add", text: `+${f.additions}` }),
+    el("span", { class: "git-del", text: `−${f.deletions}` })))), pr.files.length <= 20)
+  return [checksSec, description, conversation, files]
+}
+const took = (a, b) => {
+  const s = Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 1000))
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+}
+
+function noteNode(n) {
+  const what = n.kind === "inline"
+    ? el("span", { class: "note-where" }, "on ", el("code", { text: `${n.path}${n.line ? `:${n.line}` : ""}` }))
+    : n.kind === "review"
+      ? el("span", { class: `note-verdict v-${(n.state || "").toLowerCase()}`, text: ({ APPROVED: "approved", CHANGES_REQUESTED: "asked for changes", COMMENTED: "reviewed", DISMISSED: "review dismissed" })[n.state] ?? "reviewed" })
+      : null
+  return el("li", { class: `git-note-item note-${n.kind}` },
+    el("div", { class: "note-head" },
+      el("b", { text: n.author }),
+      what,
+      n.url ? el("a", { class: "git-when", href: n.url, target: "_blank", rel: "noopener noreferrer", text: ago(n.at), title: new Date(n.at).toLocaleString() }) : el("span", { class: "git-when", text: ago(n.at) })),
+    n.body.trim() ? el("div", { class: "prose git-prose" }, prose(n.body)) : null)
+}
+
+function commentBox(pr) {
+  const ta = el("textarea", { rows: "3", placeholder: `Comment on #${pr.number}…`, "aria-label": "Comment" })
+  const send = el("button", { class: "btn btn-primary btn-xs", type: "button" }, "Comment")
+  const post = () => withBusy(send, async () => {
+    if (!ta.value.trim()) return
+    if (await gitAction("comment", { number: pr.number, body: ta.value }, "Comment posted.")) { ta.value = ""; if (gitPanel) gitPanel.draft = "" }
+  })
+  send.addEventListener("click", post)
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); post() } })
+  return el("div", { class: "git-comment" }, ta, el("div", { class: "git-comment-foot" }, el("span", { class: "hint", text: "Ctrl+Enter posts it to GitHub" }), send))
+}
+
+/** Disable a button while its action runs. */
+async function withBusy(button, fn) {
+  if (button.disabled) return
+  button.disabled = true
+  try { await fn() } finally { if (button.isConnected) button.disabled = false }
+}
+
+function fixChecksPrompt(pr, failed) {
+  const lines = failed.map((c) => `- ${c.workflow ? `${c.workflow} / ` : ""}${c.name}${c.url ? ` (${c.url})` : ""}`)
+  return `These checks failed on pull request #${pr.number} (${pr.url}):\n${lines.join("\n")}\n\nRead their logs (\`gh run view --log-failed\`), fix the cause on ${pr.head}, run the checks locally, then commit and push.`
+}
+function addressPrompt(pr) {
+  return `Address the review comments on pull request #${pr.number} (${pr.url}). Read them with \`gh pr view ${pr.number} --comments\` and \`gh api repos/{owner}/{repo}/pulls/${pr.number}/comments\`, make the changes on ${pr.head}, run the checks, then commit and push.`
+}
 
 // ---------- markdown (escaped first; only our own tags come out) ----------
 function inline(s) {
@@ -1362,7 +1925,10 @@ function paintSettings() {
     ],
     threads: () => [
       group(null, "What new threads start with. Open threads keep their own model and access.",
-        row("What Claude may do without asking", ACCESS.find(([v]) => v === s.defaultAccess)[2], sel(ACCESS.map(([v, l]) => [v, l]), () => s.defaultAccess, (v) => (s.defaultAccess = v), "Default access")))
+        row("What Claude may do without asking", ACCESS.find(([v]) => v === s.defaultAccess)[2], sel(ACCESS.map(([v, l]) => [v, l]), () => s.defaultAccess, (v) => (s.defaultAccess = v), "Default access"))),
+      group("Titles", "A new thread is named from its first message. You can rename any thread by its title.",
+        row("Name threads with a small model", "Off keeps the first line of your first message as the title. Needs Claude on.", sw(() => s.titles.auto, (v) => (s.titles.auto = v), "Name threads with a small model")),
+        row("Model that names them", "Small is fast and cheap; a title is a few words.", sel((st?.models ?? [s.titles.model]).map((m) => [m, modelName(m)]), () => s.titles.model, (v) => (s.titles.model = v), "Title model")))
     ],
     memory: () => [
       group("singularity", "Memory of changes committed in each repository. It needs singularity installed; without it, threads work the same.",
@@ -1579,7 +2145,10 @@ function connect() {
     S.threads.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     if (meta.status !== "running") S.asking.delete(meta.id)
     if (S.open?.id === meta.id) {
+      // A turn that just ended may have committed, pushed or opened a PR: the Git panel looks again.
+      const ended = S.open.status === "running" && meta.status !== "running"
       Object.assign(S.open, meta)
+      if (ended && gitPanel?.threadId === meta.id) loadGit()
       if (!("effort" in meta)) delete S.open.effort // cleared: back to the provider's default
       if (feed && document.activeElement !== feed.title) feed.title.value = meta.title
       if (feed) {
@@ -1651,6 +2220,11 @@ document.addEventListener("keydown", (e) => {
     if (pid) go(`#/new/${pid}`)
     return
   }
+  if (e.altKey && (e.key === "g" || e.key === "G") && gitPanel) {
+    e.preventDefault()
+    setGitOpen(!gitOpenNow())
+    return
+  }
   if (e.key === "Escape" && S.open?.status === "running") {
     e.preventDefault()
     api("POST", `threads/${S.open.id}/stop`, {}).catch(fail)
@@ -1661,11 +2235,9 @@ document.addEventListener("keydown", (e) => {
     if (ask) api("POST", `threads/${S.open.id}/permissions/${ask.id}`, { allow: e.key === "y" }).catch(fail)
   }
 })
-$("new-thread").addEventListener("click", () => {
-  const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
-  pid ? go(`#/new/${pid}`) : addProject()
-})
 $("add-project").addEventListener("click", addProject)
+// An hour idle is reached by the clock, not by an event: look again each minute.
+setInterval(() => { if (S.open) paintCompact(S.open) }, 60_000)
 // A file dropped anywhere but the composer would open in place of the app; it does nothing instead.
 for (const type of ["dragover", "drop"]) {
   addEventListener(type, (e) => { if (e.dataTransfer?.types.includes("Files") && !e.target.closest?.(".composer")) e.preventDefault() })

@@ -21,6 +21,20 @@ export type TurnEvent =
     readonly status: "running" | "done" | "failed"
     readonly output?: string | undefined
   }
+  /** The provider's own context compaction: started, finished, or failed. */
+  | {
+    readonly type: "compact"
+    readonly trigger: "manual" | "auto"
+    readonly state: "running" | "done" | "failed"
+    readonly preTokens?: number | undefined
+    readonly postTokens?: number | undefined
+    readonly durationMs?: number | undefined
+    /** What the provider kept: the summary the rest of the session starts from. */
+    readonly summary?: string | undefined
+    readonly error?: string | undefined
+  }
+  /** How full the session's context is: `used` tokens of `limit`, where the provider compacts on its own. */
+  | { readonly type: "context"; readonly used: number; readonly limit: number }
   | {
     readonly type: "usage"
     readonly costUsd: number | null
@@ -70,6 +84,11 @@ export interface Provider {
   /** The model a new thread gets when none is chosen. */
   defaultModel(settings: Settings): string
   turn(input: TurnInput): AsyncGenerator<TurnEvent>
+  /**
+   * How its context is compacted: `manual` takes `/compact` as a message and also compacts
+   * on its own when the context fills; `auto` compacts on its own only; `none` doesn't.
+   */
+  readonly compaction: "manual" | "auto" | "none"
 }
 
 export class ProviderError extends Schema.TaggedError<ProviderError>()("ProviderError", {

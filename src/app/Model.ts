@@ -58,7 +58,13 @@ export const Settings = Schema.Struct({
     store: Schema.Boolean
   }),
   /** Give agents zero's evolved solver instructions and lessons. */
-  useGenome: Schema.Boolean
+  useGenome: Schema.Boolean,
+  titles: Schema.Struct({
+    /** Have a small model name a thread from its first message; off keeps that message's first line. */
+    auto: Schema.Boolean,
+    /** The model that names threads: small, fast and cheap. */
+    model: Schema.String
+  })
 })
 export type Settings = typeof Settings.Type
 
@@ -70,7 +76,8 @@ export const DEFAULT_SETTINGS: Settings = {
   codex: { enabled: false, model: "", effort: "" },
   ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434", model: "" },
   memory: { recall: true, store: true },
-  useGenome: true
+  useGenome: true,
+  titles: { auto: true, model: "claude-haiku-5-5" }
 }
 
 export interface Project {
@@ -119,6 +126,22 @@ export type Item =
     text?: string
   }
   | {
+    /** The provider compacted the session's context (its own, native compaction): asked with `/compact`, or on its own. */
+    readonly kind: "compact"
+    readonly id: string
+    readonly at: string
+    trigger: "manual" | "auto"
+    state: "running" | "done" | "failed"
+    /** Tokens in the context before (an estimate from the last turn while it runs) and after. */
+    preTokens: number | null
+    postTokens: number | null
+    /** How long it took, once done. */
+    durationMs?: number | null | undefined
+    /** The summary the session goes on from, once done. */
+    summary?: string | undefined
+    error: string
+  }
+  | {
     readonly kind: "turn"
     readonly id: string
     readonly at: string
@@ -145,6 +168,12 @@ export interface ThreadMeta {
   resume: string | null
   /** What the provider reported that session has cost so far, for providers that report a running total. */
   sessionCostUsd?: number | undefined
+  /** How full the session's context was after its last turn: `used` tokens of `limit`, where it compacts on its own. */
+  context?: { used: number; limit: number } | undefined
+  /** A message waiting while the session compacts first (its words), shown as queued. */
+  queued?: string | undefined
+  /** The git branch the project was on when the thread's last turn ended: what its Git panel is about. */
+  branch?: string | undefined
   readonly createdAt: string
   updatedAt: string
 }
@@ -162,6 +191,26 @@ export const metaOf = (t: Thread): ThreadMeta => {
 }
 
 /** A title from the first message: its first line, trimmed to a sidebar's width. */
+/**
+ * When the context is this full (of where the provider would compact on its own), the composer
+ * offers to compact first. The page keeps the same number (ui/app.js).
+ */
+export const COMPACT_SOON = 0.7
+export const needsCompaction = (context: { used: number; limit: number } | undefined): boolean =>
+  context !== undefined && context.limit > 0 && context.used >= COMPACT_SOON * context.limit
+
+/** A session left this long has a cold cache: compacting before the next message makes it cheaper. */
+export const IDLE_COMPACT_MS = 60 * 60 * 1000
+
+/** Whether to offer compacting first: the context is filling, or the thread has sat idle an hour. */
+export const compactionOffered = (t: Thread, now = Date.now()): boolean => {
+  const last = t.items.at(-1)?.at
+  return needsCompaction(t.context) || (last !== undefined && now - Date.parse(last) >= IDLE_COMPACT_MS)
+}
+
+/** A message asking the provider to compact its context, `/compact` with optional instructions for the summary. */
+export const isCompact = (text: string): boolean => /^\/compact(\s|$)/.test(text.trim())
+
 export const titleFrom = (text: string): string => {
   const line = text.trim().split("\n")[0]!.replace(/\s+/g, " ")
   return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || "New thread"
