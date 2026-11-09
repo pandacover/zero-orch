@@ -116,6 +116,8 @@ export const codexModels = (home = codexHome()): { listed: Array<string>; config
 export const codex: Provider = {
   id: "codex",
   label: "Codex",
+  // Codex compacts its own thread when the context fills; its SDK takes no `/compact`.
+  compaction: "auto",
   defaultModel: (s) => {
     if (s.codex.model) return s.codex.model
     const { listed, configured } = codexModels()
