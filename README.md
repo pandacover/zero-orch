@@ -8,8 +8,8 @@ procedural memory.
 
 zero rewrites its own **genome**: the instructions, lessons and settings its
 agents run with. A benchmark with hidden tests scores each version. A change
-is kept only if it wins, and the winning change is committed by the agent
-session that made it, so singularity stores it. The next time zero improves
+is kept only if it wins; zero commits it, and singularity stores it under
+the improver session whose edits it holds. The next time zero improves
 itself, singularity hands it the past improvement most like the one it's
 about to make. Each improvement then starts from how earlier improvements were
 made, not only from their scores.
@@ -26,7 +26,7 @@ made, not only from their scores.
                                                                      │                (past improvements)
                                           measure the child ◄────────┘
                                                  │
-                         wins? ── yes ──► resume improver session ──► it commits ──► singularity store
+                         wins? ── yes ──► zero commits genome/ ──► singularity store (filed under the improver)
                                  └─ no ──► revert genome/, log to ledger
 ```
 
@@ -42,9 +42,10 @@ One generation (`src/Generation.ts`):
    `genome/`, then runs `npm run typecheck` and `npm test`.
 5. Guard: only `genome/` may change, and the new genome must parse.
 6. Score the child. If it beats the parent (a higher score, or the same score
-   for at least 15% less cost), the improver's session is resumed and makes
-   the commit. That commit comes from a session after a passing check, which
-   is what singularity stores. If the child doesn't win, every file is put back.
+   for at least 15% less cost), zero commits `genome/` and runs `singularity
+   store`. singularity files the commit under the improver's session, because
+   that session's edits are the commit's lines, with its task and the checks
+   it ran. If the child doesn't win, every file is put back.
 7. Write the attempt to `.zero/ledger.jsonl`, whether it won or lost.
 
 ## Where singularity comes in
@@ -55,12 +56,13 @@ both levels:
 
 | | recalls | stores |
 |---|---|---|
-| **improver** (zero on itself) | the past *self-improvement* most like this one | each accepted genome change, committed by the improver session |
+| **improver** (zero on itself) | the past *self-improvement* most like this one | each accepted genome change, filed under the improver session that made the edit |
 | **solver** (`zero solve` on your repos) | the past change in that repo most like the task | the solver's commit, after the repo's checks pass |
 
-Sessions that commit run with `persistSession: true` and `cwd` set to the
-repo root. singularity identifies a commit's session by its Claude Code
-transcript, so both settings are required.
+Sessions whose work gets committed run with `persistSession: true` and `cwd`
+set to the repo root: singularity finds a commit's session by its Claude Code
+transcript, either the session that ran `git commit` or, when none did, the one
+whose edits the commit adds.
 
 ## Commands
 
@@ -128,11 +130,10 @@ $5 per improver, and $10 per `solve`.
   `src/Policy.ts`, which decides in code. The improver can write only
   `genome/`. A shell command that could change anything must be on an
   allowlist (checks, read-only git, singularity), and chained, piped or
-  redirected ones are denied. It can commit only in the resumed commit stage,
-  and only `genome/`. (Claude Code itself runs commands it recognizes as
-  read-only, such as `ls`, `cat` or `git log`, without asking, even chained;
-  dogfooding showed the improver doing this freely. They can't write, and the
-  next guard checks anyway.)
+  redirected ones are denied. It can't `git add` or commit at all. (Claude
+  Code itself runs commands it recognizes as read-only, such as `ls`, `cat`
+  or `git log`, without asking, even chained; dogfooding showed the improver
+  doing this freely. They can't write, and the next guard checks anyway.)
 - After the session, git independently checks which files changed. Anything
   outside `genome/` is reverted without being measured.
 - The benchmark and the judge (`bench/`, `src/Fitness.ts`) sit outside the

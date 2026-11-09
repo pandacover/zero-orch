@@ -108,21 +108,12 @@ export const repoPolicy = (root: string): ToolPolicy => ({
 })
 
 /**
- * The improver on zero's own repo. While improving it writes only the
- * genome, runs the checks, and reads history and memory. Once its change has
- * won, the same session is resumed with the commit stage: it may only stage
- * the genome and commit, so the commit is the session's own and singularity
- * stores it with the session's task and checks.
+ * The improver on zero's own repo: writes only the genome, runs the checks,
+ * and reads history and memory. It never commits; zero commits a change
+ * that won (src/Generation.ts).
  */
-export const improverPolicy = (root: string, stage: "improve" | "commit"): ToolPolicy =>
-  stage === "improve"
-    ? {
-      root,
-      writable: (rel) => rel.startsWith("genome/"),
-      bash: [/^npm run typecheck$/, /^npm test$/, READ_GIT, /^singularity (recall|changes)( .+)?$/]
-    }
-    : {
-      root,
-      writable: () => false,
-      bash: [READ_GIT, /^git add genome$/, /^git commit -m "[^"$\\]+"$/]
-    }
+export const improverPolicy = (root: string): ToolPolicy => ({
+  root,
+  writable: (rel) => rel.startsWith("genome/"),
+  bash: [/^npm run typecheck$/, /^npm test$/, READ_GIT, /^singularity (recall|changes)( .+)?$/]
+})

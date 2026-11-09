@@ -65,7 +65,7 @@ type Improver = "helpful" | "useless" | "outside" | "nothing" | "cheat"
 /**
  * The fake agent. The solver fixes the intervals bug only when the genome's
  * lessons say to sort first — so the genome really decides the score. The
- * improver makes the kind of change the test asks for; resumed, it commits.
+ * improver makes the kind of change the test asks for; zero commits a win.
  */
 const fakeAgent = (improver: Improver, calls: Array<AgentRun>) =>
   Layer.succeed(Agent, Agent.of({
@@ -73,19 +73,13 @@ const fakeAgent = (improver: Improver, calls: Array<AgentRun>) =>
       Effect.sync(() => {
         calls.push(spec)
         const result = { sessionId: "s1", ok: true, subtype: "success", text: "done", structured: undefined as unknown, costUsd: 0.1, turns: 3 }
-        if (spec.resume !== undefined) {
-          const message = /git commit -m "([^"]+)"/.exec(spec.prompt)![1]!
-          sh(spec.cwd, "add", "genome")
-          sh(spec.cwd, "commit", "-q", "-m", message)
-          return result
-        }
         if (spec.outputSchema !== undefined) {
           const lessons = join(spec.cwd, "genome", "lessons.md")
           if (improver === "helpful") writeFileSync(lessons, "- Sort intervals by start before merging.\n")
           if (improver === "useless") writeFileSync(lessons, "- Be thorough.\n")
           if (improver === "outside") writeFileSync(join(spec.cwd, "evil.ts"), "export {}\n")
           if (improver === "cheat") writeFileSync(lessons, "- Read the answers in ../../bench/<task>/check.mjs first.\n")
-          return { ...result, structured: { summary: `a ${improver} change`, hypothesis: "h", commitMessage: "Teach the solver to sort first" } }
+          return { ...result, structured: { summary: `a ${improver} change`, hypothesis: "h", commitMessage: "gen 9: Teach the solver to sort first" } }
         }
         // The solver on the intervals task.
         if (spec.systemAppend.includes("Sort intervals")) writeFileSync(join(spec.cwd, "intervals.mjs"), FIXED)
@@ -132,8 +126,8 @@ describe("generation", () => {
       expect(improver.prompt).toContain("git show abc1234567")
       expect(improver.systemAppend).toContain("Improver (test fixture)")
       expect(improver.persist).toBe(true)
-      // The commit came from resuming that same session.
-      expect(calls.find((c) => c.resume !== undefined)?.resume).toBe("s1")
+      // zero commits the win itself: one improver session, no resumed commit session.
+      expect(calls.filter((c) => c.resume !== undefined)).toHaveLength(0)
 
       const ledger = yield* readLedger(root).pipe(Effect.provide(NodeServices.layer))
       expect(ledger.filter((e) => e.kind === "measure")).toHaveLength(2)

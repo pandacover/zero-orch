@@ -11,10 +11,10 @@
  *      instructions read from the genome (`genome/improver.md`, which it may
  *      also rewrite), the scorecard, the ledger and the recalled change.
  *   5. Guard: only `genome/` may change, and the new genome must load.
- *   6. Score the child. If it beats the parent, resume the improver's session
- *      and have it commit — its own commit, after its own passing checks, so
- *      singularity stores it — then `singularity store`. Otherwise put every
- *      file back.
+ *   6. Score the child. If it beats the parent, commit it and run
+ *      `singularity store`, which files the commit under the improver's
+ *      session (its edits are the commit's lines), with its task and checks.
+ *      Otherwise put every file back.
  *   7. Write the attempt to the ledger, won or lost.
  *
  * `zero evolve` runs this in a fresh process per generation.
@@ -69,8 +69,11 @@ const readAnswer = (value: unknown, fallback: string): ImproverAnswer => {
 }
 
 /** A subject line the commit-stage policy accepts: no quotes, `$` or backslashes, one line. */
-export const safeSubject = (generation: number, message: string): string =>
-  `gen ${generation}: ${message.replace(/[\r\n]+/g, " ").replace(/["$\\`;&|<>]/g, "").trim()}`.slice(0, 90)
+export const safeSubject = (generation: number, message: string): string => {
+  // Improvers sometimes write the "gen N:" prefix themselves (dogfood gen 5: "gen 5: gen 5: …").
+  const body = message.replace(/[\r\n]+/g, " ").replace(/["$\\`;&|<>]/g, "").trim().replace(/^gen \d+:\s*/i, "")
+  return `gen ${generation}: ${body}`.slice(0, 90)
+}
 
 /**
  * Whether a genome tells the solver where the hidden tests are. Reads are
@@ -217,7 +220,7 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
     maxTurns: IMPROVER_MAX_TURNS,
     maxBudgetUsd: IMPROVER_BUDGET_USD,
     systemAppend: parentGenome.improver,
-    policy: improverPolicy(root, "improve"),
+    policy: improverPolicy(root),
     outputSchema: ImproverOutput,
     persist: true,
     onEvent: (line) => log(`[improver]${line}`)
@@ -269,43 +272,18 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
   const verdict = judge(parent, child)
   if (!verdict.accept) return yield* reject(verdict.reason, { id: child.genomeId, score: child.score })
 
-  log(`gen ${generation}: accepted: ${verdict.reason}; the improver commits it`)
-  const subject = safeSubject(generation, answer.commitMessage)
-  yield* agent.run({
-    prompt: [
-      `zero measured your change on the benchmark: ${verdict.reason}. It is accepted.`,
-      "Commit it now with exactly these two commands, then stop:",
-      "",
-      "    git add genome",
-      `    git commit -m "${subject}"`
-    ].join("\n"),
-    cwd: root,
-    model: parentGenome.knobs.improverModel,
-    effort: "low",
-    maxTurns: 6,
-    maxBudgetUsd: 0.5,
-    systemAppend: parentGenome.improver,
-    policy: improverPolicy(root, "commit"),
-    resume: improver.sessionId,
-    persist: true,
-    onEvent: (line) => log(`[improver]${line}`)
-  }).pipe(Effect.catchTag("AgentError", (e) => Effect.sync(() => log(`commit session failed: ${e.message}`))))
-
-  let note = ""
-  if ((yield* head(root)) === startHead) {
-    // The session didn't commit. Keep the win anyway; singularity may not store a commit no session made.
-    yield* git(root, ["add", GENOME_DIR])
-    yield* git(root, ["commit", "-m", subject])
-    note = " (committed by zero, not the session: singularity may not store it)"
-  }
+  // zero commits the win itself. singularity still files it under the improver: a commit no agent was making
+  // belongs to the one session whose edits it adds, with that session's task and the checks it ran. (Dogfood
+  // gens 4–5 first resumed the improver to commit; replaying its long context ran past a $0.50 budget both
+  // times, and singularity stored the commit zero made anyway.)
+  log(`gen ${generation}: accepted: ${verdict.reason}`)
+  yield* git(root, ["add", GENOME_DIR])
+  yield* git(root, ["commit", "-m", safeSubject(generation, answer.commitMessage)])
   const commit = yield* head(root)
-  const leftover = (yield* changes(root)).filter((c) => c.path.startsWith(`${GENOME_DIR}/`))
-  if (leftover.length > 0) yield* revert(root, leftover)
 
-  // singularity: store the session's commit, then say whether it's in memory.
   yield* memory.store(root).pipe(Effect.catchTag("MemoryError", (e) => Effect.sync(() => log(`singularity store failed: ${e.message}`))))
   const stored = yield* memory.changes(root).pipe(Effect.orElseSucceed(() => []))
   const inMemory = stored.some((c) => c.commit === commit)
-  log(`gen ${generation}: committed ${commit.slice(0, 10)}${note}; ${inMemory ? "singularity stored it" : "not in singularity's memory yet"}`)
-  return yield* record({ accepted: true, reason: verdict.reason + note, childId: child.genomeId, childScore: child.score, commit, files })
+  log(`gen ${generation}: committed ${commit.slice(0, 10)}; ${inMemory ? "singularity stored it" : "singularity didn't store it (see `singularity status`)"}`)
+  return yield* record({ accepted: true, reason: verdict.reason, childId: child.genomeId, childScore: child.score, commit, files })
 })
