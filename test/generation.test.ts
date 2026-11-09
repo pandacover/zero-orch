@@ -94,8 +94,8 @@ const fakeMemory = (stored: Array<string>) =>
     changes: () => Effect.sync(() => stored.map((commit) => ({ id: commit, commit, title: "t", task: "", retired: false })))
   }))
 
-const generation = (root: string, improver: Improver, calls: Array<AgentRun>, stored: Array<string>) =>
-  runGeneration({ root, log: () => {} }).pipe(
+const generation = (root: string, improver: Improver, calls: Array<AgentRun>, stored: Array<string>, reps?: number) =>
+  runGeneration({ root, reps, log: () => {} }).pipe(
     Effect.provide(Layer.mergeAll(fakeAgent(improver, calls), fakeMemory(stored), NodeServices.layer))
   )
 
@@ -182,6 +182,26 @@ describe("generation", () => {
       expect(result.generation).toBe(2)
       expect(result.reason).toBe("the improver changed nothing")
       expect(calls).toHaveLength(1)
+    }))
+
+  it.effect("measures parent and child with the same reps, and won't reuse a score taken with other reps", () =>
+    Effect.gen(function*() {
+      const root = makeRepo()
+      yield* generation(root, "nothing", [], [])
+      const calls: Array<AgentRun> = []
+      const result = yield* generation(root, "helpful", calls, [], 2)
+      expect(result.accepted).toBe(true)
+      // The 1-rep score didn't stand in: two solver runs for the parent, the improver, two for the child.
+      expect(calls).toHaveLength(5)
+      expect(new Set(calls.filter((c) => c.outputSchema === undefined).map((c) => c.cwd)).size).toBe(4)
+      const improver = calls.find((c) => c.outputSchema !== undefined)!
+      expect(improver.prompt).toContain("intervals: 6/16 hidden cases")
+      expect(improver.prompt).toContain("Each task ran 2 times")
+
+      const ledger = yield* readLedger(root).pipe(Effect.provide(NodeServices.layer))
+      const reps = ledger.flatMap((e) => (e.kind === "measure" ? [e.card.reps] : []))
+      expect(reps).toEqual([1, 2, 2])
+      expect(attempts(ledger)[1]).toMatchObject({ parentScore: 3 / 8, childScore: 1 })
     }))
 
   it.effect("won't start on a dirty tree", () =>

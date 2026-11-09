@@ -8,7 +8,9 @@
  * and prints one JSON line `{"passed": n, "total": m}`.
  *
  * A genome's score is the mean over tasks of passed/total — partial credit,
- * so an improvement that fixes one more edge case shows.
+ * so an improvement that fixes one more edge case shows. With `reps` > 1 each
+ * task runs that many times and its counts are summed, so the score is the
+ * mean pass rate over every run and one lucky or unlucky session moves it less.
  */
 import { Effect, FileSystem, Path } from "effect"
 import { tmpdir } from "node:os"
@@ -100,11 +102,14 @@ export const runTask = Effect.fn("Bench.runTask")(function*(
   genome: Genome,
   task: BenchTask,
   workspace: string,
-  log: (line: string) => void
+  log: (line: string) => void,
+  /** Which rep this is, when there are several: it tells their log lines apart. */
+  rep?: number
 ) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const agent = yield* Agent
+  const label = rep === undefined ? task.id : `${task.id}#${rep}`
   yield* fs.makeDirectory(workspace, { recursive: true })
   const files = path.join(task.dir, "files")
   if (yield* fs.exists(files)) yield* fs.copy(files, workspace)
@@ -119,7 +124,7 @@ export const runTask = Effect.fn("Bench.runTask")(function*(
     systemAppend: solverPrompt(genome),
     policy: solverPolicy(workspace),
     persist: false,
-    onEvent: (line) => log(`[${task.id}]${line}`)
+    onEvent: (line) => log(`[${label}]${line}`)
   }).pipe(
     // A session that crashes scores zero on its task; it doesn't stop the benchmark.
     Effect.catchTag("AgentError", (e) =>
@@ -133,7 +138,7 @@ export const runTask = Effect.fn("Bench.runTask")(function*(
   })
   const verdict = check.timedOut ? { passed: 0, total: 1 } : parseCheck(check.stdout)
   const failures = check.stdout.split("\n").filter((l) => !l.startsWith("{")).join("\n").trim()
-  log(`[${task.id}] ${verdict.passed}/${verdict.total} hidden cases, $${run.costUsd.toFixed(3)}, ${run.turns} turns (${run.subtype})`)
+  log(`[${label}] ${verdict.passed}/${verdict.total} hidden cases, $${run.costUsd.toFixed(3)}, ${run.turns} turns (${run.subtype})`)
   return {
     id: task.id,
     passed: verdict.passed,
@@ -152,28 +157,57 @@ export interface BenchOptions {
   readonly workDir: string
   readonly only?: ReadonlyArray<string> | undefined
   readonly concurrency?: number | undefined
+  /** Times each task runs, each in its own fresh workspace. Default 1. */
+  readonly reps?: number | undefined
   readonly log?: ((line: string) => void) | undefined
 }
 
 export const runBench = Effect.fn("Bench.run")(function*(genome: Genome, options: BenchOptions) {
   const path = yield* Path.Path
   const log = options.log ?? (() => {})
+  const reps = options.reps ?? 1
+  if (!Number.isInteger(reps) || reps < 1) return yield* new BenchError({ message: `reps must be a whole number of at least 1, not ${reps}` })
   const tasks = yield* loadTasks(options.benchDir, options.only)
   const runDir = path.join(options.workDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${genome.id}`)
-  log(`benchmark: ${tasks.length} task(s), genome ${genome.id}`)
-  const results = yield* Effect.forEach(
-    tasks,
-    (task) => runTask(genome, task, path.join(runDir, task.id), log),
+  log(`benchmark: ${tasks.length} task(s)${reps > 1 ? ` × ${reps} reps` : ""}, genome ${genome.id}`)
+  // Every (task, rep) is one job, so `concurrency` caps sessions at once however many reps there are.
+  const jobs = tasks.flatMap((task) => Array.from({ length: reps }, (_, i) => ({ task, rep: i + 1 })))
+  const runs = yield* Effect.forEach(
+    jobs,
+    ({ task, rep }) =>
+      reps === 1
+        ? runTask(genome, task, path.join(runDir, task.id), log)
+        : runTask(genome, task, path.join(runDir, task.id, `rep-${rep}`), log, rep),
     { concurrency: options.concurrency ?? 3 }
   )
-  return scorecard(genome.id, results)
+  const results = tasks.map((task) => combineReps(runs.filter((r) => r.id === task.id)))
+  return scorecard(genome.id, results, reps)
 })
 
-export const scorecard = (genomeId: string, results: ReadonlyArray<TaskScore>): Scorecard => ({
+const rate = (r: TaskScore) => r.passed / r.total
+
+/**
+ * One task's reps as one result: counts and cost summed, turns averaged. The
+ * failures and last words are the worst rep's, since that's the run an
+ * improver can learn the most from.
+ */
+export const combineReps = (runs: ReadonlyArray<TaskScore>): TaskScore => {
+  const worst = runs.reduce((w, r) => (rate(r) < rate(w) ? r : w))
+  return {
+    ...worst,
+    passed: runs.reduce((s, r) => s + r.passed, 0),
+    total: runs.reduce((s, r) => s + r.total, 0),
+    costUsd: runs.reduce((s, r) => s + r.costUsd, 0),
+    turns: runs.reduce((s, r) => s + r.turns, 0) / runs.length
+  }
+}
+
+export const scorecard = (genomeId: string, results: ReadonlyArray<TaskScore>, reps = 1): Scorecard => ({
   genomeId,
-  score: results.reduce((s, r) => s + r.passed / r.total, 0) / Math.max(results.length, 1),
+  score: results.reduce((s, r) => s + rate(r), 0) / Math.max(results.length, 1),
   solved: results.filter((r) => r.passed === r.total).length,
   tasks: results.length,
   costUsd: results.reduce((s, r) => s + r.costUsd, 0),
+  reps,
   results
 })

@@ -2,9 +2,9 @@
 /**
  * zero: a recursive self-improving agent on singularity's memory.
  *
- *     node src/cli.ts bench [--task ID ...] [--concurrency N]    score the current genome
- *     node src/cli.ts generation [--task ID ...]                 one generation: improve, measure, keep or revert
- *     node src/cli.ts evolve [--generations N] [--budget-usd X]  generations in a row, each in a fresh process
+ *     node src/cli.ts bench [--task ID ...] [--concurrency N] [--reps N]  score the current genome
+ *     node src/cli.ts generation [--task ID ...] [--reps N]               one generation: improve, measure, keep or revert
+ *     node src/cli.ts evolve [--generations N] [--budget-usd X] [--reps N] generations in a row, each in a fresh process
  *     node src/cli.ts solve TASK... [--cwd DIR]                  the evolved solver on a real repo, with memory
  *     node src/cli.ts lineage                                    what was tried, what won, what singularity stored
  *     node src/cli.ts ui [--port 4747]                           the control plane in a browser
@@ -40,10 +40,19 @@ const concurrencyFlag = Flag.Int("concurrency").pipe(
   Flag.withDefault(3),
   Flag.withDescription("benchmark tasks run at once")
 )
+const repsFlag = Flag.Int("reps").pipe(
+  Flag.withDefault(1),
+  Flag.withDescription("times each benchmark task runs, so the score averages out the solver's luck")
+)
 
 const bench = Command.make(
   "bench",
-  { task: taskFlag, concurrency: concurrencyFlag, record: Flag.Boolean("record").pipe(Flag.withDefault(false), Flag.withDescription("write the score to the ledger")) },
+  {
+    task: taskFlag,
+    concurrency: concurrencyFlag,
+    reps: repsFlag,
+    record: Flag.Boolean("record").pipe(Flag.withDefault(false), Flag.withDescription("write the score to the ledger"))
+  },
   Effect.fn(function*(args) {
     const genome = yield* loadGenome(ROOT)
     const card = yield* runBench(genome, {
@@ -51,6 +60,7 @@ const bench = Command.make(
       workDir: BENCH_WORK_DIR,
       only: args.task,
       concurrency: args.concurrency,
+      reps: args.reps,
       log
     })
     if (args.record) yield* appendLedger(ROOT, { kind: "measure", at: new Date().toISOString(), card })
@@ -60,10 +70,10 @@ const bench = Command.make(
 
 const generation = Command.make(
   "generation",
-  { task: taskFlag, concurrency: concurrencyFlag },
+  { task: taskFlag, concurrency: concurrencyFlag, reps: repsFlag },
   Effect.fn(function*(args) {
     // The generation logs its own verdict as it reaches it.
-    yield* runGeneration({ root: ROOT, only: args.task, concurrency: args.concurrency, log })
+    yield* runGeneration({ root: ROOT, only: args.task, concurrency: args.concurrency, reps: args.reps, log })
   })
 ).pipe(Command.withDescription("one generation: recall, improve the genome, measure it, keep it or put it back"))
 
@@ -73,10 +83,17 @@ const evolve = Command.make(
     generations: Flag.Int("generations").pipe(Flag.withDefault(3), Flag.withDescription("how many generations to run")),
     budget: Flag.Finite("budget-usd").pipe(Flag.withDefault(25), Flag.withDescription("stop once the ledger's total spend passes this")),
     task: taskFlag,
-    concurrency: concurrencyFlag
+    concurrency: concurrencyFlag,
+    reps: repsFlag
   },
   Effect.fn(function*(args) {
-    const passOn = [...args.task.flatMap((t) => ["--task", t]), "--concurrency", String(args.concurrency)]
+    const passOn = [
+      ...args.task.flatMap((t) => ["--task", t]),
+      "--concurrency",
+      String(args.concurrency),
+      "--reps",
+      String(args.reps)
+    ]
     for (let i = 1; i <= args.generations; i++) {
       const spent = totalCost(yield* readLedger(ROOT))
       if (spent >= args.budget) {

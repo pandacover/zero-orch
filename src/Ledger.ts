@@ -28,6 +28,11 @@ export const Scorecard = Schema.Struct({
   solved: Schema.Number,
   tasks: Schema.Number,
   costUsd: Schema.Number,
+  /**
+   * How many times each task ran; a result's counts and cost are summed over
+   * them. Lines written before reps existed were measured once.
+   */
+  reps: Schema.Number.pipe(Schema.withDecodingDefaultKey(Effect.succeed(1))),
   results: Schema.Array(TaskScore)
 })
 export type Scorecard = typeof Scorecard.Type
@@ -90,19 +95,24 @@ export const appendLedger = Effect.fn("Ledger.append")(function*(root: string, e
 })
 
 /**
- * The genome's latest score on exactly these tasks. A score on a subset
- * (`--task`) isn't comparable to one on the whole benchmark, so it never
- * stands in for it.
+ * The genome's latest score on exactly these tasks, measured with this many
+ * reps. A score on a subset (`--task`) isn't comparable to one on the whole
+ * benchmark, and a one-rep score is noisier than a five-rep one, so neither
+ * stands in for the other.
  */
 export const lastMeasure = (
   entries: ReadonlyArray<Entry>,
   genomeId: string,
-  taskIds: ReadonlyArray<string>
+  taskIds: ReadonlyArray<string>,
+  reps = 1
 ): Scorecard | undefined => {
   const key = [...taskIds].sort().join(",")
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]!
-    if (e.kind === "measure" && e.card.genomeId === genomeId && e.card.results.map((r) => r.id).sort().join(",") === key) {
+    if (
+      e.kind === "measure" && e.card.genomeId === genomeId && e.card.reps === reps &&
+      e.card.results.map((r) => r.id).sort().join(",") === key
+    ) {
       return e.card
     }
   }

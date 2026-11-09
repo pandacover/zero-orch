@@ -3,7 +3,7 @@
  *
  *   1. Start from a clean tree, so every change after this is the improver's.
  *   2. Score the current genome on the benchmark (or reuse its score from the
- *      ledger: a genome is measured once).
+ *      ledger: a genome is measured once per task set and reps count).
  *   3. Ask singularity for the past improvement most like this one. Every
  *      accepted improvement was a commit by an improver session, so this is
  *      memory of how zero improved itself before.
@@ -38,6 +38,8 @@ export interface GenerationOptions {
   readonly root: string
   readonly only?: ReadonlyArray<string> | undefined
   readonly concurrency?: number | undefined
+  /** Times each benchmark task runs per measurement. Default 1. */
+  readonly reps?: number | undefined
   readonly log: (line: string) => void
 }
 
@@ -122,6 +124,9 @@ export const improverPrompt = (input: {
     "",
     `The current genome (${input.genome.id}) scores ${pct(card.score)} on the benchmark: ` +
     `${card.solved} of ${card.tasks} tasks fully solved, $${card.costUsd.toFixed(2)} spent.`,
+    ...(card.reps > 1
+      ? [`Each task ran ${card.reps} times: its cases and cost below are summed over the runs, its turns averaged, and its failures are the worst run's.`]
+      : []),
     "",
     "## The genome's settings (genome/genome.json)",
     "",
@@ -189,10 +194,11 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
     workDir: BENCH_WORK_DIR,
     only: options.only,
     concurrency: options.concurrency,
+    reps: options.reps ?? 1,
     log
   }
   const taskIds = (yield* loadTasks(bench.benchDir, options.only)).map((t) => t.id)
-  let parent = lastMeasure(ledger, parentGenome.id, taskIds)
+  let parent = lastMeasure(ledger, parentGenome.id, taskIds, bench.reps)
   if (parent === undefined) {
     log(`gen ${generation}: measuring the current genome ${parentGenome.id}`)
     parent = yield* runBench(parentGenome, bench)
@@ -267,7 +273,8 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
 
   // 6. Measure the child; keep it only if it wins.
   log(`gen ${generation}: measuring the child ${childGenome.value.id} (${files.join(", ")})`)
-  const child = yield* runBench(childGenome.value, bench)
+  // Measured as the parent was: a 3-rep score against a 1-rep one would judge noise, not the change.
+  const child = yield* runBench(childGenome.value, { ...bench, reps: parent.reps })
   yield* appendLedger(root, { kind: "measure", at: new Date().toISOString(), card: child })
   const verdict = judge(parent, child)
   if (!verdict.accept) return yield* reject(verdict.reason, { id: child.genomeId, score: child.score })

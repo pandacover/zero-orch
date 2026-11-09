@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { parseCheck, scorecard } from "../src/Bench.ts"
+import { combineReps, parseCheck, scorecard } from "../src/Bench.ts"
 import { judge } from "../src/Fitness.ts"
 import type { TaskScore } from "../src/Ledger.ts"
 
-const task = (id: string, passed: number, total: number, costUsd: number): TaskScore => ({
-  id, passed, total, costUsd, turns: 5, stop: "success", failures: "", lastWords: ""
+const task = (id: string, passed: number, total: number, costUsd: number, turns = 5): TaskScore => ({
+  id, passed, total, costUsd, turns, stop: "success", failures: "", lastWords: ""
 })
 
 describe("fitness", () => {
@@ -13,6 +13,27 @@ describe("fitness", () => {
     expect(card.score).toBeCloseTo(0.75)
     expect(card.solved).toBe(1)
     expect(card.costUsd).toBeCloseTo(0.3)
+    expect(card.reps).toBe(1)
+  })
+
+  it("sums a task's reps, averages its turns and keeps the worst rep's words", () => {
+    const worst = { ...task("a", 2, 8, 0.3, 9), stop: "error_max_turns", failures: "FAIL edge", lastWords: "gave up" }
+    const combined = combineReps([task("a", 8, 8, 0.1, 3), worst, task("a", 6, 8, 0.2, 6)])
+    expect(combined).toEqual({
+      id: "a", passed: 16, total: 24, costUsd: expect.closeTo(0.6), turns: 6,
+      stop: "error_max_turns", failures: "FAIL edge", lastWords: "gave up"
+    })
+  })
+
+  it("scores reps as the mean pass rate over every run", () => {
+    const a = combineReps([task("a", 10, 10, 0.1), task("a", 0, 10, 0.1)])
+    const b = combineReps([task("b", 10, 10, 0.1), task("b", 10, 10, 0.1)])
+    const card = scorecard("g", [a, b], 2)
+    expect(card.score).toBeCloseTo(0.75)
+    // A task counts as solved only when every rep solved it.
+    expect(card.solved).toBe(1)
+    expect(card.costUsd).toBeCloseTo(0.4)
+    expect(card.reps).toBe(2)
   })
 
   it("accepts a higher score, rejects a lower one", () => {
