@@ -22,6 +22,8 @@ export interface JobRequest {
   readonly tasks: ReadonlyArray<string>
   readonly generations: number
   readonly budgetUsd: number
+  /** How many times each task runs; the score averages over them. */
+  readonly reps: number
 }
 
 export interface Job {
@@ -36,9 +38,10 @@ export interface Job {
 /** The command line a job runs, after `node src/cli.ts`. */
 export const jobArgs = (r: JobRequest): Array<string> => {
   const tasks = r.tasks.flatMap((t) => ["--task", t])
-  if (r.kind === "bench") return ["bench", "--record", ...tasks]
-  if (r.kind === "generation") return ["generation", ...tasks]
-  return ["evolve", "--generations", String(r.generations), "--budget-usd", String(r.budgetUsd), ...tasks]
+  const reps = r.reps > 1 ? ["--reps", String(r.reps)] : []
+  if (r.kind === "bench") return ["bench", "--record", ...reps, ...tasks]
+  if (r.kind === "generation") return ["generation", ...reps, ...tasks]
+  return ["evolve", "--generations", String(r.generations), "--budget-usd", String(r.budgetUsd), ...reps, ...tasks]
 }
 
 /** A job request from the page, checked: unknown kinds, tasks or out-of-range numbers are refused. */
@@ -52,7 +55,9 @@ export const parseJobRequest = (body: unknown, knownTasks: ReadonlyArray<string>
   const budgetUsd = typeof b["budgetUsd"] === "number" ? b["budgetUsd"] : 25
   if (!Number.isInteger(generations) || generations < 1 || generations > 50) return "generations must be 1–50"
   if (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 1000) return "budget must be between $0 and $1000"
-  return { kind, tasks, generations, budgetUsd }
+  const reps = b["reps"] === undefined ? 1 : b["reps"]
+  if (typeof reps !== "number" || !Number.isInteger(reps) || reps < 1 || reps > 5) return "reps must be a whole number 1–5"
+  return { kind, tasks, generations, budgetUsd, reps }
 }
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")

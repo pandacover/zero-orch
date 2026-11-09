@@ -527,6 +527,7 @@ function settingsView() {
 
 // ---------- evolution ----------
 let evoMode = load("evoMode", "generation")
+let evoReps = load("evoReps", 1)
 function evolutionView() {
   const page = el("div", { class: "page" }, el("div", { class: "page-inner wide", id: "evo" }, el("p", { class: "hint", text: "Loading…" })))
   loadEvo()
@@ -547,6 +548,11 @@ function paintEvo() {
   const fields = el("div", { class: "evo-fields", hidden: evoMode !== "evolve" },
     el("label", {}, "Generations", el("input", { id: "evo-gens", type: "number", min: 1, max: 50, value: 3 })),
     el("label", {}, "Stop after spending $", el("input", { id: "evo-budget", type: "number", min: 1, max: 1000, value: 25 })))
+  const repsInput = el("input", { id: "evo-reps", type: "number", min: 1, max: 5, step: 1, value: evoReps })
+  repsInput.addEventListener("change", () => { evoReps = Number(repsInput.value) || 1; save("evoReps", evoReps) })
+  const reps = el("div", { class: "evo-fields" },
+    el("label", {}, "Reps per task", repsInput),
+    el("p", { class: "hint", text: "More reps average out noise in the score, and multiply the cost." }))
   const desc = {
     bench: "Score the current genome on the hidden tests. Changes nothing but the ledger.",
     generation: "Recall a past improvement, let the improver change the genome, score it, keep it only if it wins.",
@@ -559,7 +565,7 @@ function paintEvo() {
     el("section", { class: "card" },
       el("div", { class: "lineage-head" },
         el("div", {}, el("h2", { text: "Lineage" }), el("p", { class: "hint", text: "The line moves only when a generation is kept. Turned-down attempts hang below it; × marks one a guard stopped." })),
-        now ? el("div", {}, el("div", { class: "score" }, pct(now.score), el("small", { text: "%" })), el("div", { class: "score-of", text: `${now.solved} of ${now.tasks} tasks solved` })) : null),
+        now ? el("div", {}, el("div", { class: "score" }, pct(now.score), el("small", { text: "%" })), el("div", { class: "score-of", text: `${now.solved} of ${now.tasks} tasks solved${now.reps > 1 ? ` · averaged over ${now.reps} reps` : ""}` })) : null),
       chart),
     el("div", { class: "evo-grid" },
       el("section", { class: "card evo-run" },
@@ -568,6 +574,7 @@ function paintEvo() {
           [["bench", "Benchmark"], ["generation", "Generation"], ["evolve", "Evolve"]].map(([m, l]) =>
             el("button", { type: "button", role: "radio", "aria-checked": String(m === evoMode), onclick: () => { evoMode = m; save("evoMode", m); paintEvo() } }, l))),
         el("p", { class: "hint", text: desc }),
+        reps,
         fields,
         blocked ? el("div", { class: "warnbox" }, el("b", { text: "Uncommitted changes in zero. " }), "A generation puts back what it doesn't keep, so commit or stash them first: ", E.tree.slice(0, 4).join(", "), E.tree.length > 4 ? "…" : "") : null,
         running
@@ -592,7 +599,7 @@ function paintEvo() {
 }
 async function startEvo() {
   try {
-    await api("POST", "zero/jobs", { kind: evoMode, generations: Number($("evo-gens")?.value) || 3, budgetUsd: Number($("evo-budget")?.value) || 25 })
+    await api("POST", "zero/jobs", { kind: evoMode, generations: Number($("evo-gens")?.value) || 3, budgetUsd: Number($("evo-budget")?.value) || 25, reps: Number($("evo-reps")?.value) || 1 })
     toast(`${{ bench: "Benchmark", generation: "Generation", evolve: "Evolve" }[evoMode]} started.`)
     loadEvo()
   } catch (e) { fail(e) }
