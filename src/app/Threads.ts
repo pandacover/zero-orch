@@ -12,8 +12,8 @@ import { Effect, Option, Stream } from "effect"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
 import { Memory } from "../Singularity.ts"
-import type { Access, Item, Project, ProviderId, Thread } from "./Model.ts"
-import { metaOf, newId, titleFrom } from "./Model.ts"
+import type { Access, Item, Project, ProviderId, Settings, Thread } from "./Model.ts"
+import { isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
 import { type Provider, turnStream } from "./providers/Provider.ts"
 import { claude } from "./providers/Claude.ts"
 import { codex } from "./providers/Codex.ts"
@@ -26,9 +26,15 @@ export interface Hub {
   send(event: string, data: unknown): void
 }
 
+interface Pending {
+  readonly done: (allow: boolean) => void
+  /** What the thread's access makes of the call now. */
+  readonly recheck?: (() => "allow" | "deny" | "ask") | undefined
+}
+
 interface Live {
   readonly abort: AbortController
-  readonly asks: Map<string, (allow: boolean) => void>
+  readonly asks: Map<string, Pending>
 }
 
 const now = () => new Date().toISOString()
@@ -42,6 +48,37 @@ const now = () => new Date().toISOString()
  */
 export const turnCost = (reported: number | null, cumulative: boolean, before: number): number | null =>
   reported === null ? null : cumulative ? Math.max(0, reported - before) : reported
+
+/**
+ * Streamed text, held back until a line is complete: `push` returns the
+ * whole lines that are ready (or ""), `flush` what's left when the text ends.
+ */
+export const lineBuffer = () => {
+  let tail = ""
+  return {
+    push: (delta: string): string => {
+      tail += delta
+      const cut = tail.lastIndexOf("\n")
+      if (cut < 0) return ""
+      const ready = tail.slice(0, cut + 1)
+      tail = tail.slice(cut + 1)
+      return ready
+    },
+    flush: (): string => {
+      const rest = tail
+      tail = ""
+      return rest
+    }
+  }
+}
+
+/** Settings with a thread's own effort in place of its provider's default. */
+export const withEffort = (settings: Settings, provider: ProviderId, effort: string | undefined): Settings => {
+  if (!effort || !isEffortFor(provider, effort)) return settings
+  if (provider === "claude") return { ...settings, claude: { ...settings.claude, effort: effort as Settings["claude"]["effort"] } }
+  if (provider === "codex") return { ...settings, codex: { ...settings.codex, effort: effort as Settings["codex"]["effort"] } }
+  return settings
+}
 
 export const recalledTitle = (text: string): string => /committed as \w+: "([^"]+)"/.exec(text)?.[1] ?? "a past change"
 
@@ -63,7 +100,7 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
       store.saveThread(t, soon)
     }
 
-    const create = (project: Project, input: { provider?: ProviderId; model?: string; access?: Access }) => {
+    const create = (project: Project, input: { provider?: ProviderId; model?: string; access?: Access; effort?: string }) => {
       const settings = store.settings()
       const provider = input.provider ?? settings.defaultProvider
       const thread: Thread = {
@@ -73,6 +110,7 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
         provider,
         model: input.model || PROVIDERS[provider].defaultModel(settings),
         access: input.access ?? settings.defaultAccess,
+        ...(isEffortFor(provider, input.effort) ? { effort: input.effort } : {}),
         status: "idle",
         resume: null,
         createdAt: now(),
@@ -84,33 +122,48 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
       return thread
     }
 
-    /** Change a thread's provider, model or access. A new provider starts a new session. */
-    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access }) => {
+    /** Change a thread's provider, model, access or effort. A new provider starts a new session. */
+    /** `effort: ""` goes back to following the settings. */
+    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string }) => {
       if (patch.provider && patch.provider !== t.provider) {
         t.provider = patch.provider
         t.resume = null
         t.sessionCostUsd = 0
         t.model = patch.model || PROVIDERS[patch.provider].defaultModel(store.settings())
+        // An effort the new provider doesn't know goes back to its default.
+        if (t.effort && !isEffortFor(t.provider, t.effort)) delete t.effort
       } else if (patch.model) {
         t.model = patch.model
       }
-      if (patch.access) t.access = patch.access
+      if (patch.effort === "") delete t.effort
+      else if (isEffortFor(t.provider, patch.effort)) t.effort = patch.effort
+      if (patch.access && patch.access !== t.access) {
+        t.access = patch.access
+        // A running turn reads the access at each call; a request already waiting is answered
+        // now if the new access settles it (auto-edit allows an edit, read-only denies it).
+        for (const p of [...(live.get(t.id)?.asks.values() ?? [])]) {
+          const verdict = p.recheck?.()
+          if (verdict === "allow") p.done(true)
+          else if (verdict === "deny") p.done(false)
+        }
+      }
       if (patch.title?.trim()) t.title = patch.title.trim().slice(0, 120)
       touch(t)
       store.saveThread(t)
     }
 
-    const ask = (t: Thread, l: Live) => (tool: string, detail: string): Promise<boolean> =>
+    const ask = (t: Thread, l: Live) => (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask"): Promise<boolean> =>
       new Promise((resolve) => {
         const item: Item = { kind: "permission", id: newId("ask"), at: now(), tool, detail, state: "pending" }
         put(t, item, false)
         const done = (allow: boolean) => {
+          if (!l.asks.has(item.id)) return
           l.asks.delete(item.id)
           item.state = allow ? "allowed" : "denied"
           put(t, item, false)
           resolve(allow)
         }
-        l.asks.set(item.id, done)
+        l.asks.set(item.id, { done, recheck })
         l.abort.signal.addEventListener("abort", () => l.asks.has(item.id) && done(false), { once: true })
       })
 
@@ -118,7 +171,8 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
     const turn = (t: Thread, project: Project, text: string) =>
       Effect.gen(function*() {
         const memory = yield* Memory
-        const settings = store.settings()
+        // A thread's own effort wins over the settings' default.
+        const settings = withEffort(store.settings(), t.provider, t.effort)
         const provider = PROVIDERS[t.provider]
         const l: Live = { abort: new AbortController(), asks: new Map() }
         live.set(t.id, l)
@@ -147,6 +201,24 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
         let costUsd: number | null = null
         let tokens: number | null = null
         const texts = new Map<string, Item & { kind: "assistant" }>()
+        // Text reaches the page a whole line at a time, not token by token.
+        const held = new Map<string, ReturnType<typeof lineBuffer>>()
+        const release = (key: string, chunk: string) => {
+          if (!chunk) return
+          const known = texts.get(key)
+          if (known) {
+            known.text += chunk
+            hub.send("delta", { threadId: t.id, itemId: known.id, delta: chunk })
+            store.saveThread(t, true)
+          } else {
+            const item = { kind: "assistant" as const, id: newId("a"), at: now(), text: chunk }
+            texts.set(key, item)
+            put(t, item)
+          }
+        }
+        const flushText = (except?: string) => {
+          for (const [key, buffer] of held) if (key !== except) release(key, buffer.flush())
+        }
         const outcome = yield* turnStream(provider, {
           cwd: project.path,
           prompt,
@@ -154,7 +226,7 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
           model: t.model,
           resume: t.resume,
           instructions,
-          access: t.access,
+          access: () => t.access,
           settings,
           ask: ask(t, l),
           signal: l.abort.signal
@@ -169,19 +241,15 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
                   store.saveThread(t, true)
                 }
               } else if (e.type === "text") {
-                const known = texts.get(e.key)
-                if (known) {
-                  known.text += e.delta
-                  hub.send("delta", { threadId: t.id, itemId: known.id, delta: e.delta })
-                  store.saveThread(t, true)
-                } else {
-                  const item = { kind: "assistant" as const, id: newId("a"), at: now(), text: e.delta }
-                  texts.set(e.key, item)
-                  put(t, item)
-                }
+                flushText(e.key)
+                let buffer = held.get(e.key)
+                if (!buffer) held.set(e.key, buffer = lineBuffer())
+                release(e.key, buffer.push(e.delta))
               } else if (e.type === "tool") {
+                flushText()
                 put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output: e.output ?? "" })
               } else {
+                flushText()
                 costUsd = turnCost(e.costUsd, e.cumulative === true, t.sessionCostUsd ?? 0)
                 if (e.cumulative && e.costUsd !== null) t.sessionCostUsd = e.costUsd
                 tokens = e.tokens
@@ -193,6 +261,7 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
             Effect.succeed(l.abort.signal.aborted ? { outcome: "stopped" as const, error: "" } : { outcome: "failed" as const, error: e.message })
           )
         )
+        flushText()
         const result = l.abort.signal.aborted && outcome.outcome === "done" ? { outcome: "stopped" as const, error: "" } : outcome
         // Tool calls a stopped turn left running didn't finish.
         for (const i of t.items) if (i.kind === "tool" && i.status === "running" && result.outcome !== "done") put(t, { ...i, status: "failed" })
@@ -244,9 +313,9 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
         return true
       },
       answer: (id: string, askId: string, allow: boolean) => {
-        const resolve = live.get(id)?.asks.get(askId)
-        if (!resolve) return false
-        resolve(allow)
+        const pending = live.get(id)?.asks.get(askId)
+        if (!pending) return false
+        pending.done(allow)
         return true
       },
       stopAll: () => {

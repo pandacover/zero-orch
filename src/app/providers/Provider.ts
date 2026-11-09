@@ -41,10 +41,15 @@ export interface TurnInput {
   readonly resume: string | null
   /** Instructions added to the provider's own system prompt (zero's genome, when on). */
   readonly instructions: string
-  readonly access: Access
+  /** The thread's access right now: the person can change it while a turn runs. */
+  readonly access: () => Access
   readonly settings: Settings
-  /** Ask the person whether a tool call may run; resolves false when denied or the turn stops. */
-  readonly ask: (tool: string, detail: string) => Promise<boolean>
+  /**
+   * Ask the person whether a tool call may run; resolves false when denied or the turn stops.
+   * `recheck` says what the thread's access makes of the call now, so a change of access
+   * can answer a request still waiting.
+   */
+  readonly ask: (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask") => Promise<boolean>
   readonly signal: AbortSignal
 }
 

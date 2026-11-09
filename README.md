@@ -87,11 +87,14 @@ A chat app in the browser, instead of the CLI:
 - **Projects:** folders on this machine. zero itself is the first one; add more
   with **+ Add project** by pasting a folder's path.
 - **Threads:** conversations with Claude (through the Agent SDK) in a project.
-  Text streams in; tool calls show as one line each and open to show their
-  output. Pick the model and what Claude may do without asking from the
-  thread's header: **Ask first**, **Auto-edit** (edits in the project run
-  freely) or **Read-only**. A command or edit that needs approval waits as a
-  card in the thread: **Allow** / **Deny**, or `Y` / `N`.
+  Text streams in a line at a time; each run of tool calls folds into one
+  row that opens to show every call and its output. Under the message box,
+  pick the model and effort (one menu, models grouped by provider) and what
+  Claude may do without asking: **Ask first**, **Auto-edit** (edits in the
+  project run freely), **Full access** (edits and commands run without
+  asking) or **Read-only**. A change applies at once, even mid-turn. A
+  command or edit that needs approval waits as a card in the thread:
+  **Allow** / **Deny**, or `Y` / `N`.
 - **singularity in every thread:** a thread's first message in a git project is
   handed the most similar past change there ("Recalled from memory"); a turn
   that commits is stored for the next thread ("Stored in memory").

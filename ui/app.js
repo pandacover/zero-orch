@@ -178,18 +178,237 @@ function closeSide() { $("side").classList.remove("open"); $("scrim").hidden = t
 $("scrim").addEventListener("click", closeSide)
 $("side-close").addEventListener("click", closeSide)
 
-const claudeStatus = () => S.providers.claude
-const modelOptions = (current) => {
-  const list = [...(claudeStatus()?.models ?? [])]
-  if (current && !list.includes(current)) list.unshift(current)
-  return list.map((m) => el("option", { value: m, selected: m === current }, m))
+// ---------- sidebar width: drag the edge, arrow keys on it, double-click resets ----------
+const SIDE = { min: 200, max: 480, base: 272 }
+function setSideWidth(w, persist = true) {
+  const width = Math.round(Math.min(SIDE.max, Math.max(SIDE.min, w)))
+  document.querySelector(".shell").style.setProperty("--side-w", `${width}px`)
+  $("side-resize").setAttribute("aria-valuenow", String(width))
+  if (persist) save("sideWidth", width)
+  return width
 }
+function sideResized() { if (S.route.name === "evolution" && S.evo) paintEvo() }
+{
+  const handle = $("side-resize")
+  handle.setAttribute("aria-valuemin", String(SIDE.min))
+  handle.setAttribute("aria-valuemax", String(SIDE.max))
+  setSideWidth(load("sideWidth", SIDE.base), false)
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    handle.setPointerCapture(e.pointerId)
+    const left = $("side").getBoundingClientRect().left
+    document.body.classList.add("resizing")
+    const move = (ev) => setSideWidth(ev.clientX - left, false)
+    const up = (ev) => {
+      handle.removeEventListener("pointermove", move)
+      handle.removeEventListener("pointerup", up)
+      handle.removeEventListener("pointercancel", up)
+      document.body.classList.remove("resizing")
+      setSideWidth(ev.clientX - left)
+      sideResized()
+    }
+    handle.addEventListener("pointermove", move)
+    handle.addEventListener("pointerup", up)
+    handle.addEventListener("pointercancel", up)
+  })
+  handle.addEventListener("dblclick", () => { setSideWidth(SIDE.base); sideResized() })
+  handle.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 48 : 16
+    const now = Number(handle.getAttribute("aria-valuenow"))
+    const next = { ArrowLeft: now - step, ArrowRight: now + step, Home: SIDE.min, End: SIDE.max }[e.key]
+    if (next === undefined) return
+    e.preventDefault()
+    setSideWidth(next)
+    sideResized()
+  })
+}
+
+const PROVIDERS = [["claude", "Claude"], ["codex", "Codex"], ["ollama", "Ollama"]]
+const providerLabel = (p) => PROVIDERS.find(([x]) => x === p)?.[1] ?? p
+const status = (p) => S.providers[p]
 const ACCESS = [
   ["ask", "Ask first", "Reads freely; asks before every edit and command."],
   ["auto-edit", "Auto-edit", "Reads and edits inside the project; asks before commands."],
+  ["full-access", "Full access", "Reads, edits and runs commands without asking."],
   ["read-only", "Read-only", "Reads only. Nothing changes."]
 ]
-const accessOptions = (current) => ACCESS.map(([v, label, help]) => el("option", { value: v, selected: v === current, title: help }, label))
+const accessLabel = (a) => ACCESS.find(([v]) => v === a)?.[1] ?? a
+/** Each provider's effort levels, as src/app/Model.ts's EFFORTS has them; "" is the provider's own default. */
+const EFFORTS = {
+  claude: [["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]],
+  codex: [["", "Default"], ["minimal", "Minimal"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"]],
+  ollama: []
+}
+const defaultEffort = (p) => (p === "claude" ? S.settings.claude.effort : p === "codex" ? S.settings.codex.effort : "")
+const effortLabel = (p, v) => EFFORTS[p]?.find(([x]) => x === v)?.[1] ?? ""
+
+/** A model id as people say it: claude-opus-5-5 → Opus 5.5, gpt-5.5-codex → GPT-5.5 Codex, qwen2.5-coder:7b → Qwen2.5 Coder 7B. */
+function modelName(id) {
+  if (!id) return "Default"
+  const cap = (w) => (w ? w[0].toUpperCase() + w.slice(1) : w)
+  const claude = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id)
+  if (claude) return `${cap(claude[1])} ${claude[2]}${claude[3] ? `.${claude[3]}` : ""}`
+  const gpt = /^gpt-([\d.]+[a-z]?)(?:-(.+))?$/i.exec(id)
+  if (gpt) return `GPT-${gpt[1]}${gpt[2] ? ` ${gpt[2].split("-").map(cap).join(" ")}` : ""}`
+  if (/^o\d/.test(id)) return id
+  const [base, tag] = id.split(":")
+  const words = base.split(/[-_]/).map(cap).join(" ")
+  return tag && tag !== "latest" ? `${words} ${tag.toUpperCase()}` : words
+}
+
+/**
+ * A composer chip that opens a panel above it. `paint()` fills the panel
+ * while it's open. A click outside or Escape closes it; Up and Down move
+ * within a column, Left and Right between columns.
+ */
+function popover({ name, panelClass }) {
+  const label = el("span", { class: "pop-label" })
+  const trigger = el("button", { class: "select chip pop-trigger", type: "button", "aria-haspopup": "dialog", "aria-expanded": "false" }, label)
+  const panel = el("div", { class: `pop-panel ${panelClass}`, role: "dialog", "aria-label": name, hidden: true })
+  const wrap = el("div", { class: "pop" }, trigger, panel)
+  const pop = { wrap, trigger, label, panel, paint: () => {} }
+  const outside = (e) => { if (!wrap.contains(e.target)) pop.close() }
+  pop.open = () => {
+    panel.hidden = false
+    trigger.setAttribute("aria-expanded", "true")
+    pop.paint()
+    ;(panel.querySelector(".pop-item[aria-checked=true]:not(:disabled)") ?? panel.querySelector("button:not(:disabled)"))?.focus()
+    document.addEventListener("pointerdown", outside, true)
+  }
+  pop.close = (refocus = false) => {
+    if (panel.hidden) return
+    panel.hidden = true
+    trigger.setAttribute("aria-expanded", "false")
+    document.removeEventListener("pointerdown", outside, true)
+    if (refocus) trigger.focus()
+  }
+  /** Paint again, keeping focus on the same control. */
+  pop.repaint = () => {
+    if (panel.hidden) return
+    const focused = document.activeElement?.closest?.(".pop-panel") === panel ? document.activeElement.dataset.key : null
+    pop.paint()
+    if (focused) panel.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus()
+  }
+  trigger.addEventListener("click", () => (panel.hidden ? pop.open() : pop.close()))
+  panel.addEventListener("keydown", (e) => {
+    // Escape here closes the panel; it must not reach the page, where Escape stops a running turn.
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); pop.close(true); return }
+    if (e.key === "y" || e.key === "n") e.stopPropagation()
+    const cols = [...panel.querySelectorAll(".pop-col")].filter((c) => c.querySelector("button:not(:disabled)"))
+    const col = document.activeElement?.closest?.(".pop-col")
+    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && cols.length > 1 && col) {
+      e.preventDefault()
+      const next = cols[(cols.indexOf(col) + (e.key === "ArrowRight" ? 1 : -1) + cols.length) % cols.length]
+      ;(next.querySelector(".pop-item[aria-checked=true]:not(:disabled)") ?? next.querySelector("button:not(:disabled)"))?.focus()
+      return
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
+    e.preventDefault()
+    const all = [...(col ?? panel).querySelectorAll("button:not(:disabled)")]
+    const i = all.indexOf(document.activeElement)
+    all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length]?.focus()
+  })
+  return pop
+}
+
+/** One row of a picker list: a check, a label, and optionally a line of help under it. */
+const popItem = ({ key, on, text, help, mark, disabled, onPick }) =>
+  el("button", { class: "pop-item", type: "button", role: "menuitemradio", "aria-checked": String(on), "data-key": key, disabled, onclick: () => !on && onPick() },
+    el("span", { class: "pop-check", "aria-hidden": "true", text: on ? "✓" : "" }),
+    mark ?? null,
+    help ? el("span", { class: "pop-text" }, el("span", { text }), el("span", { class: "pop-help", text: help })) : el("span", { text }))
+
+/**
+ * The model and effort picker: one chip, one panel, models on the left
+ * grouped by provider and the chosen provider's effort on the right.
+ * Picking keeps the panel open. `onChange(patch)` saves a pick; a refused
+ * pick is put back by the caller with `set()`.
+ */
+function modelPicker({ provider, model, effort, onChange }) {
+  const state = { provider, model, effort: effort ?? defaultEffort(provider), busy: false }
+  const pop = popover({ name: "Model and effort", panelClass: "mp-panel" })
+  const paintLabel = () => {
+    const e = EFFORTS[state.provider]?.length ? effortLabel(state.provider, state.effort) : ""
+    pop.label.textContent = e ? `${modelName(state.model)} · ${e}` : modelName(state.model)
+    pop.trigger.title = `${providerLabel(state.provider)} · ${state.model}${e ? ` · ${e} effort` : ""}`
+  }
+  const save = (patch) => {
+    Object.assign(state, patch)
+    paintLabel()
+    pop.repaint()
+    Promise.resolve(onChange?.(patch)).catch(() => {})
+  }
+  pop.paint = () => {
+    const groups = PROVIDERS.flatMap(([p, name]) => {
+      const st = status(p)
+      const list = [...(st?.available ? st.models : [])]
+      if (p === state.provider && state.model && !list.includes(state.model)) list.unshift(state.model)
+      if (list.length) {
+        return [el("div", { class: "pop-group", role: "group", "aria-label": name }, el("div", { class: "pop-head", text: name }),
+          list.map((m) => {
+            const on = p === state.provider && m === state.model
+            return popItem({
+              key: `${p}/${m}`, on, text: modelName(m), disabled: state.busy && !on,
+              onPick: () => {
+                const patch = { provider: p, model: m }
+                // A provider change keeps the effort if the new one knows it, else takes its default.
+                if (p !== state.provider && !EFFORTS[p].some(([v]) => v === state.effort)) patch.effort = defaultEffort(p)
+                save(patch)
+              }
+            })
+          }))]
+      }
+      // Turned on but not reachable: say why, so a missing group isn't a mystery.
+      if (p !== "claude" && S.settings[p]?.enabled && st && !st.available) return [el("div", { class: "pop-group" }, el("div", { class: "pop-head", text: name }), el("div", { class: "pop-note", text: st.detail }))]
+      return []
+    })
+    const levels = EFFORTS[state.provider] ?? []
+    pop.panel.replaceChildren(
+      el("div", { class: "pop-col mp-models" },
+        state.busy ? el("div", { class: "pop-note", text: "Models switch once this turn ends." }) : null,
+        el("div", { class: "pop-scroll", role: "menu", "aria-label": "Model" }, groups)),
+      levels.length ? el("div", { class: "pop-col mp-effort", role: "menu", "aria-label": "Effort" },
+        el("div", { class: "pop-head", text: "Effort" }),
+        levels.map(([v, l]) => popItem({ key: `effort/${v}`, on: v === state.effort, text: l, onPick: () => save({ effort: v }) })),
+        el("div", { class: "pop-note", text: state.busy ? "Applies from the next turn." : "Higher thinks harder, slower and costs more." })) : null)
+    // Keep the chosen model in view when the list scrolls.
+    pop.panel.querySelector(".mp-models .pop-item[aria-checked=true]")?.scrollIntoView({ block: "nearest" })
+  }
+  paintLabel()
+  return {
+    node: pop.wrap,
+    value: () => ({ ...state }),
+    set: (patch) => { Object.assign(state, patch); paintLabel(); pop.repaint() },
+    setBusy: (b) => { if (state.busy !== b) { state.busy = b; pop.repaint() } }
+  }
+}
+
+/** What the agent may do without asking: a chip that opens the list of levels. Picking closes it. */
+function accessPicker(current, onChange) {
+  let value = current
+  const pop = popover({ name: "Permissions", panelClass: "ap-panel" })
+  const mark = el("span", { class: "ap-mark", "aria-hidden": "true" })
+  pop.trigger.prepend(mark)
+  const paintLabel = () => {
+    mark.dataset.level = value
+    pop.label.textContent = accessLabel(value)
+    pop.trigger.title = `${accessLabel(value)}: ${ACCESS.find(([v]) => v === value)?.[2] ?? ""}`
+    pop.trigger.setAttribute("aria-label", `Permissions: ${accessLabel(value)}`)
+  }
+  pop.paint = () => pop.panel.replaceChildren(
+    el("div", { class: "pop-head", text: "Permissions" }),
+    el("div", { class: "pop-col", role: "menu", "aria-label": "Permissions" }, ACCESS.map(([v, l, help]) => popItem({
+      key: v, on: v === value, text: l, help,
+      onPick: () => { value = v; paintLabel(); pop.close(true); onChange?.(v) }
+    }))))
+  paintLabel()
+  return {
+    node: pop.wrap,
+    value: () => value,
+    set: (v) => { if (v !== value) { value = v; paintLabel(); pop.repaint() } }
+  }
+}
 
 // ---------- new thread ----------
 const IDEAS = ["Explain how this project is laid out", "Find what's untested and add tests", "Review the last commit for bugs", "Run the checks and fix what fails"]
@@ -200,18 +419,30 @@ function startView(project) {
       el("p", { class: "lede", text: "A project is a folder on this machine. Threads in it can read, edit and run things there." }),
       el("button", { class: "btn btn-primary", type: "button", onclick: addProject }, "Add project")))
   }
+  const first = S.settings.defaultProvider
+  const models = modelPicker({
+    provider: first,
+    model: first === "claude" ? S.settings.claude.model : first === "codex" ? (S.settings.codex.model || status("codex")?.models[0]) : (S.settings.ollama.model || status("ollama")?.models[0]),
+    effort: defaultEffort(first),
+    onChange: () => readyFor(models.value().provider)
+  })
+  const access = accessPicker(S.settings.defaultAccess)
   const box = composer({
-    placeholder: `Ask Claude to do something in ${project.name}…`,
+    controls: [models.node, access.node],
     onSend: async (text) => {
       const projectId = pick.value
-      const t = await api("POST", "threads", { projectId })
+      const { provider, model, effort } = models.value()
+      const t = await api("POST", "threads", { projectId, provider, model, effort, access: access.value() })
       await api("POST", `threads/${t.id}/messages`, { text })
       go(`#/t/${t.id}`)
     }
   })
+  const readyFor = (p) => box.setReady(status(p)?.available === true,
+    status(p)?.available ? `Ask ${providerLabel(p)} to do something in ${project.name}…` : `${providerLabel(p)} is turned off in Settings`)
+  readyFor(first)
   const pick = el("select", { class: "select", "aria-label": "Project", onchange: () => go(`#/new/${pick.value}`) },
     S.projects.map((p) => el("option", { value: p.id, selected: p.id === project.id }, p.name)))
-  const ready = claudeStatus()?.available
+  const ready = status("claude")?.available
   return el("div", { class: "main-col" },
     el("div", { class: "bar" }, menuButton(), el("div", { class: "title-wrap" }, el("div", { class: "crumb", text: "New thread" })), el("div", { class: "pickers" }, pick)),
     el("div", { class: "start" }, el("div", { class: "start-inner" },
@@ -222,10 +453,10 @@ function startView(project) {
       box.node,
       el("div", { class: "ideas" }, IDEAS.map((idea) => el("button", { class: "idea", type: "button", onclick: () => box.fill(idea) }, idea))))))
 }
-const accessText = (a) => ({ "ask": "asks before edits and commands", "auto-edit": "edits freely and asks before commands", "read-only": "only reads" })[a]
+const accessText = (a) => ({ "ask": "asks before edits and commands", "auto-edit": "edits freely and asks before commands", "full-access": "edits and runs commands without asking", "read-only": "only reads" })[a]
 
 // ---------- composer ----------
-function composer({ placeholder, onSend, onStop, running = false, disabled = false }) {
+function composer({ placeholder = "", onSend, onStop, controls = [], running = false, disabled = false }) {
   const ta = el("textarea", { rows: 1, placeholder, "aria-label": "Message", disabled })
   const send = el("button", { class: "send", type: "button" })
   const hint = el("span", { class: "hint" })
@@ -233,9 +464,11 @@ function composer({ placeholder, onSend, onStop, running = false, disabled = fal
   const size = () => { ta.style.height = "auto"; ta.style.height = `${Math.min(ta.scrollHeight, 280)}px` }
   const paint = () => {
     send.className = `send${busy ? " stop" : ""}`
-    send.replaceChildren(busy ? "Stop" : "Send", el("kbd", { class: "kbd", text: busy ? "Esc" : "↵" }))
+    send.title = busy ? "Stop (Esc)" : "Send (Enter)"
+    send.replaceChildren(busy ? "Stop" : "Send", el("kbd", { text: busy ? "Esc" : "↵" }))
     send.disabled = !busy && (disabled || !ta.value.trim())
-    hint.textContent = busy ? "Working. Esc stops it." : "Enter sends · Shift+Enter for a new line"
+    hint.textContent = busy ? "Working. Esc stops it." : ""
+    hint.hidden = !busy
   }
   const submit = async () => {
     if (busy) return onStop?.()
@@ -255,11 +488,19 @@ function composer({ placeholder, onSend, onStop, running = false, disabled = fal
   })
   send.addEventListener("click", submit)
   paint()
-  const node = el("div", { class: "composer" }, ta, el("div", { class: "composer-foot" }, hint, send))
+  const node = el("div", { class: "composer" }, ta,
+    el("div", { class: "composer-foot" }, controls.length ? el("div", { class: "composer-controls" }, controls) : null, hint, send))
   queueMicrotask(() => !disabled && ta.focus())
   return {
     node,
     setBusy: (b) => { busy = b; paint() },
+    /** Whether the thread's provider can take a message now, and what the empty box says. */
+    setReady: (ready, text) => {
+      disabled = !ready
+      ta.disabled = disabled
+      ta.placeholder = text
+      paint()
+    },
     fill: (text) => { ta.value = text; size(); paint(); ta.focus() }
   }
 }
@@ -271,40 +512,48 @@ function threadView(t) {
   const title = el("input", { class: "title", value: t.title, "aria-label": "Thread title", maxlength: 120 })
   title.addEventListener("keydown", (e) => { if (e.key === "Enter") title.blur(); if (e.key === "Escape") { title.value = t.title; title.blur() } })
   title.addEventListener("change", () => api("PATCH", `threads/${t.id}`, { title: title.value }).catch(fail))
-  const model = el("select", { class: "select mono", "aria-label": "Model", title: "Model for this thread's next turn" }, modelOptions(t.model))
-  model.addEventListener("change", () => api("PATCH", `threads/${t.id}`, { model: model.value }).then(() => toast(`Next turn uses ${model.value}.`)).catch(fail))
-  const access = el("select", { class: "select", "aria-label": "What Claude may do without asking" }, accessOptions(t.access))
-  access.addEventListener("change", () => api("PATCH", `threads/${t.id}`, { access: access.value }).then(() => toast(ACCESS.find(([v]) => v === access.value)[2])).catch(fail))
+  // Picks save quietly; the server's answer (the thread event) is the record. A refused pick goes back.
+  const current = () => ({ provider: t.provider, model: t.model, effort: t.effort ?? defaultEffort(t.provider) })
+  const models = modelPicker({
+    ...current(),
+    onChange: (patch) => api("PATCH", `threads/${t.id}`, patch).catch((e) => { models.set(current()); fail(e) })
+  })
+  const access = accessPicker(t.access, (value) =>
+    api("PATCH", `threads/${t.id}`, { access: value }).catch((e) => { access.set(t.access); fail(e) }))
   const del = el("button", { class: "icon-btn", type: "button", title: "Delete thread", "aria-label": "Delete thread", onclick: async () => {
     if (!(await dialog({ title: "Delete this thread?", text: "Its messages are deleted from zero. Changes it made to the project stay.", ok: "Delete thread" }))) return
     try { await api("DELETE", `threads/${t.id}`); go("#/") } catch (e) { fail(e) }
   } })
   del.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/></svg>'
 
-  const nodes = new Map()
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
   const working = el("div", { class: "working", hidden: true }, el("i"), el("i"), el("i"), el("span", { text: "Working" }))
   const scroll = el("div", { class: "scroll" }, list)
   const box = composer({
-    placeholder: claudeStatus()?.available ? "Reply…" : "Claude is turned off in Settings",
-    disabled: !claudeStatus()?.available,
     running: t.status === "running",
+    controls: [models.node, access.node],
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
-  feed = { list, scroll, nodes, working, composer: box, stick: true, model, access, title }
+  feed = { list, scroll, cache: new Map(), groups: new Map(), working, composer: box, stick: true, models, access, title }
+  paintReady(t)
   scroll.addEventListener("scroll", () => { feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60 })
-  for (const item of t.items) list.append(itemNode(item, nodes))
-  list.append(working)
+  renderFeed()
   paintWorking()
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight })
   return [
     el("div", { class: "bar" }, menuButton(),
       el("div", { class: "title-wrap" }, title, el("div", { class: "crumb" }, project ? project.name : "removed project", " · ", el("code", { text: project?.path ?? "" }))),
-      el("div", { class: "pickers" }, model, access, del)),
+      el("div", { class: "pickers" }, del)),
     scroll,
     el("div", { class: "composer-wrap" }, box.node)
   ]
+}
+
+/** The composer takes messages only when the thread's provider is available; switching provider can change that. */
+function paintReady(t) {
+  const ready = status(t.provider)?.available === true
+  feed.composer.setReady(ready, ready ? "Reply…" : `${providerLabel(t.provider)} is turned off in Settings`)
 }
 
 function paintWorking() {
@@ -314,24 +563,86 @@ function paintWorking() {
   feed.working.hidden = !running || asking
   feed.list.append(feed.working)
   feed.composer.setBusy(running)
+  feed.models.setBusy(running)
 }
 const follow = () => { if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight }
 
-function itemNode(item, nodes) {
+/** An item's node, rendered again only when the item itself was replaced. */
+function nodeFor(item) {
+  const known = feed.cache.get(item.id)
+  if (known && known.item === item) return known.node
   const node = renderItem(item)
   node.dataset.id = item.id
-  nodes.set(item.id, node)
+  feed.cache.set(item.id, { item, node })
   return node
+}
+/** Make `parent`'s children exactly `nodes`, moving only what's out of place (text selections survive). */
+function reconcile(parent, nodes) {
+  nodes.forEach((n, i) => { if (parent.children[i] !== n) parent.insertBefore(n, parent.children[i] ?? null) })
+  while (parent.children.length > nodes.length) parent.lastElementChild.remove()
+}
+/** Tool calls, and the approvals already answered between them, fold into one row. */
+const foldable = (item) => item.kind === "tool" || (item.kind === "permission" && item.state !== "pending")
+
+/**
+ * The feed: the text of the conversation, with each run of tool calls
+ * collapsed to one row that shows the last tool to run. Open a row to see
+ * every call in it, and open a call to see its output.
+ */
+function renderFeed() {
+  const top = []
+  let run = null
+  for (const item of S.open.items) {
+    if (!foldable(item)) { run = null; top.push(item); continue }
+    if (!run) top.push(run = { key: item.id, items: [] })
+    run.items.push(item)
+  }
+  const groups = new Map()
+  const nodes = top.map((x) => (x.items ? toolGroup(x, groups) : nodeFor(x)))
+  feed.groups = groups
+  reconcile(feed.list, [...nodes, feed.working])
+}
+function toolGroup(run, groups) {
+  let g = feed.groups.get(run.key)
+  if (!g) {
+    const head = el("button", { class: "tool-row tool-group-head", type: "button" })
+    const body = el("div", { class: "tool-group-body" })
+    g = { head, body, node: el("div", { class: "tool-group" }, head, body) }
+    head.addEventListener("click", () => {
+      const open = !S.expanded.has(`group:${run.key}`)
+      open ? S.expanded.add(`group:${run.key}`) : S.expanded.delete(`group:${run.key}`)
+      paintGroup(g, run.key)
+    })
+  }
+  groups.set(run.key, g)
+  g.items = run.items
+  reconcile(g.body, run.items.map(nodeFor))
+  paintGroup(g, run.key)
+  return g.node
+}
+function paintGroup(g, key) {
+  const tools = g.items.filter((i) => i.kind === "tool")
+  const last = tools.at(-1) ?? g.items.at(-1)
+  const open = S.expanded.has(`group:${key}`)
+  const state = last.kind === "tool" ? last.status : last.state === "allowed" ? "done" : "failed"
+  const failed = tools.filter((i) => i.status === "failed").length
+  g.node.className = `tool-group ${state}${open ? " open" : ""}`
+  g.body.hidden = !open
+  g.head.setAttribute("aria-expanded", String(open))
+  g.head.title = last.detail ?? ""
+  g.head.replaceChildren(
+    el("span", { class: "chev", "aria-hidden": "true", text: "▸" }),
+    el("span", { class: "tool-state", "aria-label": state }),
+    el("span", { class: "tool-name", text: last.kind === "tool" ? last.name : last.tool }),
+    el("span", { class: "tool-detail", text: rel(last.detail) }),
+    el("span", { class: "tool-count", text: `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}` }))
 }
 function upsertItem(item) {
   const t = S.open
   const i = t.items.findIndex((x) => x.id === item.id)
   if (i >= 0) t.items[i] = item
   else t.items.push(item)
-  const old = feed.nodes.get(item.id)
-  const node = itemNode(item, feed.nodes)
-  if (old) old.replaceWith(node)
-  else feed.list.insertBefore(node, feed.working)
+  renderFeed()
   paintWorking()
   follow()
 }
@@ -345,7 +656,7 @@ function applyDelta(itemId, delta) {
   pendingDeltas.set(itemId, item)
   if (!deltaFrame) deltaFrame = requestAnimationFrame(() => {
     deltaFrame = 0
-    for (const it of pendingDeltas.values()) feed?.nodes.get(it.id)?.querySelector(".prose")?.replaceChildren(...mdNodes(it.text))
+    for (const it of pendingDeltas.values()) feed?.cache.get(it.id)?.node.querySelector(".prose")?.replaceChildren(...mdNodes(it.text))
     pendingDeltas.clear()
     follow()
   })
@@ -389,14 +700,14 @@ function renderItem(item) {
         el("div", { class: "ask-actions" },
           el("button", { class: "btn btn-primary", type: "button", onclick: () => answer(true) }, "Allow", el("kbd", { text: "Y" })),
           el("button", { class: "btn btn-quiet", type: "button", onclick: () => answer(false) }, "Deny", el("kbd", { text: "N" })),
-          el("span", { class: "hint", text: "Change what needs asking with the access menu above." })))
+          el("span", { class: "hint", text: "Change what needs asking with the access menu below." })))
     }
     case "memory": {
       const label = { recalled: "Recalled from memory", stored: "Stored in memory", none: "Committed" }[item.action]
       return el("div", { class: `mem ${item.action}`, title: item.title }, el("span", { class: "mem-label", text: label }), el("code", { text: item.commit.slice(0, 10) }), el("span", { class: "mem-title", text: item.title }))
     }
     case "turn": {
-      const meta = [item.model, `${(item.durationMs / 1000).toFixed(1)}s`, item.costUsd !== null ? usd(item.costUsd) : null, item.tokens ? `${(item.tokens / 1000).toFixed(1)}k tokens` : null].filter(Boolean)
+      const meta = [modelName(item.model), `${(item.durationMs / 1000).toFixed(1)}s`, item.costUsd !== null ? usd(item.costUsd) : null, item.tokens ? `${(item.tokens / 1000).toFixed(1)}k tokens` : null].filter(Boolean)
       if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
       return el("div", { class: "turn-meta" }, item.outcome === "stopped" ? el("span", { class: "stopped", text: "Stopped" }) : null, meta.map((m) => el("span", { text: m })))
     }
@@ -481,6 +792,12 @@ function settingsView() {
       S.settings = r.settings
       S.providers = r.providers
       toast("Settings saved.")
+      // Statuses may have changed (a provider turned on): paint them, keeping focus where it was.
+      if (S.route.name === "settings") {
+        const label = document.activeElement?.getAttribute("aria-label")
+        renderMain()
+        if (label) document.querySelector(`.page [aria-label="${CSS.escape(label)}"]`)?.focus()
+      }
     } catch (e) { fail(e) }
   }
   const sw = (get, set, label) => {
@@ -494,7 +811,13 @@ function settingsView() {
     return x
   }
   const row = (label, help, control) => el("div", { class: "row" }, el("div", {}, el("div", { class: "row-label", text: label }), help ? el("div", { class: "row-help", text: help }) : null), control)
-  const st = claudeStatus()
+  const st = status("claude")
+  const other = (p, about) => {
+    const ps = status(p)
+    return row(providerLabel(p), s[p].enabled ? (ps?.detail ?? about) : about,
+      el("span", { class: "row-end" }, s[p].enabled ? el("span", { class: `pill${ps?.available ? "" : " off"}` }, el("i"), ps?.available ? "Ready" : "Unavailable") : null,
+        sw(() => s[p].enabled, (v) => (s[p].enabled = v), `${providerLabel(p)} on`)))
+  }
   return el("div", { class: "page" }, el("div", { class: "page-inner" },
     el("div", {}, menuButton(), el("h1", { text: "Settings" }), el("p", { class: "lede", text: "Saved as you change them. New threads pick them up; open threads keep their own model and access." })),
     el("section", { class: "card" },
@@ -502,8 +825,14 @@ function settingsView() {
       el("p", { class: "hint", text: "Through the Claude Agent SDK, signed in the way Claude Code is on this machine." }),
       el("div", { class: "rows" },
         row("On", "Off stops new turns; threads stay.", sw(() => s.claude.enabled, (v) => (s.claude.enabled = v), "Claude on")),
-        row("Model for new threads", "Each thread can switch from its header.", sel((st?.models ?? [s.claude.model]).map((m) => [m, m]), () => s.claude.model, (v) => (s.claude.model = v), "Model", true)),
-        row("Effort", "How hard Claude thinks each step. Higher is slower and costs more.", sel([["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]], () => s.claude.effort, (v) => (s.claude.effort = v), "Effort")))),
+        row("Model for new threads", "Each thread can switch from its composer.", sel((st?.models ?? [s.claude.model]).map((m) => [m, modelName(m)]), () => s.claude.model, (v) => (s.claude.model = v), "Model")),
+        row("Effort for new threads", "How hard Claude thinks each step. Higher is slower and costs more.", sel(EFFORTS.claude, () => s.claude.effort, (v) => (s.claude.effort = v), "Effort")))),
+    el("section", { class: "card" },
+      el("h2", { text: "More providers" }),
+      el("p", { class: "hint", text: "Their models join the model menu, grouped by provider. Switching a thread to another provider starts a new session." }),
+      el("div", { class: "rows" },
+        other("codex", "OpenAI's Codex, signed in as the Codex CLI is. Runs in its own sandbox and can't stop to ask."),
+        other("ollama", "Models on this machine through Ollama, as plain chat: no tools."))),
     el("section", { class: "card" },
       el("h2", { text: "New threads" }),
       el("div", { class: "rows" },
@@ -705,7 +1034,13 @@ function connect() {
     if (meta.status !== "running") S.asking.delete(meta.id)
     if (S.open?.id === meta.id) {
       Object.assign(S.open, meta)
+      if (!("effort" in meta)) delete S.open.effort // cleared: back to the provider's default
       if (feed && document.activeElement !== feed.title) feed.title.value = meta.title
+      if (feed) {
+        feed.models.set({ provider: meta.provider, model: meta.model, effort: meta.effort ?? defaultEffort(meta.provider) })
+        feed.access.set(meta.access)
+        paintReady(S.open)
+      }
       paintWorking()
     }
     renderSide()

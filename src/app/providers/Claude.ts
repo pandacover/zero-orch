@@ -3,13 +3,15 @@
  * tools, streamed token by token, continued across turns with `resume`.
  *
  * Every tool call goes through `canUseTool`, which follows the thread's
- * access: reads run, edits inside the project run under `auto-edit`, and
- * everything else waits for the person to allow it in the thread.
+ * access: reads run, edits inside the project run under `auto-edit`,
+ * everything runs under `full-access`, and anything else waits for the
+ * person to allow it in the thread.
  */
 import { type CanUseTool, query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside } from "../../Policy.ts"
+import type { Access } from "../Model.ts"
 import type { Provider, TurnEvent, TurnInput } from "./Provider.ts"
 import { keepOutput, short } from "./Provider.ts"
 
@@ -23,9 +25,10 @@ const detailOf = (_tool: string, input: Record<string, unknown>): string =>
   short(input["command"] ?? input["file_path"] ?? input["pattern"] ?? input["url"] ?? input["query"] ?? input, 400)
 
 /** Whether a call runs without asking, is refused, or waits for the person. */
-export const gate = (access: TurnInput["access"], cwd: string, tool: string, input: Record<string, unknown>): "allow" | "deny" | "ask" => {
+export const gate = (access: Access, cwd: string, tool: string, input: Record<string, unknown>): "allow" | "deny" | "ask" => {
   if (READS.has(tool)) return "allow"
   if (access === "read-only") return "deny"
+  if (access === "full-access") return "allow"
   if (EDITS.has(tool)) {
     const path = input["file_path"] ?? input["notebook_path"]
     const inProject = typeof path === "string" && inside(cwd, path) !== undefined
@@ -46,10 +49,12 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   const abort = new AbortController()
   input.signal.addEventListener("abort", () => abort.abort(), { once: true })
   const canUseTool: CanUseTool = async (tool, toolInput) => {
-    const verdict = gate(input.access, input.cwd, tool, toolInput)
+    // Read the access now, not at the turn's start: the person may have changed it since.
+    const now = () => gate(input.access(), input.cwd, tool, toolInput)
+    const verdict = now()
     if (verdict === "allow") return { behavior: "allow", updatedInput: toolInput }
     if (verdict === "deny") return { behavior: "deny", message: "This thread is read-only. Say what you'd change instead." }
-    const ok = await input.ask(tool, detailOf(tool, toolInput))
+    const ok = await input.ask(tool, detailOf(tool, toolInput), now)
     return ok
       ? { behavior: "allow", updatedInput: toolInput }
       : { behavior: "deny", message: "The person declined this. Ask them how to proceed, or take another way." }

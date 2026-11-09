@@ -4,7 +4,7 @@
  *
  * Codex can't pause mid-turn for approval through the SDK, so a thread's
  * access picks its sandbox instead: `read-only` runs Codex read-only, and
- * the other two let it write inside the project (`workspace-write`).
+ * the others let it write inside the project (`workspace-write`).
  */
 import { Codex, type ThreadItem } from "@openai/codex-sdk"
 import { readFileSync } from "node:fs"
@@ -45,7 +45,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   const options = {
     workingDirectory: input.cwd,
     skipGitRepoCheck: true,
-    sandboxMode: input.access === "read-only" ? ("read-only" as const) : ("workspace-write" as const),
+    sandboxMode: input.access() === "read-only" ? ("read-only" as const) : ("workspace-write" as const),
     approvalPolicy: "never" as const,
     ...(input.model && input.model !== DEFAULT ? { model: input.model } : {}),
     ...(input.settings.codex.effort ? { modelReasoningEffort: input.settings.codex.effort } : {})

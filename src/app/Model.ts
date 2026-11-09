@@ -14,8 +14,22 @@ export type ProviderId = typeof ProviderId.Type
  * - `auto-edit`: reads and edits inside the project freely; asks before commands
  * - `read-only`: reads only
  */
-export const Access = Schema.Literals(["ask", "auto-edit", "read-only"])
+/** What a thread may do without asking: everything (`full-access`), edits in the project (`auto-edit`), only reads. */
+export const Access = Schema.Literals(["ask", "auto-edit", "full-access", "read-only"])
+export const ACCESSES: ReadonlyArray<Access> = Access.literals
 export type Access = typeof Access.Type
+
+/** How hard Claude thinks each step. */
+export const Effort = Schema.Literals(["low", "medium", "high", "xhigh", "max"])
+export type Effort = typeof Effort.Type
+
+/** The effort levels each provider takes; a thread's effort must be one of its provider's. */
+export const EFFORTS: Record<ProviderId, ReadonlyArray<string>> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+  ollama: []
+}
+export const isEffortFor = (provider: ProviderId, x: unknown): x is string => typeof x === "string" && EFFORTS[provider].includes(x)
 
 export const Settings = Schema.Struct({
   defaultProvider: ProviderId,
@@ -23,7 +37,7 @@ export const Settings = Schema.Struct({
   claude: Schema.Struct({
     enabled: Schema.Boolean,
     model: Schema.String,
-    effort: Schema.Literals(["low", "medium", "high", "xhigh", "max"])
+    effort: Effort
   }),
   codex: Schema.Struct({
     enabled: Schema.Boolean,
@@ -113,6 +127,8 @@ export interface ThreadMeta {
   provider: ProviderId
   model: string
   access: Access
+  /** The provider's effort for this thread, one of `EFFORTS[provider]`; unset follows the settings. */
+  effort?: string | undefined
   status: "idle" | "running"
   /** The provider's own session or thread id, to continue it. */
   resume: string | null

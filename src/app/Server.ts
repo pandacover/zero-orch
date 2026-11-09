@@ -14,7 +14,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join } from "node:path"
 import * as Singularity from "../Singularity.ts"
 import { makeEvolution } from "./Evolution.ts"
-import { metaOf, type ProviderId } from "./Model.ts"
+import { type Access, ACCESSES, metaOf, type ProviderId } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
 import { type Hub, makeThreads, PROVIDERS } from "./Threads.ts"
@@ -35,7 +35,7 @@ const MIME: Record<string, string> = {
 }
 
 const isProvider = (x: unknown): x is ProviderId => x === "claude" || x === "codex" || x === "ollama"
-const isAccess = (x: unknown): x is "ask" | "auto-edit" | "read-only" => x === "ask" || x === "auto-edit" || x === "read-only"
+const isAccess = (x: unknown): x is Access => (ACCESSES as ReadonlyArray<unknown>).includes(x)
 
 export const startServer = (options: ServerOptions) =>
   Effect.callback<never>(() => {
@@ -168,7 +168,8 @@ export const startServer = (options: ServerOptions) =>
             const thread = threads.create(project, {
               ...(isProvider(body["provider"]) ? { provider: body["provider"] } : {}),
               ...(typeof body["model"] === "string" ? { model: body["model"] } : {}),
-              ...(isAccess(body["access"]) ? { access: body["access"] } : {})
+              ...(isAccess(body["access"]) ? { access: body["access"] } : {}),
+              ...(typeof body["effort"] === "string" ? { effort: body["effort"] } : {})
             })
             return json(res, 201, thread)
           }
@@ -181,7 +182,8 @@ export const startServer = (options: ServerOptions) =>
               ...(typeof body["title"] === "string" ? { title: body["title"] } : {}),
               ...(isProvider(body["provider"]) ? { provider: body["provider"] } : {}),
               ...(typeof body["model"] === "string" ? { model: body["model"] } : {}),
-              ...(isAccess(body["access"]) ? { access: body["access"] } : {})
+              ...(isAccess(body["access"]) ? { access: body["access"] } : {}),
+              ...(typeof body["effort"] === "string" ? { effort: body["effort"] } : {})
             })
             return json(res, 200, metaOf(thread))
           }
