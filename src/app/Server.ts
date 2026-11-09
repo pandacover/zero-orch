@@ -16,7 +16,7 @@ import { extname, join } from "node:path"
 import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, isInlineImage, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
-import { type Access, ACCESSES, metaOf, type ProviderId } from "./Model.ts"
+import { type Access, ACCESSES, compactionOffered, metaOf, type ProviderId } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
 import { type Hub, makeThreads, PROVIDERS } from "./Threads.ts"
@@ -97,7 +97,7 @@ export const startServer = (options: ServerOptions) =>
     const providers = async () => {
       const { store } = await ready
       const s = store.settings()
-      const entries = await Promise.all(Object.values(PROVIDERS).map(async (p) => [p.id, { label: p.label, ...(await p.status(s)) }] as const))
+      const entries = await Promise.all(Object.values(PROVIDERS).map(async (p) => [p.id, { label: p.label, compaction: p.compaction, ...(await p.status(s)) }] as const))
       return Object.fromEntries(entries)
     }
 
@@ -261,7 +261,9 @@ export const startServer = (options: ServerOptions) =>
             if (!project) return json(res, 409, { error: "this thread's project was removed" })
             const status = (await providers())[thread.provider]
             if (!status?.available) return json(res, 409, { error: `${PROVIDERS[thread.provider].label} isn't available: ${status?.detail ?? "unknown"}` })
-            runtime.runFork(threads.turn(thread, project, text, attachments))
+            // Compact first: asked by the page's toggle, and only when the context is filling or the thread sat idle an hour.
+            const compactFirst = body["compact"] === true && compactionOffered(thread)
+            runtime.runFork(threads.turn(thread, project, text, attachments, { compactFirst }))
             return json(res, 202, { started: true })
           }
           if (m === "POST" && parts[2] === "stop") return threads.stop(thread.id) ? json(res, 202, { stopping: true }) : json(res, 409, { error: "this thread isn't working" })

@@ -97,23 +97,20 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 .icon-btn.side-toggle { position: fixed; top: 26px; left: 12px; z-index: 30; width: 32px; height: 32px; }
 .side-toggle svg { width: 17px; height: 17px; }
 .brand { justify-self: center; display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
-.brand-mark { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; background: var(--accent); color: var(--on-accent); font: 650 12px/1 var(--display); }
+.brand-mark { display: block; flex: none; width: 24px; height: 24px; border-radius: 6px; box-shadow: 0 1px 2px #0f2a8a40, 0 6px 14px -6px #2156e099; }
 .brand-name { font: 650 21px/1 var(--display); letter-spacing: -0.03em; }
-/* starting things, together: New thread, Search, Add project read as one list of actions */
-.side-actions { display: grid; gap: 2px; margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+/* starting things, together on one line: New, Search (takes the room), Add project */
+.side-actions { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .side-act {
-  display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border: 0; border-radius: 8px;
-  background: none; color: color-mix(in srgb, var(--ink) 86%, transparent); font-size: 13.5px; text-align: left; cursor: pointer;
+  flex: none; display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px;
+  background: none; color: color-mix(in srgb, var(--ink) 86%, transparent); font-size: 13px; text-align: left; cursor: pointer;
 }
-.side-act > svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
-.side-act > span { flex: 1; min-width: 0; }
+.side-act > svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
 .side-act:hover, .side-act:focus-within { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
-.side-act-primary { font-weight: 600; color: var(--ink); }
-.side-act-primary > svg { color: var(--accent-text); }
-.side-act .kbd { opacity: 0; transition: opacity .15s ease; }
-.side-act:hover .kbd, .side-act:focus-visible .kbd { opacity: 1; }
-.search { cursor: text; }
-.search input { flex: 1; min-width: 0; border: 0; outline: none; background: none; font-size: 13.5px; color: var(--ink); padding: 0; }
+.side-act-icon { width: 32px; padding: 0; justify-content: center; }
+.search { flex: 1; min-width: 0; padding: 0 9px; cursor: text; }
+.search:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); background: none; }
+.search input { flex: 1; min-width: 0; border: 0; outline: none; background: none; font-size: 13px; color: var(--ink); padding: 0; }
 .search input::placeholder { color: color-mix(in srgb, var(--ink) 60%, transparent); }
 .tree-empty { margin: 6px 8px; color: var(--faint); font-size: 12.5px; }
 .kbd { font-size: 10px; color: var(--muted); font-weight: 400; }
@@ -216,6 +213,37 @@ button.title-project { cursor: pointer; }
 button.title-project:hover { color: var(--accent-text); background: var(--accent-soft); }
 .title-project.gone { font-style: italic; }
 .title-sep { flex: none; color: var(--faint); font: 600 16px/1.3 var(--display); }
+/* Compact, beside the model picker: a switch that shows when the context is filling */
+.compact-toggle { gap: 8px; padding: 0 12px 0 8px; animation: compact-in .28s var(--ease, ease) both; }
+.compact-knob { position: relative; flex: none; width: 24px; height: 14px; border-radius: 99px; background: color-mix(in srgb, var(--ink) 18%, transparent); transition: background .18s ease; }
+.compact-knob::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--surface, #fff); box-shadow: 0 1px 2px #0000004d; transition: translate .18s var(--ease, ease); }
+.compact-toggle.on { color: var(--ink); border-color: var(--accent-line); }
+.compact-toggle.on .compact-knob { background: var(--accent); }
+.compact-toggle.on .compact-knob::after { translate: 10px 0; }
+@keyframes compact-in { from { opacity: 0; translate: 6px 0; } }
+/* a message waiting for the context to compact first */
+.queued { align-self: flex-end; max-width: 80%; margin: 4px 0 2px auto; padding: 9px 13px; border: 1px dashed var(--accent-line); border-radius: 14px; color: var(--muted); }
+.queued-label { display: block; margin-bottom: 3px; font: 500 10.5px var(--mono); letter-spacing: .02em; color: var(--accent-text); }
+.queued-text { color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; opacity: .75; }
+/* a compaction in the feed: a card that shows it working, then what it did */
+.compact-card { margin: 6px 0; padding: 11px 14px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 13px; }
+.compact-card.running { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+.compact-card.failed { border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: var(--warn-soft); }
+.compact-head { display: flex; align-items: center; gap: 9px; }
+.compact-head b { font-weight: 600; color: var(--ink); }
+.compact-icon { flex: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--accent); }
+.compact-card.running .compact-icon { border-top-color: transparent; animation: spin .8s linear infinite; }
+.compact-card.done .compact-icon { background: var(--accent); box-shadow: inset 0 0 0 2px var(--surface); }
+.compact-card.failed .compact-icon { border-color: var(--warn); }
+.compact-time, .compact-facts { margin-left: auto; font: 400 11.5px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.compact-bar { position: relative; height: 4px; margin: 10px 0 8px; border-radius: 99px; overflow: hidden; background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.compact-bar i { position: absolute; inset: 0 auto 0 0; width: 38%; border-radius: inherit; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: compact-sweep 1.4s cubic-bezier(.4, 0, .2, 1) infinite; }
+@keyframes compact-sweep { from { translate: -100% 0; } to { translate: 270% 0; } }
+@media (prefers-reduced-motion: reduce) { .compact-bar i { animation: none; width: 100%; opacity: .5; } }
+.compact-sub { margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.compact-summary { margin-top: 8px; }
+.compact-summary > summary { cursor: pointer; color: var(--accent-text); font-size: 12.5px; font-weight: 500; }
+.compact-summary .prose { margin-top: 8px; max-height: 320px; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--sunk); font-size: 13px; }
 .title-line .title { flex: 1; min-width: 0; width: auto; margin-left: 0; }
 .crumb { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crumb code { font-size: 10.5px; }
@@ -273,6 +301,8 @@ button.title-project:hover { color: var(--accent-text); background: var(--accent
 }
 /* a very long message stays a readable size while stuck, scrolling inside itself */
 .turn > .msg-u:first-child .msg-user { max-height: 38vh; overflow-y: auto; }
+.turn > .msg-u.expanded:first-child { position: static; }
+.turn > .msg-u.expanded:first-child .msg-user { max-height: none; overflow: visible; }
 
 /* a sent message spans the feed; click it to edit */
 .msg-user {
@@ -280,6 +310,10 @@ button.title-project:hover { color: var(--accent-text); background: var(--accent
   cursor: text; transition: border-color .15s ease, box-shadow .15s ease;
 }
 .msg-user:hover { border-color: var(--faint); }
+/* a long prompt: its first 5 lines (1.7 line height), fading out, until Show more */
+.msg-user.clamped .msg-user-body { max-height: calc(5 * 1.7em); overflow: hidden; mask-image: linear-gradient(to bottom, #000 calc(100% - 1.7em), transparent); }
+.msg-more { display: block; margin: 4px 0 0; padding: 0; border: 0; background: none; color: var(--accent-text); font: 500 12.5px var(--body); cursor: pointer; white-space: normal; }
+.msg-more:hover { text-decoration: underline; }
 .msg-user:focus-visible { outline: none; border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 /* message actions: a copy button that fades in on hover, in a row that's always there so nothing jumps */
 .msg { display: grid; grid-template-columns: minmax(0, 1fr); }
@@ -358,6 +392,10 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
 .tool.failed > .tool-row .tool-state, .tool-group.failed > .tool-group-head .tool-state { display: block; font: 600 12px/1 var(--mono); color: var(--ink); }
 .tool.failed > .tool-row .tool-state::before, .tool-group.failed > .tool-group-head .tool-state::before { content: "×"; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* the head of a run of tools: a one-line window onto a reel that spins, lottery-style, to each new call */
+.reel-window { flex: 1; min-width: 0; height: 18px; overflow: hidden; }
+.reel { display: flex; flex-direction: column; will-change: transform; }
+.reel-line { flex: none; height: 18px; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .tool-name { font: 500 11.5px var(--mono); color: var(--ink); flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 11.5px var(--mono); }
 /* a run of tool calls: one row naming the last tool, the calls inside on demand */

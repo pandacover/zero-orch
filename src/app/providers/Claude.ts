@@ -7,11 +7,11 @@
  * everything runs under `full-access`, and anything else waits for the
  * person to allow it in the thread.
  */
-import { type CanUseTool, query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk"
+import { type CanUseTool, type Query, query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
-import type { Access } from "../Model.ts"
+import { type Access, isCompact } from "../Model.ts"
 import type { Provider, TurnEvent, TurnInput } from "./Provider.ts"
 import { keepOutput, short } from "./Provider.ts"
 
@@ -61,8 +61,17 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       ? { behavior: "allow", updatedInput: toolInput }
       : { behavior: "deny", message: "The person declined this. Ask them how to proceed, or take another way." }
   }
+  // The message goes in as a stream held open until the turn's result, so the session can
+  // still be asked how full its context is (a plain string prompt closes it at the result).
+  let release = () => {}
+  const held = new Promise<void>((resolve) => (release = resolve))
+  input.signal.addEventListener("abort", () => release(), { once: true })
+  async function* prompt(): AsyncGenerator<SDKUserMessage> {
+    yield { type: "user", message: { role: "user", content: input.prompt }, parent_tool_use_id: null, session_id: "" }
+    await held
+  }
   const messages = query({
-    prompt: input.prompt,
+    prompt: prompt(),
     options: {
       cwd: input.cwd,
       model: input.model,
@@ -75,7 +84,16 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       canUseTool,
       includePartialMessages: true,
       abortController: abort,
-      env: cleanEnv(),
+      // Native compaction stays on whatever the machine's settings or environment say:
+      // a long thread compacts itself when its context fills, and `/compact` always works.
+      settings: { autoCompactEnabled: true },
+      hooks: {
+        PostCompact: [{ hooks: [async (h) => {
+          if (h.hook_event_name === "PostCompact") summary = summaryOf(h.compact_summary)
+          return {}
+        }] }]
+      },
+      env: cleanEnv({ DISABLE_AUTO_COMPACT: undefined, DISABLE_COMPACT: undefined }),
       ...(input.resume ? { resume: input.resume } : {})
     }
   })
@@ -86,10 +104,34 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   const tools = new Map<string, { name: string; detail: string }>()
   const announced = new Set<string>()
   const pending: Array<TurnEvent> = []
+  // Compaction the person asked for with `/compact`; any other is Claude Code's own, as the context filled.
+  const asked = isCompact(input.prompt)
+  let compacting = false
+  // The summary arrives through Claude Code's PostCompact hook, just before the compaction's boundary message.
+  let summary = ""
+  try {
   for await (const m of messages as AsyncIterable<SDKMessage>) {
     if (session === undefined && "session_id" in m && typeof m.session_id === "string") {
       session = m.session_id
       yield { type: "session", resume: session }
+    }
+    if (m.type === "system" && m.subtype === "status") {
+      if (m.status === "compacting" && !compacting) {
+        compacting = true
+        yield { type: "compact", trigger: asked ? "manual" : "auto", state: "running" }
+      }
+      if (m.compact_result === "failed") {
+        compacting = false
+        yield { type: "compact", trigger: asked ? "manual" : "auto", state: "failed", error: m.compact_error ?? "" }
+      }
+      continue
+    }
+    if (m.type === "system" && m.subtype === "compact_boundary") {
+      compacting = false
+      const c = m.compact_metadata
+      yield { type: "compact", trigger: c.trigger, state: "done", preTokens: c.pre_tokens, postTokens: c.post_tokens, durationMs: c.duration_ms, summary }
+      summary = ""
+      continue
     }
     if (m.type === "stream_event") {
       if (m.parent_tool_use_id) continue
@@ -135,14 +177,80 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       continue
     }
     if (m.type === "result") {
+      const context = await contextOf(messages)
+      release()
+      if (context) yield { type: "context", ...context }
       yield { type: "usage", costUsd: m.total_cost_usd, tokens: m.usage.input_tokens + m.usage.output_tokens, cumulative: true }
       if (m.subtype !== "success" && !abort.signal.aborted) throw new Error(`Claude stopped: ${m.subtype.replace(/_/g, " ")}${m.errors?.length ? `: ${m.errors.join("; ")}` : ""}`)
     }
   }
+  } finally {
+    release()
+  }
 }
+
+/** A compaction summary as a person reads it: its <summary> part when it has one, without the model's <analysis>. */
+export const summaryOf = (raw: string | undefined): string => {
+  const text = raw ?? ""
+  const inner = /<summary>([\s\S]*?)(?:<\/summary>|$)/.exec(text)?.[1]
+  return (inner ?? text.replace(/<analysis>[\s\S]*?<\/analysis>/g, "")).trim()
+}
+
+/**
+ * How full the session's context is after a turn, against the point where Claude Code compacts
+ * it on its own; undefined when the session can't say (it never holds up the turn for long).
+ */
+const contextOf = async (q: Query): Promise<{ used: number; limit: number } | undefined> => {
+  try {
+    const u = await Promise.race([q.getContextUsage({ detail: "summary" }), new Promise<never>((_, no) => setTimeout(() => no(new Error("slow")), 5000))])
+    const limit = u.autoCompactThreshold ?? u.maxTokens
+    return limit > 0 ? { used: u.totalTokens, limit } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const TITLE_PROMPT = `You name conversations with a coding agent. Reply with a title for the conversation that starts with the person's message: 3 to 7 words, sentence case, no quotes, no trailing period, nothing else. Name the task, not the person ("Fix flaky login test", "Add dark mode toggle").`
+
+/** A title for a thread from its first message, by a small model (no tools, no session kept); "" when it can't. */
+export const nameThread = async (message: string, model: string): Promise<string> => {
+  const abort = new AbortController()
+  const timer = setTimeout(() => abort.abort(), 30_000)
+  try {
+    const messages = query({
+      prompt: `<message>\n${message.slice(0, 4000)}\n</message>`,
+      options: {
+        model,
+        systemPrompt: TITLE_PROMPT,
+        tools: [],
+        maxTurns: 1,
+        settingSources: [],
+        persistSession: false,
+        abortController: abort,
+        env: cleanEnv()
+      }
+    })
+    for await (const m of messages as AsyncIterable<SDKMessage>) {
+      if (m.type === "result") return m.subtype === "success" ? cleanTitle(m.result) : ""
+    }
+    return ""
+  } catch {
+    return ""
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** A model's answer as a title: one line, no quotes, labels or trailing period, at most 60 characters. */
+export const cleanTitle = (raw: string): string => {
+  const line = raw.trim().split("\n")[0]!.replace(/^(title|thread)\s*:\s*/i, "").replace(/^["'`*#\s]+|["'`*\s.]+$/g, "").replace(/\s+/g, " ")
+  return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line
+}
+
 export const claude: Provider = {
   id: "claude",
   label: "Claude",
+  compaction: "manual",
   defaultModel: (s) => s.claude.model,
   status: async (s) => ({
     available: s.claude.enabled,

@@ -51,6 +51,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
 export const ollama: Provider = {
   id: "ollama",
   label: "Ollama",
+  compaction: "none",
   defaultModel: (s) => s.ollama.model,
   status: async (s) => {
     if (!s.ollama.enabled) return { available: false, detail: "Turned off in settings", models: [], asks: false, tools: false }
