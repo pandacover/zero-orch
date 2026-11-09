@@ -1,8 +1,8 @@
 /**
  * Threads: a conversation with one provider, in one project.
  *
- * A turn: the person's message goes in; on a thread's first message in a git
- * project, singularity hands over the past change there most like it; the
+ * A turn: the person's message goes in; in a git project, singularity hands over
+ * the past change there most like it (each message is a task start); the
  * provider streams text and tool calls, which become the thread's items; a
  * tool call that needs approval becomes a card the person answers; when the
  * turn ends, if it committed, `singularity store` keeps that commit for the
@@ -12,7 +12,7 @@ import { Effect, Option, Stream } from "effect"
 import { type Attachment, plainText, promptText } from "./Attachments.ts"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
-import { Memory } from "../Singularity.ts"
+import { Memory, MEMORY_NOTE, type Recall } from "../Singularity.ts"
 import type { Access, Item, Project, ProviderId, Settings, Thread } from "./Model.ts"
 import { isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
 import { type Provider, turnStream } from "./providers/Provider.ts"
@@ -195,17 +195,44 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
         touch(t)
 
         const before = yield* head(project.path).pipe(Effect.option)
+        // singularity keeps memory per git repo, and the person may turn recall off.
+        const remembers = settings.memory.recall && Option.isSome(before)
         let prompt = promptText(text, attachments)
-        if (firstTurn && settings.memory.recall && Option.isSome(before)) {
-          const recall = yield* memory.recall(words, project.path).pipe(Effect.orElseSucceed(() => Option.none()))
-          if (Option.isSome(recall)) {
-            put(t, { kind: "memory", id: newId("m"), at: now(), action: "recalled", commit: recall.value.commit, title: recalledTitle(recall.value.text) })
-            prompt = `${prompt}\n\n${recall.value.text}`
+        if (remembers) {
+          // Every message is a task start, as singularity's own hook treats it: ask singularity for
+          // the past change here most like it. The thread shows what came of it either way, so a
+          // miss or a failure isn't silent.
+          const handed = new Set(t.items.flatMap((i) => (i.kind === "memory" && i.action === "recalled" ? [i.commit] : [])))
+          const asked = yield* memory.recall(words, project.path).pipe(
+            Effect.match({
+              onFailure: (e) => ({ recall: Option.none<Recall>(), failed: e.message }),
+              onSuccess: (recall) => ({ recall, failed: "" })
+            })
+          )
+          if (Option.isSome(asked.recall) && handed.has(asked.recall.value.commit)) {
+            // The agent already has this one from earlier in the thread: point at it, don't hand it over twice.
+            const recall = asked.recall.value
+            put(t, { kind: "memory", id: newId("m"), at: now(), action: "checked", commit: recall.commit, title: `the same past change as earlier in this thread: ${recalledTitle(recall.text)}` })
+          } else if (Option.isSome(asked.recall)) {
+            const recall = asked.recall.value
+            put(t, { kind: "memory", id: newId("m"), at: now(), action: "recalled", commit: recall.commit, title: recalledTitle(recall.text), text: recall.text })
+            prompt = `${prompt}\n\n${recall.text}`
+          } else {
+            put(t, {
+              kind: "memory",
+              id: newId("m"),
+              at: now(),
+              action: "checked",
+              commit: "",
+              title: asked.failed ? `singularity didn't answer: ${asked.failed}` : "nothing stored in this repo is like this task yet"
+            })
           }
         }
-        const instructions = settings.useGenome
+        const genome = settings.useGenome
           ? yield* loadGenome(options.zeroRoot).pipe(Effect.map(solverPrompt), Effect.orElseSucceed(() => ""))
           : ""
+        // Every turn in a repo with memory is told what singularity is and how to recall mid-task.
+        const instructions = [genome, remembers ? MEMORY_NOTE : ""].filter((s) => s !== "").join("\n\n")
 
         let costUsd: number | null = null
         let tokens: number | null = null

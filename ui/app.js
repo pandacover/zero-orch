@@ -1016,7 +1016,15 @@ function reconcile(parent, nodes) {
   while (parent.children.length > nodes.length) parent.lastElementChild.remove()
 }
 /** Tool calls, and the approvals already answered between them, fold into one row. */
-const foldable = (item) => item.kind === "tool" || (item.kind === "permission" && item.state !== "pending")
+const foldable = (item) => (item.kind === "tool" && !memoryRead(item)) || (item.kind === "permission" && item.state !== "pending")
+/**
+ * A command the agent ran to read singularity's memory mid-task (`singularity recall "…"` or
+ * `singularity changes`). It isn't folded away with the other tools: it shows as a memory card.
+ */
+const memoryRead = (item) =>
+  item.kind === "tool" && (item.name === "Bash" || item.name === "Shell") && MEMORY_COMMAND.test((item.detail ?? "").trim())
+/** The command alone (maybe after a `cd`, maybe wrapped in a shell, as Codex runs it), with nothing piped or chained. */
+const MEMORY_COMMAND = /^(?:cd\s+("[^"]*"|\S+)\s*&&\s*)?(?:(?:bash|sh|pwsh|powershell(?:\.exe)?)(?:\s+-\w+)*\s+["']?)?singularity (?:recall|changes)\b[^|;&<>`]*$/
 
 /**
  * The feed: the text of the conversation, with each run of tool calls
@@ -1161,6 +1169,7 @@ function renderItem(item) {
     case "user": return userMessage(item)
     case "assistant": return el("div", { class: "msg msg-a" }, el("div", { class: "msg-ai" }, el("div", { class: "prose" }, mdNodes(item.text))), msgActions(() => item.text, el("span", { class: "msg-meta" })))
     case "tool": {
+      if (memoryRead(item)) return memoryCard(item)
       const open = S.expanded.has(item.id)
       const out = el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
       const node = el("div", { class: `tool ${item.status}${open ? " open" : ""}` })
@@ -1188,8 +1197,10 @@ function renderItem(item) {
           el("span", { class: "hint", text: "Change what needs asking with the model menu below." })))
     }
     case "memory": {
-      const label = { recalled: "Recalled from memory", stored: "Stored in memory", none: "Committed" }[item.action]
-      return el("div", { class: `mem ${item.action}`, title: item.title }, el("span", { class: "mem-label", text: label }), el("code", { text: item.commit.slice(0, 10) }), el("span", { class: "mem-title", text: item.title }))
+      const label = { recalled: "Recalled from memory", checked: "Memory checked", stored: "Stored in memory", none: "Committed" }[item.action]
+      const head = el("div", { class: "mem-head", title: item.title }, el("span", { class: "mem-label", text: label }), item.commit ? el("code", { text: item.commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: item.title }))
+      // A recall shows what singularity handed the agent, word for word.
+      return el("div", { class: `mem ${item.action}` }, head, item.text ? el("pre", { class: "mem-text", text: item.text }) : null)
     }
     case "turn": {
       if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
@@ -1198,7 +1209,20 @@ function renderItem(item) {
   }
   return el("div")
 }
-const verb = (tool) => ({ Bash: "run a command", Edit: "edit a file", Write: "write a file", MultiEdit: "edit a file", NotebookEdit: "edit a notebook" })[tool] ?? `use ${tool}`
+/** What singularity told the agent when it asked mid-task: the question, the commit it pointed to, and its words. */
+function memoryCard(item) {
+  const command = /singularity (recall|changes)\b.*/.exec(item.detail ?? "")?.[0] ?? item.detail
+  const recall = command.startsWith("singularity recall")
+  const out = item.output || (item.status === "running" ? "Asking singularity…" : "No output.")
+  const commit = /committed as (\w+)/.exec(out)?.[1]
+  const subject = /committed as \w+: "([^"]+)"/.exec(out)?.[1]
+  const asked = command.replace(/^singularity recall\s*/, "").replace(/^(["'])(.*)\1$/, "$2")
+  const label = !recall ? "Agent listed memory" : commit ? "Agent recalled" : "Agent asked memory"
+  const title = !recall ? "the changes stored in this repo" : subject ? `${subject} (asked: ${asked})` : `asked: ${asked}`
+  const head = el("div", { class: "mem-head", title: command }, el("span", { class: "mem-label", text: label }), commit ? el("code", { text: commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: title }))
+  return el("div", { class: `mem ${commit ? "recalled" : "checked"}` }, head, el("pre", { class: "mem-text", text: out }))
+}
+const verb = (tool) =>({ Bash: "run a command", Edit: "edit a file", Write: "write a file", MultiEdit: "edit a file", NotebookEdit: "edit a notebook" })[tool] ?? `use ${tool}`
 
 // ---------- markdown (escaped first; only our own tags come out) ----------
 function inline(s) {
@@ -1342,7 +1366,7 @@ function paintSettings() {
     ],
     memory: () => [
       group("singularity", "Memory of changes committed in each repository. It needs singularity installed; without it, threads work the same.",
-        row("Recall at a thread's first message", "Hand Claude the past change in this project most like what you asked.", sw(() => s.memory.recall, (v) => (s.memory.recall = v), "Recall")),
+        row("Recall at each message", "Hand Claude the past change in this project most like what you asked.", sw(() => s.memory.recall, (v) => (s.memory.recall = v), "Recall")),
         row("Store what threads commit", "After a turn that commits, keep that commit for the next thread to recall.", sw(() => s.memory.store, (v) => (s.memory.store = v), "Store")))
     ],
     genome: () => [

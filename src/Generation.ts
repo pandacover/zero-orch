@@ -28,7 +28,7 @@ import { GENOME_DIR, type Genome, loadGenome, MODELS } from "./Genome.ts"
 import { changes, head, revert, git } from "./Git.ts"
 import { appendLedger, type Attempt, attempts, lastMeasure, readLedger, type Scorecard } from "./Ledger.ts"
 import { improverPolicy } from "./Policy.ts"
-import { Memory, type Recall } from "./Singularity.ts"
+import { Memory, MEMORY_NOTE, type Recall } from "./Singularity.ts"
 
 /** Most an improver session may spend. */
 export const IMPROVER_BUDGET_USD = 5
@@ -225,7 +225,7 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
     effort: parentGenome.knobs.improverEffort,
     maxTurns: IMPROVER_MAX_TURNS,
     maxBudgetUsd: IMPROVER_BUDGET_USD,
-    systemAppend: parentGenome.improver,
+    systemAppend: `${parentGenome.improver.trim()}\n\n${MEMORY_NOTE}`,
     policy: improverPolicy(root),
     outputSchema: ImproverOutput,
     persist: true,

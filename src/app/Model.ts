@@ -52,7 +52,7 @@ export const Settings = Schema.Struct({
     model: Schema.String
   }),
   memory: Schema.Struct({
-    /** Hand the agent singularity's most similar past change at a thread's first message. */
+    /** Hand the agent singularity's most similar past change with each message. */
     recall: Schema.Boolean,
     /** Run `singularity store` after a turn that committed. */
     store: Schema.Boolean
@@ -111,9 +111,12 @@ export type Item =
     readonly kind: "memory"
     readonly id: string
     readonly at: string
-    action: "recalled" | "stored" | "none"
+    /** `checked`: asked at task start, nothing handed over (commit is ""). `none`: committed, not stored. */
+    action: "recalled" | "checked" | "stored" | "none"
     commit: string
     title: string
+    /** What singularity handed over, word for word, as the agent was given it (recalled only). */
+    text?: string
   }
   | {
     readonly kind: "turn"

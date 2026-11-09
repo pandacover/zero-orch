@@ -88,6 +88,13 @@ export const solverPolicy = (root: string): ToolPolicy => ({
 
 const READ_GIT = /^git (status|diff|log|show)( [^\s]+)*$/
 
+/** Reading singularity's memory: `singularity recall "<task>"` or `singularity changes`. */
+export const READ_MEMORY = /^singularity (recall|changes)( .+)?$/
+
+/** A command that only reads memory, so any session may run it without asking. */
+export const isMemoryRead = (command: unknown): boolean =>
+  typeof command === "string" && !SHELL_META.test(command.trim()) && READ_MEMORY.test(command.trim())
+
 /**
  * The solver on a real repo (`zero solve`): writes anywhere in it but `.git`,
  * runs the project's own scripts and node, reads memory, and commits.
@@ -103,7 +110,7 @@ export const repoPolicy = (root: string): ToolPolicy => ({
     READ_GIT,
     /^git add( [^\s]+)+$/,
     /^git commit -m "[^"$\\`]+"$/,
-    /^singularity (recall|changes)( .+)?$/
+    READ_MEMORY
   ]
 })
 
@@ -115,5 +122,5 @@ export const repoPolicy = (root: string): ToolPolicy => ({
 export const improverPolicy = (root: string): ToolPolicy => ({
   root,
   writable: (rel) => rel.startsWith("genome/"),
-  bash: [/^npm run typecheck$/, /^npm test$/, READ_GIT, /^singularity (recall|changes)( .+)?$/]
+  bash: [/^npm run typecheck$/, /^npm test$/, READ_GIT, READ_MEMORY]
 })

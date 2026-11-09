@@ -22,6 +22,29 @@ import { ChildProcessSpawner } from "effect/process"
 import { MemoryError } from "./Errors.ts"
 import { procOk, runProcess, singularityCommand, tail } from "./Proc.ts"
 
+/**
+ * What every agent zero starts in a git repo is told about singularity, added
+ * to its system prompt. It lives in code, not in the genome, so no improver
+ * can evolve it away. (Benchmark solvers work in throwaway folders with no
+ * memory, so they don't get it.)
+ */
+export const MEMORY_NOTE = [
+  "# Memory: singularity",
+  "",
+  "This repository's memory is singularity. It keeps each change an agent session committed here",
+  "after a check passed, with the task that asked for it and the commands that made it.",
+  "",
+  "- With each message, zero asks singularity for the past change here most like it. If it had one, it follows",
+  "  that message, headed \"A past change in this repository like your task\": read it,",
+  "  and its commit with `git show <commit>`, before you start. No such section: nothing stored here was close.",
+  "- Mid-task, when you are about to do something likely done before here (a kind of change, a fix,",
+  "  a command that keeps failing), run `singularity recall \"<what you are about to do>\"`. It prints the",
+  "  most similar past change, or says there is none. It calls no model. Don't run it at every step.",
+  "- `singularity changes` lists what it has stored here.",
+  "- Run this repo's checks before the change is committed: singularity stores a commit only when a check",
+  "  passed before it, and the next task like this one starts from it."
+].join("\n")
+
 /** A past change singularity handed over: a pointer to its commit, as text for a prompt. */
 export interface Recall {
   readonly commit: string

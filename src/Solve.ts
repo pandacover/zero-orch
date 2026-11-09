@@ -12,7 +12,7 @@ import { Agent } from "./Claude.ts"
 import { type Genome, solverPrompt } from "./Genome.ts"
 import { head } from "./Git.ts"
 import { repoPolicy } from "./Policy.ts"
-import { Memory, type Recall } from "./Singularity.ts"
+import { Memory, MEMORY_NOTE, type Recall } from "./Singularity.ts"
 
 export const SOLVE_BUDGET_USD = 10
 
@@ -45,7 +45,7 @@ export const solve = Effect.fn("Solve.run")(function*(input: {
     // Real tasks are bigger than benchmark ones.
     maxTurns: Math.max(input.genome.knobs.maxTurns, 60),
     maxBudgetUsd: SOLVE_BUDGET_USD,
-    systemAppend: solverPrompt(input.genome),
+    systemAppend: `${solverPrompt(input.genome)}\n\n${MEMORY_NOTE}`,
     policy: repoPolicy(input.cwd),
     persist: true,
     onEvent: input.log

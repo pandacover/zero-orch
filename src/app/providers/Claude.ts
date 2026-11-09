@@ -10,7 +10,7 @@
 import { type CanUseTool, query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
-import { inside } from "../../Policy.ts"
+import { inside, isMemoryRead } from "../../Policy.ts"
 import type { Access } from "../Model.ts"
 import type { Provider, TurnEvent, TurnInput } from "./Provider.ts"
 import { keepOutput, short } from "./Provider.ts"
@@ -27,6 +27,8 @@ const detailOf = (_tool: string, input: Record<string, unknown>): string =>
 /** Whether a call runs without asking, is refused, or waits for the person. */
 export const gate = (access: Access, cwd: string, tool: string, input: Record<string, unknown>): "allow" | "deny" | "ask" => {
   if (READS.has(tool)) return "allow"
+  // Reading singularity's memory is a read: an agent shouldn't have to ask to recall.
+  if (tool === "Bash" && isMemoryRead(input["command"])) return "allow"
   if (access === "read-only") return "deny"
   if (access === "full-access") return "allow"
   if (EDITS.has(tool)) {
