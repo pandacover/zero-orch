@@ -7,7 +7,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
 import { execFileSync } from "node:child_process"
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, type AgentRun } from "../src/Claude.ts"
@@ -30,13 +30,27 @@ const FIXED = `export function merge(intervals) {
 
 const sh = (cwd: string, ...args: Array<string>) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim()
 
-/** A repo shaped like zero: the genome, one benchmark task, a commit. */
+/**
+ * A fixture genome. Tests never read zero's live genome: an improver that
+ * changes it runs these tests, and a test pinned to the live solver model or
+ * improver instructions fails and makes it back its change out. (The first
+ * dogfood run lost two generations' model switch to exactly that.)
+ */
+const FIXTURE_GENOME: Record<string, string> = {
+  "genome.json": JSON.stringify({ solverModel: "claude-opus-5-5", solverEffort: "medium", maxTurns: 30, improverModel: "claude-opus-5-5", improverEffort: "high" }, null, 2),
+  "solver.md": "# Solver (test fixture)\n\nSolve the task.\n",
+  "lessons.md": "(none yet)\n",
+  "improver.md": "# Improver (test fixture)\n\nImprove the genome.\n"
+}
+
+/** A repo shaped like zero: a fixture genome, one benchmark task, a commit. */
 const makeRepo = (): string => {
   const dir = mkdtempSync(join(tmpdir(), "zero-gen-"))
   sh(dir, "init", "-q", "-b", "main")
   sh(dir, "config", "user.email", "zero@example.com")
   sh(dir, "config", "user.name", "zero test")
-  cpSync(join(ZERO, "genome"), join(dir, "genome"), { recursive: true })
+  mkdirSync(join(dir, "genome"))
+  for (const [file, text] of Object.entries(FIXTURE_GENOME)) writeFileSync(join(dir, "genome", file), text)
   cpSync(join(ZERO, "bench", "_lib"), join(dir, "bench", "_lib"), { recursive: true })
   cpSync(join(ZERO, "bench", "intervals"), join(dir, "bench", "intervals"), { recursive: true })
   writeFileSync(join(dir, ".gitignore"), ".zero/\n")
@@ -111,10 +125,12 @@ describe("generation", () => {
       // The improver was handed the scorecard and singularity's recall, and its own instructions.
       const improver = calls.find((c) => c.outputSchema !== undefined)!
       expect(improver.prompt).toContain("intervals: 3/8 hidden cases")
+      // It's told the solver's fixed environment, so it doesn't prescribe what the solver can't do.
+      expect(improver.prompt).toContain("only `node <file>`")
       // It's told every setting it may change, and what each accepts.
       expect(improver.prompt).toContain("solverModel: claude-opus-5-5 (one of: claude-opus-5-5, claude-sonnet-5-5")
       expect(improver.prompt).toContain("git show abc1234567")
-      expect(improver.systemAppend).toContain("You are zero's improver")
+      expect(improver.systemAppend).toContain("Improver (test fixture)")
       expect(improver.persist).toBe(true)
       // The commit came from resuming that same session.
       expect(calls.find((c) => c.resume !== undefined)?.resume).toBe("s1")

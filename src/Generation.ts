@@ -21,7 +21,7 @@
  */
 import { Effect, Option, Path } from "effect"
 import { Agent } from "./Claude.ts"
-import { BENCH_WORK_DIR, loadTasks, runBench } from "./Bench.ts"
+import { BENCH_WORK_DIR, loadTasks, runBench, SOLVER_ENVIRONMENT } from "./Bench.ts"
 import { GitError } from "./Errors.ts"
 import { judge } from "./Fitness.ts"
 import { GENOME_DIR, type Genome, loadGenome, MODELS } from "./Genome.ts"
@@ -123,6 +123,10 @@ export const improverPrompt = (input: {
     "## The genome's settings (genome/genome.json)",
     "",
     ...knobLines(input.genome),
+    "",
+    "## The solver's environment (fixed by zero; not part of the genome)",
+    "",
+    ...SOLVER_ENVIRONMENT,
     "",
     "## Scorecard",
     ""

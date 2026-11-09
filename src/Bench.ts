@@ -69,13 +69,30 @@ export const parseCheck = (stdout: string): { passed: number; total: number } =>
   return { passed: 0, total: 1 }
 }
 
+/** The solver's shell, as the solver is told it and as the improver is told it. */
+export const SOLVER_SHELL =
+  "The shell runs one command per call and only `node <file>` (no `cd`, `&&`, pipes or `node -e`): " +
+  "to try your code, write a script file and run it with node."
+
+/**
+ * What the improver needs to know about the solver's world to change how it
+ * works. (Dogfood gen 2–3: not knowing the shell rules, improvers told the
+ * solver to check its work with `node -e`, which the solver may not run.)
+ */
+export const SOLVER_ENVIRONMENT: ReadonlyArray<string> = [
+  "- Each task runs in a fresh temporary folder holding only the task's starting files.",
+  "- Tools: Read, Glob, Grep, Edit, Write, Bash. Reads and writes stay inside that folder.",
+  `- ${SOLVER_SHELL}`,
+  `- At most $${SOLVER_BUDGET_USD} and the genome's maxTurns per task. The hidden tests run after the solver finishes; it never sees them.`,
+  "- Its system prompt is Claude Code's own, plus genome/solver.md and genome/lessons.md."
+]
+
 const taskPrompt = (task: BenchTask, workspace: string) =>
   [
     task.prompt.trim(),
     "",
     `Your working directory is ${workspace}. Put every file there.`,
-    "The shell runs one command per call and only `node <file>` (no `cd`, `&&`, pipes or `node -e`):",
-    "to try your code, write a script file and run it with node.",
+    SOLVER_SHELL,
     "Hidden tests will import your module and check it after you finish."
   ].join("\n")
 
