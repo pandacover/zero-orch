@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="zero-token" content="__ZERO_TOKEN__">
+  <title>zero</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232563eb'/%3E%3Ctext x='32' y='32' dy='0.35em' text-anchor='middle' font-family='sans-serif' font-size='32' font-weight='600' fill='%23fff'%3EZ%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..700&family=Hanken+Grotesk:wght@400..600&family=Martian+Mono:wght@400..500&display=swap">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="shell">
+    <!-- One sidebar toggle for open and closed, fixed in place: it never moves while the sidebar slides. -->
+    <button class="icon-btn side-toggle" id="side-toggle" type="button" aria-controls="side" aria-label="Hide sidebar" title="Hide sidebar">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M6 2.5v11"/></svg>
+    </button>
+    <aside class="side" id="side" aria-label="Projects and threads">
+      <div class="side-top">
+        <span aria-hidden="true"></span>
+        <a class="brand" href="#/" aria-label="zero home">
+          <span class="brand-mark" aria-hidden="true">Z</span>
+          <span class="brand-name">zero</span>
+        </a>
+        <span aria-hidden="true"></span>
+      </div>
+      <!-- Starting things, together: a new thread, finding one, adding a project. -->
+      <div class="side-actions">
+        <button class="side-act side-act-primary" id="new-thread" type="button" title="New thread (Alt+N)">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+          <span>New thread</span><kbd class="kbd">Alt N</kbd>
+        </button>
+        <label class="side-act search">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+          <input id="search" type="search" placeholder="Search threads" aria-label="Search threads" autocomplete="off" spellcheck="false">
+        </label>
+        <button class="side-act" id="add-project" type="button">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5v8a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H8L6.5 3h-4a1 1 0 0 0-1 1.5z"/><path d="M8 7.5v4M6 9.5h4"/></svg>
+          <span>Add project</span>
+        </button>
+      </div>
+      <nav class="tree" id="tree"></nav>
+      <div class="side-foot">
+        <a class="foot-link" href="#/evolution" data-route="evolution"><span class="foot-dot"></span>Evolution</a>
+        <button class="foot-link" id="open-settings" type="button"><span class="foot-gear" aria-hidden="true">⚙</span>Settings</button>
+      </div>
+      <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize · double-click to reset"></div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+    <main class="main" id="main" tabindex="-1"></main>  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite" popover="manual"></div>
+
+  <dialog class="settings-dialog" id="settings" aria-labelledby="settings-title"></dialog>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form">
+      <h3 id="dialog-title"></h3>
+      <p id="dialog-text"></p>
+      <div id="dialog-body"></div>
+      <div class="dialog-actions">
+        <button class="btn btn-quiet" value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button class="btn btn-primary" value="ok" id="dialog-ok" type="submit"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
