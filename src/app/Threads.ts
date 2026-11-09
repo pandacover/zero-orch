@@ -9,6 +9,7 @@
  * next thread to recall. Every change is sent to open pages as it happens.
  */
 import { Effect, Option, Stream } from "effect"
+import { type Attachment, plainText, promptText } from "./Attachments.ts"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
 import { Memory } from "../Singularity.ts"
@@ -168,7 +169,7 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
       })
 
     /** One turn, start to end. Never fails: what goes wrong ends up on the thread. */
-    const turn = (t: Thread, project: Project, text: string) =>
+    const turn = (t: Thread, project: Project, text: string, attachments: ReadonlyArray<Attachment> = []) =>
       Effect.gen(function*() {
         const memory = yield* Memory
         // A thread's own effort wins over the settings' default.
@@ -178,20 +179,28 @@ export const makeThreads = (options: { readonly zeroRoot: string; readonly hub: 
         live.set(t.id, l)
         const started = Date.now()
         const firstTurn = !t.items.some((i) => i.kind === "user")
-        const history = t.items.flatMap((i) => (i.kind === "user" || i.kind === "assistant" ? [{ role: i.kind, text: i.text }] : []))
+        const history = t.items.flatMap((i): Array<{ role: "user" | "assistant"; text: string }> =>
+          i.kind === "user"
+            ? [{ role: "user", text: promptText(i.text, i.attachments) }]
+            : i.kind === "assistant"
+            ? [{ role: "assistant", text: i.text }]
+            : []
+        )
+        // The words alone, each file named where its marker was: for the title and memory recall.
+        const words = plainText(text, attachments)
 
-        put(t, { kind: "user", id: newId("u"), at: now(), text }, false)
-        if (firstTurn) t.title = titleFrom(text)
+        put(t, { kind: "user", id: newId("u"), at: now(), text, ...(attachments.length ? { attachments } : {}) }, false)
+        if (firstTurn) t.title = titleFrom(words)
         t.status = "running"
         touch(t)
 
         const before = yield* head(project.path).pipe(Effect.option)
-        let prompt = text
+        let prompt = promptText(text, attachments)
         if (firstTurn && settings.memory.recall && Option.isSome(before)) {
-          const recall = yield* memory.recall(text, project.path).pipe(Effect.orElseSucceed(() => Option.none()))
+          const recall = yield* memory.recall(words, project.path).pipe(Effect.orElseSucceed(() => Option.none()))
           if (Option.isSome(recall)) {
             put(t, { kind: "memory", id: newId("m"), at: now(), action: "recalled", commit: recall.value.commit, title: recalledTitle(recall.value.text) })
-            prompt = `${text}\n\n${recall.value.text}`
+            prompt = `${prompt}\n\n${recall.value.text}`
           }
         }
         const instructions = settings.useGenome

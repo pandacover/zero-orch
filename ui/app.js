@@ -41,6 +41,7 @@ const S = {
   asking: new Set(), // threads waiting on an approval
   collapsed: new Set(load("collapsed", [])),
   expanded: new Set(), // tool items showing output
+  query: "", // the sidebar's search
   route: { name: "home" },
   evo: null
 }
@@ -64,10 +65,64 @@ async function api(method, path, body) {
 
 function toast(text, error = false) {
   const t = el("div", { class: `toast${error ? " error" : ""}`, role: error ? "alert" : "status", text })
-  $("toasts").append(t)
-  setTimeout(() => t.remove(), error ? 7000 : 3000)
+  const box = $("toasts")
+  box.append(t)
+  // Shown afresh so it lands above anything in the top layer (an open modal); put away when empty.
+  if (box.matches(":popover-open")) box.hidePopover()
+  box.showPopover()
+  setTimeout(() => { t.remove(); if (!box.children.length && box.matches(":popover-open")) box.hidePopover() }, error ? 7000 : 3000)
 }
 const fail = (e) => toast(e.message, true)
+
+// ---------- tooltips: shown at once, not after the browser's delay ----------
+// Elements keep using `title`; on hover it moves to data-tip (so the native one never shows) and this one shows it.
+// A manual popover: it shows in the top layer, so it stays above an open modal (Settings, a confirm).
+const tip = el("div", { class: "tip", role: "tooltip", popover: "manual" })
+document.body.append(tip)
+let tipFor = null
+const tipShown = () => tip.matches(":popover-open")
+const hideTip = () => { if (tipShown()) tip.hidePopover(); tipFor = null }
+/** Move an element's title into data-tip, keeping it as the accessible name when it's the only one. */
+function adoptTitle(n) {
+  const text = n.getAttribute("title")
+  n.removeAttribute("title")
+  if (text === null) return
+  n.dataset.tip = text
+  if (text && !n.hasAttribute("aria-label") && !n.textContent.trim()) n.setAttribute("aria-label", text)
+}
+function showTip(n) {
+  const text = n.dataset.tip
+  if (!text || !n.isConnected) return hideTip()
+  tipFor = n
+  tip.textContent = text
+  // Shown afresh each time so it lands above anything that opened in the top layer since.
+  if (tipShown()) tip.hidePopover()
+  tip.showPopover()
+  const r = n.getBoundingClientRect()
+  const w = tip.offsetWidth
+  const h = tip.offsetHeight
+  const x = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, innerWidth - w - 8))
+  const below = r.bottom + 6
+  tip.style.left = `${x}px`
+  tip.style.top = `${below + h > innerHeight - 8 ? r.top - h - 6 : below}px`
+}
+document.addEventListener("pointerover", (e) => {
+  const n = e.target.closest?.("[title], [data-tip]")
+  if (!n) return hideTip()
+  if (n.hasAttribute("title")) adoptTitle(n)
+  if (n !== tipFor || !tipShown()) showTip(n)
+})
+document.addEventListener("pointerout", (e) => { if (tipFor && !tipFor.contains(e.relatedTarget)) hideTip() })
+for (const type of ["pointerdown", "keydown", "wheel"]) document.addEventListener(type, hideTip, true)
+addEventListener("scroll", hideTip, true)
+// A title set while the page runs (Copy → Copied, a chip's new name) moves over too, and updates a tip that's showing.
+new MutationObserver((records) => {
+  for (const r of records) {
+    if (!r.target.hasAttribute("title")) continue
+    adoptTitle(r.target)
+    if (r.target === tipFor) showTip(r.target)
+  }
+}).observe(document.body, { attributes: true, attributeFilter: ["title"], subtree: true })
 
 function dialog({ title, text = "", ok, body = null }) {
   const d = $("dialog")
@@ -96,6 +151,12 @@ addEventListener("hashchange", route)
 
 async function route() {
   S.route = parseRoute()
+  // Settings is a modal, not a page: an old #/settings link opens it over the home screen.
+  if (S.route.name === "settings") {
+    history.replaceState(null, "", "#/")
+    S.route = { name: "home" }
+    queueMicrotask(openSettings)
+  }
   closeSide()
   if (S.route.name === "thread") {
     try {
@@ -115,34 +176,57 @@ async function route() {
 // ---------- sidebar ----------
 function renderSide() {
   const tree = $("tree")
+  // Searching shows only the threads whose title matches (or every thread of a project whose name does), all expanded.
+  const q = S.query.trim().toLowerCase()
   const byProject = new Map(S.projects.map((p) => [p.id, []]))
   for (const t of S.threads) byProject.get(t.projectId)?.push(t)
-  tree.replaceChildren(...S.projects.map((p) => {
-    const closed = S.collapsed.has(p.id)
-    const threads = byProject.get(p.id) ?? []
-    return el("section", { class: `proj${closed ? " closed" : ""}` },
+  const shown = S.projects.flatMap((p) => {
+    const all = byProject.get(p.id) ?? []
+    if (!q || p.name.toLowerCase().includes(q)) return [[p, all]]
+    const hits = all.filter((t) => t.title.toLowerCase().includes(q))
+    return hits.length ? [[p, hits]] : []
+  })
+  if (q && shown.length === 0) return tree.replaceChildren(el("p", { class: "tree-empty", text: `No threads match “${S.query.trim()}”.` }))
+  tree.replaceChildren(...shown.map(([p, threads]) => {
+    const closed = !q && S.collapsed.has(p.id)
+    return el("section", { class: `proj${closed ? " closed" : ""}`, "data-id": p.id },
       el("div", { class: "proj-head" },
         el("button", { class: "proj-toggle", type: "button", "aria-expanded": String(!closed), title: p.path, onclick: () => toggleProject(p.id) },
-          el("span", { class: "chev", "aria-hidden": "true", text: "▼" }),
           el("span", { class: "proj-name", text: p.name })),
         el("span", { class: "proj-actions" },
           el("button", { class: "icon-btn", type: "button", title: `New thread in ${p.name}`, "aria-label": `New thread in ${p.name}`, onclick: () => go(`#/new/${p.id}`) }, "+"),
           el("button", { class: "icon-btn", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, onclick: () => removeProject(p) }, "×"))),
-      el("ul", { class: "threads" },
+      el("ul", { class: "threads", inert: closed },
         threads.length === 0
           ? el("li", { class: "none", text: "No threads yet" })
-          : threads.map((t) => el("li", {},
+          : threads.map((t) => el("li", { class: "thread-row" },
             el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null },
               t.status === "running" ? el("span", { class: S.asking.has(t.id) ? "ask-dot" : "run-dot", title: S.asking.has(t.id) ? "Waiting for your approval" : "Working" }) : null,
               el("span", { class: "t", text: t.title }),
-              el("span", { class: "age", text: ago(t.updatedAt) }))))))
+              el("span", { class: "age", text: ago(t.updatedAt) })),
+            // Deleting lives here, on the row's hover, rather than in the thread's header.
+            el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })))))
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
+}
+const TRASH_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/></svg>'
+async function deleteThread(t) {
+  if (!(await dialog({ title: "Delete this thread?", text: "Its messages are deleted from zero. Changes it made to the project stay.", ok: "Delete thread" }))) return
+  try {
+    await api("DELETE", `threads/${t.id}`)
+    if (S.open?.id === t.id) go("#/")
+  } catch (e) { fail(e) }
 }
 function toggleProject(id) {
   S.collapsed.has(id) ? S.collapsed.delete(id) : S.collapsed.add(id)
   save("collapsed", [...S.collapsed])
-  renderSide()
+  // Fold the section in place (not a re-render) so its height can ease shut or open.
+  const section = [...$("tree").querySelectorAll(".proj")].find((s) => s.dataset.id === id)
+  if (!section || S.query.trim()) return renderSide()
+  const closed = S.collapsed.has(id)
+  section.classList.toggle("closed", closed)
+  section.querySelector(".proj-toggle").setAttribute("aria-expanded", String(!closed))
+  section.querySelector(".threads").inert = closed
 }
 async function addProject() {
   const body = el("div", {},
@@ -166,17 +250,38 @@ function renderMain() {
   const main = $("main")
   const r = S.route
   if (r.name === "thread" && S.open) return main.replaceChildren(...threadView(S.open))
-  if (r.name === "settings") return main.replaceChildren(settingsView())
   if (r.name === "evolution") return main.replaceChildren(evolutionView())
   const project = S.projects.find((p) => p.id === r.projectId) ?? S.projects[0]
   main.replaceChildren(startView(project))
 }
 
-const menuButton = () => el("button", { class: "icon-btn menu", type: "button", "aria-label": "Open sidebar", onclick: openSide }, "☰")
-function openSide() { $("side").classList.add("open"); $("scrim").hidden = false }
-function closeSide() { $("side").classList.remove("open"); $("scrim").hidden = true }
+const narrow = matchMedia("(max-width: 820px)")
+/** The one sidebar toggle says what it will do. */
+function paintToggle() {
+  const shown = narrow.matches ? $("side").classList.contains("open") : !document.querySelector(".shell").classList.contains("side-hidden")
+  const label = shown ? "Hide sidebar" : "Show sidebar"
+  $("side-toggle").setAttribute("aria-label", label)
+  $("side-toggle").setAttribute("aria-expanded", String(shown))
+  $("side-toggle").title = label
+}
+function openSide() { $("side").classList.add("open"); $("scrim").hidden = false; paintToggle() }
+function closeSide() { $("side").classList.remove("open"); $("scrim").hidden = true; paintToggle() }
+/** Narrow: slide the sidebar over or away. Wide: hide or show it, remembered. */
+function toggleSide() {
+  if (narrow.matches) return $("side").classList.contains("open") ? closeSide() : openSide()
+  const hidden = !document.querySelector(".shell").classList.contains("side-hidden")
+  document.querySelector(".shell").classList.toggle("side-hidden", hidden)
+  save("sideHidden", hidden)
+  paintToggle()
+  sideResized()
+}
+document.querySelector(".shell").classList.toggle("side-hidden", load("sideHidden", false))
 $("scrim").addEventListener("click", closeSide)
-$("side-close").addEventListener("click", closeSide)
+$("side-toggle").addEventListener("click", toggleSide)
+narrow.addEventListener("change", paintToggle)
+paintToggle()
+$("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide() })
+$("search").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; S.query = ""; renderSide() } })
 
 // ---------- sidebar width: drag the edge, arrow keys on it, double-click resets ----------
 const SIDE = { min: 200, max: 480, base: 272 }
@@ -320,18 +425,23 @@ const popItem = ({ key, on, text, help, mark, disabled, onPick }) =>
     help ? el("span", { class: "pop-text" }, el("span", { text }), el("span", { class: "pop-help", text: help })) : el("span", { text }))
 
 /**
- * The model and effort picker: one chip, one panel, models on the left
- * grouped by provider and the chosen provider's effort on the right.
- * Picking keeps the panel open. `onChange(patch)` saves a pick; a refused
- * pick is put back by the caller with `set()`.
+ * The model, effort and permissions picker: one chip, one panel. Models on
+ * the left grouped by provider, then the chosen provider's effort, then what
+ * the agent may do without asking. Picking keeps the panel open.
+ * `onChange(patch)` saves a model or effort pick and `onAccess(level)` a
+ * permissions pick; a refused pick is put back by the caller with `set()` or
+ * `setAccess()`.
  */
-function modelPicker({ provider, model, effort, onChange }) {
-  const state = { provider, model, effort: effort ?? defaultEffort(provider), busy: false }
-  const pop = popover({ name: "Model and effort", panelClass: "mp-panel" })
+function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
+  const state = { provider, model, effort: effort ?? defaultEffort(provider), access, busy: false }
+  const pop = popover({ name: "Model, effort and permissions", panelClass: "mp-panel" })
+  const mark = el("span", { class: "ap-mark", "aria-hidden": "true" })
+  pop.trigger.prepend(mark)
   const paintLabel = () => {
     const e = EFFORTS[state.provider]?.length ? effortLabel(state.provider, state.effort) : ""
+    mark.dataset.level = state.access
     pop.label.textContent = e ? `${modelName(state.model)} · ${e}` : modelName(state.model)
-    pop.trigger.title = `${providerLabel(state.provider)} · ${state.model}${e ? ` · ${e} effort` : ""}`
+    pop.trigger.title = `${providerLabel(state.provider)} · ${state.model}${e ? ` · ${e} effort` : ""}\n${accessLabel(state.access)}: ${ACCESS.find(([v]) => v === state.access)?.[2] ?? ""}`
   }
   const save = (patch) => {
     Object.assign(state, patch)
@@ -371,7 +481,24 @@ function modelPicker({ provider, model, effort, onChange }) {
       levels.length ? el("div", { class: "pop-col mp-effort", role: "menu", "aria-label": "Effort" },
         el("div", { class: "pop-head", text: "Effort" }),
         levels.map(([v, l]) => popItem({ key: `effort/${v}`, on: v === state.effort, text: l, onPick: () => save({ effort: v }) })),
-        el("div", { class: "pop-note", text: state.busy ? "Applies from the next turn." : "Higher thinks harder, slower and costs more." })) : null)
+        state.busy ? el("div", { class: "pop-note", text: "Applies from the next turn." }) : null) : null,
+      // Permissions apply at once, even mid-turn. Each level's meaning is its tooltip.
+      el("div", { class: "pop-col mp-access", role: "menu", "aria-label": "Permissions" },
+        el("div", { class: "pop-head", text: "Permissions" }),
+        ACCESS.map(([v, l, help]) => {
+          const item = popItem({
+            key: `access/${v}`, on: v === state.access, text: l,
+            mark: el("span", { class: "ap-mark", "data-level": v, "aria-hidden": "true" }),
+            onPick: () => {
+              state.access = v
+              paintLabel()
+              pop.repaint()
+              Promise.resolve(onAccess?.(v)).catch(() => {})
+            }
+          })
+          item.title = help
+          return item
+        })))
     // Keep the chosen model in view when the list scrolls.
     pop.panel.querySelector(".mp-models .pop-item[aria-checked=true]")?.scrollIntoView({ block: "nearest" })
   }
@@ -380,128 +507,435 @@ function modelPicker({ provider, model, effort, onChange }) {
     node: pop.wrap,
     value: () => ({ ...state }),
     set: (patch) => { Object.assign(state, patch); paintLabel(); pop.repaint() },
+    setAccess: (v) => { if (v !== state.access) { state.access = v; paintLabel(); pop.repaint() } },
     setBusy: (b) => { if (state.busy !== b) { state.busy = b; pop.repaint() } }
   }
 }
 
-/** What the agent may do without asking: a chip that opens the list of levels. Picking closes it. */
-function accessPicker(current, onChange) {
-  let value = current
-  const pop = popover({ name: "Permissions", panelClass: "ap-panel" })
-  const mark = el("span", { class: "ap-mark", "aria-hidden": "true" })
-  pop.trigger.prepend(mark)
-  const paintLabel = () => {
-    mark.dataset.level = value
-    pop.label.textContent = accessLabel(value)
-    pop.trigger.title = `${accessLabel(value)}: ${ACCESS.find(([v]) => v === value)?.[2] ?? ""}`
-    pop.trigger.setAttribute("aria-label", `Permissions: ${accessLabel(value)}`)
-  }
-  pop.paint = () => pop.panel.replaceChildren(
-    el("div", { class: "pop-head", text: "Permissions" }),
-    el("div", { class: "pop-col", role: "menu", "aria-label": "Permissions" }, ACCESS.map(([v, l, help]) => popItem({
-      key: v, on: v === value, text: l, help,
-      onPick: () => { value = v; paintLabel(); pop.close(true); onChange?.(v) }
-    }))))
-  paintLabel()
-  return {
-    node: pop.wrap,
-    value: () => value,
-    set: (v) => { if (v !== value) { value = v; paintLabel(); pop.repaint() } }
-  }
-}
-
 // ---------- new thread ----------
-const IDEAS = ["Explain how this project is laid out", "Find what's untested and add tests", "Review the last commit for bugs", "Run the checks and fix what fails"]
+/** Things to ask, by kind. The pills above the list switch between them. */
+const IDEAS = [
+  ["Explore", '<circle cx="8" cy="8" r="6"/><path d="m10.5 5.5-1.6 3.4-3.4 1.6 1.6-3.4z"/>', [
+    "Explain how this project is laid out",
+    "Walk me through what happens when the main command runs",
+    "What would trip up someone new to this code?",
+    "List the TODOs and what each one would take"]],
+  ["Test", '<path d="M6 2h4M6.5 2v4L3 13a1 1 0 0 0 .9 1.5h8.2A1 1 0 0 0 13 13L9.5 6V2"/><path d="M4.6 10h6.8"/>', [
+    "Find what's untested and add tests",
+    "Run the checks and fix what fails",
+    "Write tests for the trickiest function here",
+    "Find the slowest test and make it faster"]],
+  ["Review", '<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>', [
+    "Review the last commit for bugs",
+    "Look for security problems in how input is handled",
+    "Find dead code that's safe to delete",
+    "Check the error handling on the main paths"]],
+  ["Fix", '<path d="M10.2 2.3a3.5 3.5 0 0 0-4.4 4.4L2 10.5V14h3.5l3.8-3.8a3.5 3.5 0 0 0 4.4-4.4l-2.2 2.2-2-.5-.5-2z"/>', [
+    "Fix the type errors",
+    "Tidy up the code I changed last",
+    "Make the README match what the code does",
+    "Upgrade a dependency that's behind and fix what breaks"]]
+]
+let ideaKind = load("ideaKind", "Explore")
+const icon = (paths, cls = "") => el("span", { class: `ico ${cls}`, "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>` })
+
 function startView(project) {
   if (!project) {
-    return el("div", { class: "start" }, el("div", { class: "start-inner" },
-      el("h1", { text: "Add a project to start" }),
-      el("p", { class: "lede", text: "A project is a folder on this machine. Threads in it can read, edit and run things there." }),
-      el("button", { class: "btn btn-primary", type: "button", onclick: addProject }, "Add project")))
+    return el("div", { class: "main-col" },
+      el("div", { class: "bar" }),
+      el("div", { class: "start" }, el("div", { class: "start-inner" },
+        el("h1", { text: "Add a project to start" }),
+        el("p", { class: "lede", text: "A project is a folder on this machine. Threads in it can read, edit and run things there." }),
+        el("button", { class: "btn btn-primary", type: "button", onclick: addProject }, "Add project"))))
   }
   const first = S.settings.defaultProvider
   const models = modelPicker({
     provider: first,
     model: first === "claude" ? S.settings.claude.model : first === "codex" ? (S.settings.codex.model || status("codex")?.models[0]) : (S.settings.ollama.model || status("ollama")?.models[0]),
     effort: defaultEffort(first),
+    access: S.settings.defaultAccess,
     onChange: () => readyFor(models.value().provider)
   })
-  const access = accessPicker(S.settings.defaultAccess)
   const box = composer({
-    controls: [models.node, access.node],
+    controls: [models.node],
     onSend: async (text) => {
       const projectId = pick.value
-      const { provider, model, effort } = models.value()
-      const t = await api("POST", "threads", { projectId, provider, model, effort, access: access.value() })
+      const { provider, model, effort, access } = models.value()
+      const t = await api("POST", "threads", { projectId, provider, model, effort, access })
       await api("POST", `threads/${t.id}/messages`, { text })
       go(`#/t/${t.id}`)
     }
   })
-  const readyFor = (p) => box.setReady(status(p)?.available === true,
-    status(p)?.available ? `Ask ${providerLabel(p)} to do something in ${project.name}…` : `${providerLabel(p)} is turned off in Settings`)
+  const readyFor = (p) => {
+    box.setReady(status(p)?.available === true,
+      status(p)?.available ? `Ask ${providerLabel(p)} to do something in ${project.name}…` : `${providerLabel(p)} is turned off in Settings`)
+    box.setAttach(status(p)?.tools !== false, `${providerLabel(p)} can't open files`)
+  }
   readyFor(first)
-  const pick = el("select", { class: "select", "aria-label": "Project", onchange: () => go(`#/new/${pick.value}`) },
+  const pick = el("select", { class: "select", "aria-label": "Project", title: "Project for the new thread", onchange: () => go(`#/new/${pick.value}`) },
     S.projects.map((p) => el("option", { value: p.id, selected: p.id === project.id }, p.name)))
-  const ready = status("claude")?.available
+  const ready = status(first)?.available
+  const list = el("div", { class: "suggest", role: "list" })
+  const kinds = el("div", { class: "kinds", role: "tablist", "aria-label": "Kinds of things to ask" })
+  const paintIdeas = () => {
+    const kind = IDEAS.find(([k]) => k === ideaKind) ?? IDEAS[0]
+    ideaKind = kind[0]
+    const ideas = kind[2]
+    kinds.replaceChildren(...IDEAS.map(([k, paths]) => el("button", {
+      class: "kind", type: "button", role: "tab", "aria-selected": String(k === ideaKind),
+      onclick: () => { ideaKind = k; save("ideaKind", k); paintIdeas() }
+    }, icon(paths), k)))
+    list.replaceChildren(...ideas.map((idea) => el("button", { class: "suggest-item", type: "button", role: "listitem", onclick: () => box.fill(idea) }, idea)))
+  }
+  paintIdeas()
   return el("div", { class: "main-col" },
-    el("div", { class: "bar" }, menuButton(), el("div", { class: "title-wrap" }, el("div", { class: "crumb", text: "New thread" })), el("div", { class: "pickers" }, pick)),
+    el("div", { class: "bar bar-quiet" }, el("div", { class: "title-wrap" }), el("div", { class: "pickers" }, pick)),
     el("div", { class: "start" }, el("div", { class: "start-inner" },
       el("h1", {}, "What should we do in ", el("em", { text: project.name }), "?"),
       el("p", { class: "lede", text: ready
-        ? `Claude works in ${project.path}. It ${accessText(S.settings.defaultAccess)}${S.settings.memory.recall ? ", and singularity hands it the most similar past change here." : "."}`
-        : `Claude is turned off. Turn it on in Settings to start a thread.` }),
-      box.node,
-      el("div", { class: "ideas" }, IDEAS.map((idea) => el("button", { class: "idea", type: "button", onclick: () => box.fill(idea) }, idea))))))
+        ? `${providerLabel(first)} works in ${project.path}. It ${accessText(S.settings.defaultAccess)}${S.settings.memory.recall ? ", and singularity hands it the most similar past change here." : "."}`
+        : `${providerLabel(first)} is turned off. Turn it on in Settings to start a thread.` }),
+      kinds,
+      list)),
+    el("div", { class: "composer-wrap" }, box.node))
 }
 const accessText = (a) => ({ "ask": "asks before edits and commands", "auto-edit": "edits freely and asks before commands", "full-access": "edits and runs commands without asking", "read-only": "only reads" })[a]
 
+// ---------- attachments ----------
+/** Where a message's text marks an attached file; the server reads the same marker (src/app/Attachments.ts). */
+const ATT = /\{\{att:(att_[a-z0-9]{6,32})\}\}/g
+const MAX_FILE = 25 * 1024 * 1024
+const fileUrl = (id) => `/api/attachments/${id}?token=${encodeURIComponent(TOKEN)}`
+const isRaster = (mime) => /^image\/(png|jpeg|gif|webp|bmp)$/.test(mime ?? "")
+const bytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`)
+const FILE_PATHS = '<path d="M9 1.75H4.5a1.5 1.5 0 0 0-1.5 1.5v9.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5V5.75z"/><path d="M9 1.75v4h4"/>'
+const CLIP_PATHS = '<path d="m13.5 7.5-5.6 5.6a3.4 3.4 0 0 1-4.8-4.8l5.9-5.9a2.3 2.3 0 0 1 3.2 3.2l-5.8 5.8a1.1 1.1 0 0 1-1.6-1.6l5.2-5.2"/>'
+
+/** A file as a small chip: a thumbnail (images) or a file mark, then its name. */
+function attChip(tag, { name, mime, src, attrs = {} }) {
+  return el(tag, { class: "att", ...attrs },
+    isRaster(mime) && src ? el("img", { class: "att-thumb", src, alt: "" }) : icon(FILE_PATHS, "att-icon"),
+    el("span", { class: "att-name", text: name }))
+}
+/** A sent message: its words, with each attached file as a chip where it was put. */
+function userNodes(item) {
+  const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
+  const out = []
+  let last = 0
+  for (const m of item.text.matchAll(ATT)) {
+    if (m.index > last) out.push(item.text.slice(last, m.index))
+    const a = known.get(m[1])
+    out.push(a
+      ? attChip("a", { name: a.name, mime: a.mime, src: fileUrl(a.id), attrs: { href: fileUrl(a.id), target: "_blank", rel: "noopener", title: `${a.name} · ${bytes(a.size)}` } })
+      : el("span", { class: "att gone", text: "a file" }))
+    last = m.index + m[0].length
+  }
+  if (last < item.text.length) out.push(item.text.slice(last))
+  return out
+}
+
+const COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>'
+const CHECK_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>'
+/** The row under a message that shows on hover: a copy button for `text()`, then any `extra` (a response's turn details). */
+function msgActions(text, ...extra) {
+  const copy = el("button", { class: "icon-btn msg-copy", type: "button", title: "Copy", "aria-label": "Copy message", html: COPY_ICON })
+  copy.addEventListener("click", async (e) => {
+    e.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(text())
+      copy.innerHTML = CHECK_ICON
+      copy.title = "Copied"
+      setTimeout(() => { copy.innerHTML = COPY_ICON; copy.title = "Copy" }, 1200)
+    } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
+  })
+  return el("div", { class: "msg-actions" }, copy, extra)
+}
+/** A sent message as words, each attached file by its name. */
+function plainText(item) {
+  const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
+  return item.text.replace(ATT, (_, id) => known.get(id)?.name ?? "a file")
+}
+/** A sent message: click it (or Enter on it) to edit it and send it again. */
+function userMessage(item) {
+  const bubble = el("div", { class: "msg-user", tabindex: "0" }, userNodes(item))
+  const wrap = el("div", { class: "msg msg-u" }, bubble, msgActions(() => plainText(item)))
+  const start = () => { if (!wrap.classList.contains("editing")) editMessage(item, wrap, bubble) }
+  bubble.addEventListener("click", (e) => {
+    // A file chip opens the file; a drag that selected words is for copying them.
+    if (e.target.closest("a") || String(getSelection()).length) return
+    start()
+  })
+  bubble.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === bubble) { e.preventDefault(); start() } })
+  return wrap
+}
+/**
+ * Edit a sent message in place. The agent's history can't be rewound, so
+ * sending the edit posts it as a new message at the end of the thread.
+ */
+function editMessage(item, wrap, bubble) {
+  const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
+  const nodes = []
+  let last = 0
+  for (const m of item.text.matchAll(ATT)) {
+    if (m.index > last) nodes.push(item.text.slice(last, m.index))
+    const a = known.get(m[1])
+    // Chips keep their file: serialize() turns each back into its marker.
+    if (a) nodes.push(attChip("span", { name: a.name, mime: a.mime, src: fileUrl(a.id), attrs: { contenteditable: "false", "data-att": a.id, title: a.name } }))
+    last = m.index + m[0].length
+  }
+  if (last < item.text.length) nodes.push(item.text.slice(last))
+  const input = el("div", { class: "msg-edit-input", contenteditable: "true", role: "textbox", "aria-multiline": "true", "aria-label": "Edit message" }, nodes)
+  const cancel = el("button", { class: "btn btn-quiet btn-sm", type: "button", text: "Cancel" })
+  const send = el("button", { class: "btn btn-primary btn-sm", type: "button", text: "Send" })
+  const editor = el("div", { class: "msg-edit" }, input,
+    el("div", { class: "msg-edit-foot" }, el("span", { class: "hint", text: "Sends as a new message · Esc cancels" }), cancel, send))
+  const close = () => {
+    editor.replaceWith(bubble)
+    wrap.classList.remove("editing")
+    bubble.focus({ preventScroll: true })
+  }
+  const submit = async () => {
+    const text = serialize(input).trim()
+    if (!text || send.disabled) return
+    send.disabled = true
+    try {
+      await api("POST", `threads/${S.open.id}/messages`, { text })
+      close()
+    } catch (e) { send.disabled = false; fail(e) }
+  }
+  input.addEventListener("input", () => { send.disabled = serialize(input).trim() === "" })
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close() }
+    else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit() }
+  })
+  input.addEventListener("paste", (e) => {
+    e.preventDefault()
+    const text = e.clipboardData?.getData("text/plain") ?? ""
+    if (text) document.execCommand("insertText", false, text)
+  })
+  cancel.addEventListener("click", close)
+  send.addEventListener("click", submit)
+  wrap.classList.add("editing")
+  bubble.replaceWith(editor)
+  input.focus()
+  const r = document.createRange()
+  r.selectNodeContents(input)
+  r.collapse(false)
+  getSelection().removeAllRanges()
+  getSelection().addRange(r)
+}
+async function upload(file) {
+  const res = await fetch("/api/attachments", {
+    method: "POST",
+    headers: { "x-zero-token": TOKEN, "content-type": file.type || "application/octet-stream", "x-file-name": encodeURIComponent(file.name || "") },
+    body: file
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `couldn't attach ${file.name || "the file"} (${res.status})`)
+  return data
+}
+
+/** The editor's content as text: line breaks as "\n", each file chip as its marker. */
+function serialize(root) {
+  let out = ""
+  const walk = (n) => {
+    for (const c of n.childNodes) {
+      if (c.nodeType === Node.TEXT_NODE) { out += c.nodeValue.replace(/​/g, ""); continue }
+      if (c.nodeType !== Node.ELEMENT_NODE) continue
+      if (c.classList.contains("att")) { if (c.dataset.att) out += `{{att:${c.dataset.att}}}`; continue }
+      if (c.tagName === "BR") { out += "\n"; continue }
+      // A block the browser made for a new line starts on one.
+      if (/^(DIV|P|LI)$/.test(c.tagName) && out && !out.endsWith("\n")) out += "\n"
+      walk(c)
+    }
+  }
+  walk(root)
+  return out.replace(/ /g, " ")
+}
+
 // ---------- composer ----------
-function composer({ placeholder = "", onSend, onStop, controls = [], running = false, disabled = false }) {
-  const ta = el("textarea", { rows: 1, placeholder, "aria-label": "Message", disabled })
+/**
+ * The message box. It's an editable div rather than a textarea so a file
+ * can sit among the words: paste one, drop one, or pick one with Attach and
+ * it lands as a chip where the caret was. Each file uploads as it lands;
+ * Send waits until they all have.
+ */
+function composer({ onSend, onStop, controls = [], running = false, disabled = false }) {
+  const input = el("div", { class: "input empty", contenteditable: disabled ? "false" : "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message", "data-placeholder": "" })
+  const picker = el("input", { type: "file", multiple: true, hidden: true, tabindex: "-1" })
+  const attach = el("button", { class: "pill-btn", type: "button", title: "Attach files. You can paste or drop them too." }, icon(CLIP_PATHS), el("span", { text: "Attach" }))
   const send = el("button", { class: "send", type: "button" })
   const hint = el("span", { class: "hint" })
   let busy = running
-  const size = () => { ta.style.height = "auto"; ta.style.height = `${Math.min(ta.scrollHeight, 280)}px` }
+  let canAttach = true
+  let range = null // where the caret last was inside the box
+
+  const uploading = () => input.querySelector('.att[data-state="uploading"]') !== null
+  const empty = () => !input.querySelector(".att") && serialize(input).trim() === ""
   const paint = () => {
     send.className = `send${busy ? " stop" : ""}`
-    send.title = busy ? "Stop (Esc)" : "Send (Enter)"
-    send.replaceChildren(busy ? "Stop" : "Send", el("kbd", { text: busy ? "Esc" : "↵" }))
-    send.disabled = !busy && (disabled || !ta.value.trim())
+    send.title = busy ? "Stop (Esc)" : uploading() ? "Waiting for files to upload" : "Send (Enter)"
+    send.setAttribute("aria-label", busy ? "Stop" : "Send")
+    send.innerHTML = busy
+      ? '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>'
+      : '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>'
+    send.disabled = !busy && (disabled || empty() || uploading())
+    attach.disabled = disabled || !canAttach
     hint.textContent = busy ? "Working. Esc stops it." : ""
     hint.hidden = !busy
   }
+  /** After any change: an empty box is truly empty (so its placeholder shows). */
+  const sync = () => {
+    const isEmpty = empty()
+    // Clear only what the browser leaves behind (a stray <br>), never a space or line the person typed.
+    if (isEmpty && input.textContent === "" && input.childNodes.length) input.replaceChildren()
+    input.classList.toggle("empty", isEmpty)
+    paint()
+  }
+  const track = () => {
+    if (!input.isConnected) return document.removeEventListener("selectionchange", track)
+    const s = getSelection()
+    if (s.rangeCount && input.contains(s.anchorNode)) range = s.getRangeAt(0).cloneRange()
+  }
+  document.addEventListener("selectionchange", track)
+  const caretTo = (r) => {
+    const s = getSelection()
+    s.removeAllRanges()
+    s.addRange(r)
+    range = r.cloneRange()
+  }
+  /** Put nodes where the caret was (the end if it never was in the box), and the caret after them. */
+  const insert = (nodes) => {
+    input.focus()
+    let r = range && input.contains(range.startContainer) ? range : null
+    if (!r) { r = document.createRange(); r.selectNodeContents(input); r.collapse(false) }
+    r.deleteContents()
+    const frag = document.createDocumentFragment()
+    frag.append(...nodes)
+    r.insertNode(frag)
+    const after = document.createRange()
+    after.setStartAfter(nodes.at(-1))
+    after.collapse(true)
+    caretTo(after)
+  }
+  const addFiles = (files) => {
+    if (disabled) return
+    if (!canAttach) return toast(attach.title, true)
+    const nodes = []
+    for (const file of files) {
+      if (file.size > MAX_FILE) { toast(`${file.name} is over 25 MB, too big to attach.`, true); continue }
+      const local = isRaster(file.type) ? URL.createObjectURL(file) : null
+      const chip = attChip("span", { name: file.name || "pasted file", mime: file.type, src: local, attrs: { contenteditable: "false", "data-state": "uploading", title: "Uploading…" } })
+      const x = el("button", { class: "att-x", type: "button", tabindex: "-1", "aria-label": `Remove ${file.name || "file"}`, title: "Remove", text: "×" })
+      x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
+      x.addEventListener("click", () => {
+        const next = chip.nextSibling
+        if (next?.nodeType === Node.TEXT_NODE && next.nodeValue === " ") next.remove()
+        chip.remove()
+        sync()
+      })
+      chip.append(x)
+      nodes.push(chip, document.createTextNode(" "))
+      // The preview gives way to the server's copy once it's there.
+      upload(file).then((a) => {
+        if (local) { chip.querySelector(".att-thumb").src = fileUrl(a.id); URL.revokeObjectURL(local) }
+        chip.dataset.att = a.id
+        delete chip.dataset.state
+        chip.title = `${a.name} · ${bytes(a.size)}`
+        chip.querySelector(".att-name").textContent = a.name
+        paint()
+      }, (e) => {
+        if (local) URL.revokeObjectURL(local)
+        chip.nextSibling?.nodeValue === " " && chip.nextSibling.remove()
+        chip.remove()
+        fail(e)
+        sync()
+      })
+    }
+    if (nodes.length) { insert(nodes); sync() }
+  }
+
   const submit = async () => {
     if (busy) return onStop?.()
-    const text = ta.value.trim()
-    if (!text || disabled) return
+    if (disabled || uploading() || empty()) return
+    const text = serialize(input).trim()
     send.disabled = true
     try {
       await onSend(text)
-      ta.value = ""
-      size()
+      input.replaceChildren()
+      range = null
     } catch (e) { fail(e) }
-    paint()
+    sync()
   }
-  ta.addEventListener("input", () => { size(); paint() })
-  ta.addEventListener("keydown", (e) => {
+
+  input.addEventListener("input", sync)
+  input.addEventListener("keydown", (e) => {
+    // Shift+Enter is left to the browser: it breaks the line.
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit() }
   })
+  input.addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.files ?? [])]
+    e.preventDefault()
+    if (files.length) return addFiles(files)
+    // Words only: what was copied from a page keeps none of its markup.
+    const text = e.clipboardData?.getData("text/plain") ?? ""
+    if (text) document.execCommand("insertText", false, text)
+  })
+  const node = el("div", { class: "composer" })
+  node.addEventListener("dragover", (e) => {
+    if (disabled || !e.dataTransfer?.types.includes("Files")) return
+    e.preventDefault()
+    node.classList.add("drop")
+  })
+  node.addEventListener("dragleave", (e) => { if (!node.contains(e.relatedTarget)) node.classList.remove("drop") })
+  // Dropped files land where they were dropped (when that's inside the box); dropped text is the browser's.
+  node.addEventListener("drop", (e) => {
+    node.classList.remove("drop")
+    const files = [...(e.dataTransfer?.files ?? [])]
+    if (!files.length) return
+    e.preventDefault()
+    const at = document.caretRangeFromPoint?.(e.clientX, e.clientY)
+      ?? (() => { const p = document.caretPositionFromPoint?.(e.clientX, e.clientY); if (!p) return null; const r = document.createRange(); r.setStart(p.offsetNode, p.offset); return r })()
+    if (at && input.contains(at.startContainer)) range = at
+    addFiles(files)
+  })
+  attach.addEventListener("click", () => picker.click())
+  picker.addEventListener("change", () => {
+    const files = [...picker.files]
+    picker.value = ""
+    if (files.length) addFiles(files)
+  })
+  send.addEventListener("mousedown", (e) => e.preventDefault())
   send.addEventListener("click", submit)
+  // Attach on the left; the model picker sits on the right, beside Send.
+  node.append(input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach), hint, el("div", { class: "composer-end" }, controls, send)), picker)
   paint()
-  const node = el("div", { class: "composer" }, ta,
-    el("div", { class: "composer-foot" }, controls.length ? el("div", { class: "composer-controls" }, controls) : null, hint, send))
-  queueMicrotask(() => !disabled && ta.focus())
+  queueMicrotask(() => !disabled && input.focus())
   return {
     node,
     setBusy: (b) => { busy = b; paint() },
     /** Whether the thread's provider can take a message now, and what the empty box says. */
     setReady: (ready, text) => {
       disabled = !ready
-      ta.disabled = disabled
-      ta.placeholder = text
+      input.contentEditable = ready ? "true" : "false"
+      input.dataset.placeholder = text
       paint()
     },
-    fill: (text) => { ta.value = text; size(); paint(); ta.focus() }
+    /** Whether the provider can open files; `why` says so on the Attach button when it can't. */
+    setAttach: (can, why = "") => {
+      canAttach = can
+      attach.title = can ? "Attach files. You can paste or drop them too." : why
+      paint()
+    },
+    fill: (text) => {
+      input.textContent = text
+      sync()
+      input.focus()
+      const r = document.createRange()
+      r.selectNodeContents(input)
+      r.collapse(false)
+      caretTo(r)
+    }
   }
 }
 
@@ -516,39 +950,34 @@ function threadView(t) {
   const current = () => ({ provider: t.provider, model: t.model, effort: t.effort ?? defaultEffort(t.provider) })
   const models = modelPicker({
     ...current(),
-    onChange: (patch) => api("PATCH", `threads/${t.id}`, patch).catch((e) => { models.set(current()); fail(e) })
+    access: t.access,
+    onChange: (patch) => api("PATCH", `threads/${t.id}`, patch).catch((e) => { models.set(current()); fail(e) }),
+    onAccess: (value) => api("PATCH", `threads/${t.id}`, { access: value }).catch((e) => { models.setAccess(t.access); fail(e) })
   })
-  const access = accessPicker(t.access, (value) =>
-    api("PATCH", `threads/${t.id}`, { access: value }).catch((e) => { access.set(t.access); fail(e) }))
-  const del = el("button", { class: "icon-btn", type: "button", title: "Delete thread", "aria-label": "Delete thread", onclick: async () => {
-    if (!(await dialog({ title: "Delete this thread?", text: "Its messages are deleted from zero. Changes it made to the project stay.", ok: "Delete thread" }))) return
-    try { await api("DELETE", `threads/${t.id}`); go("#/") } catch (e) { fail(e) }
-  } })
-  del.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/></svg>'
-
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
   const working = el("div", { class: "working", hidden: true }, el("i"), el("i"), el("i"), el("span", { text: "Working" }))
   const scroll = el("div", { class: "scroll" }, list)
   const box = composer({
     running: t.status === "running",
-    controls: [models.node, access.node],
+    controls: [models.node],
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
-  feed = { list, scroll, cache: new Map(), groups: new Map(), working, composer: box, stick: true, models, access, title }
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, composer: box, stick: true, models, title }
   paintReady(t)
   scroll.addEventListener("scroll", () => { feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60 })
   renderFeed()
   paintWorking()
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight })
   return [
-    el("div", { class: "bar" }, menuButton(),
-      // One line: the project, a middle dot, the thread's title (editable in place).
+    el("div", { class: "bar" },
+      // One line: the project (click it for a new thread there), a middle dot, the thread's title (editable in place).
       el("div", { class: "title-wrap title-line" },
-        el("span", { class: "title-project", title: project?.path ?? "", text: project ? project.name : "removed project" }),
+        project
+          ? el("button", { class: "title-project", type: "button", title: `New thread in ${project.name}\n${project.path}`, onclick: () => go(`#/new/${project.id}`) }, project.name)
+          : el("span", { class: "title-project gone", text: "removed project" }),
         el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
-        title),
-      el("div", { class: "pickers" }, del)),
+        title)),
     scroll,
     el("div", { class: "composer-wrap" }, box.node)
   ]
@@ -558,6 +987,7 @@ function threadView(t) {
 function paintReady(t) {
   const ready = status(t.provider)?.available === true
   feed.composer.setReady(ready, ready ? "Reply…" : `${providerLabel(t.provider)} is turned off in Settings`)
+  feed.composer.setAttach(status(t.provider)?.tools !== false, `${providerLabel(t.provider)} can't open files`)
 }
 
 function paintWorking() {
@@ -594,17 +1024,65 @@ const foldable = (item) => item.kind === "tool" || (item.kind === "permission" &
  * every call in it, and open a call to see its output.
  */
 function renderFeed() {
+  const { finals, metaFor, merged } = turnEnds()
   const top = []
   let run = null
   for (const item of S.open.items) {
+    if (merged.has(item.id)) continue // its details ride in the answer's action row instead
     if (!foldable(item)) { run = null; top.push(item); continue }
     if (!run) top.push(run = { key: item.id, items: [] })
     run.items.push(item)
   }
   const groups = new Map()
-  const nodes = top.map((x) => (x.items ? toolGroup(x, groups) : nodeFor(x)))
+  // Each turn (a message of yours and everything after it, up to your next) is one block, so your
+  // message can stick to the top while its turn scrolls by, until the next turn's pushes it away.
+  const turns = []
+  for (const x of top) {
+    const node = x.items ? toolGroup(x, groups) : nodeFor(x)
+    if (!turns.length || (!x.items && x.kind === "user")) turns.push({ key: x.items ? x.key : x.id, nodes: [] })
+    turns.at(-1).nodes.push(node)
+  }
   feed.groups = groups
-  reconcile(feed.list, [...nodes, feed.working])
+  const sections = turns.map(({ key, nodes }) => {
+    let section = feed.turns.get(key)
+    if (!section) feed.turns.set(key, (section = el("section", { class: "turn" })))
+    reconcile(section, nodes)
+    return section
+  })
+  reconcile(feed.list, [...sections, feed.working])
+  // Only a turn's last agent response (its answer, not the narration between tool calls) has the
+  // action row, and the turn's details (model, time, cost, tokens) sit in that row beside Copy.
+  for (const [id, { node }] of feed.cache) {
+    if (!node.classList.contains("msg-a")) continue
+    node.classList.toggle("final", finals.has(id))
+    const turn = metaFor.get(id)
+    const slot = node.querySelector(".msg-meta")
+    if (slot.dataset.turn !== (turn?.id ?? "")) { slot.dataset.turn = turn?.id ?? ""; slot.replaceChildren(...(turn ? turnMeta(turn) : [])) }
+  }
+}
+/**
+ * Where each turn ends: `finals` are the last agent responses of turns; `metaFor` pairs such a
+ * response with its turn's details, and `merged` holds those turn items so they aren't drawn twice.
+ * A turn that failed keeps its own error line; one with no response keeps its details line.
+ */
+function turnEnds() {
+  const finals = new Set(), metaFor = new Map(), merged = new Set()
+  let last = null
+  for (const item of S.open.items) {
+    if (item.kind === "assistant") last = item.id
+    else if (item.kind === "user" || item.kind === "turn") {
+      if (last) finals.add(last)
+      if (item.kind === "turn" && last && item.outcome !== "failed") { metaFor.set(last, item); merged.add(item.id) }
+      last = null
+    }
+  }
+  if (last) finals.add(last)
+  return { finals, metaFor, merged }
+}
+/** A turn's details: Stopped (if it was), the model, how long it took, what it cost, its tokens. */
+function turnMeta(item) {
+  const meta = [modelName(item.model), `${(item.durationMs / 1000).toFixed(1)}s`, item.costUsd !== null ? usd(item.costUsd) : null, item.tokens ? `${(item.tokens / 1000).toFixed(1)}k tokens` : null].filter(Boolean)
+  return [item.outcome === "stopped" ? el("span", { class: "stopped", text: "Stopped" }) : null, ...meta.map((m) => el("span", { text: m }))].filter(Boolean)
 }
 function toolGroup(run, groups) {
   let g = feed.groups.get(run.key)
@@ -630,12 +1108,12 @@ function paintGroup(g, key) {
   const open = S.expanded.has(`group:${key}`)
   const state = last.kind === "tool" ? last.status : last.state === "allowed" ? "done" : "failed"
   const failed = tools.filter((i) => i.status === "failed").length
+  // Closed is a class (not `hidden`) so the body can ease shut; inert keeps it out of reach meanwhile.
   g.node.className = `tool-group ${state}${open ? " open" : ""}`
-  g.body.hidden = !open
+  g.body.inert = !open
   g.head.setAttribute("aria-expanded", String(open))
   g.head.title = last.detail ?? ""
   g.head.replaceChildren(
-    el("span", { class: "chev", "aria-hidden": "true", text: "▸" }),
     el("span", { class: "tool-state", "aria-label": state }),
     el("span", { class: "tool-name", text: last.kind === "tool" ? last.name : last.tool }),
     el("span", { class: "tool-detail", text: rel(last.detail) }),
@@ -680,18 +1158,21 @@ function rel(text) {
 
 function renderItem(item) {
   switch (item.kind) {
-    case "user": return el("div", { class: "msg-user", text: item.text })
-    case "assistant": return el("div", { class: "msg-ai" }, el("div", { class: "prose" }, mdNodes(item.text)))
+    case "user": return userMessage(item)
+    case "assistant": return el("div", { class: "msg msg-a" }, el("div", { class: "msg-ai" }, el("div", { class: "prose" }, mdNodes(item.text))), msgActions(() => item.text, el("span", { class: "msg-meta" })))
     case "tool": {
       const open = S.expanded.has(item.id)
-      const out = el("pre", { class: "tool-out", hidden: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
+      const out = el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
+      const node = el("div", { class: `tool ${item.status}${open ? " open" : ""}` })
       const row = el("button", { class: "tool-row", type: "button", "aria-expanded": String(open), title: item.detail, onclick: () => {
-        const now = out.hidden
-        out.hidden = !now
+        const now = !node.classList.contains("open")
+        node.classList.toggle("open", now)
+        out.inert = !now
         row.setAttribute("aria-expanded", String(now))
         now ? S.expanded.add(item.id) : S.expanded.delete(item.id)
       } }, el("span", { class: "tool-state", "aria-label": item.status }), el("span", { class: "tool-name", text: item.name }), el("span", { class: "tool-detail", text: rel(item.detail) }))
-      return el("div", { class: `tool ${item.status}` }, row, out)
+      node.append(row, out)
+      return node
     }
     case "permission": {
       if (item.state !== "pending") {
@@ -704,16 +1185,15 @@ function renderItem(item) {
         el("div", { class: "ask-actions" },
           el("button", { class: "btn btn-primary", type: "button", onclick: () => answer(true) }, "Allow", el("kbd", { text: "Y" })),
           el("button", { class: "btn btn-quiet", type: "button", onclick: () => answer(false) }, "Deny", el("kbd", { text: "N" })),
-          el("span", { class: "hint", text: "Change what needs asking with the access menu below." })))
+          el("span", { class: "hint", text: "Change what needs asking with the model menu below." })))
     }
     case "memory": {
       const label = { recalled: "Recalled from memory", stored: "Stored in memory", none: "Committed" }[item.action]
       return el("div", { class: `mem ${item.action}`, title: item.title }, el("span", { class: "mem-label", text: label }), el("code", { text: item.commit.slice(0, 10) }), el("span", { class: "mem-title", text: item.title }))
     }
     case "turn": {
-      const meta = [modelName(item.model), `${(item.durationMs / 1000).toFixed(1)}s`, item.costUsd !== null ? usd(item.costUsd) : null, item.tokens ? `${(item.tokens / 1000).toFixed(1)}k tokens` : null].filter(Boolean)
       if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
-      return el("div", { class: "turn-meta" }, item.outcome === "stopped" ? el("span", { class: "stopped", text: "Stopped" }) : null, meta.map((m) => el("span", { text: m })))
+      return el("div", { class: "turn-meta" }, turnMeta(item))
     }
   }
   return el("div")
@@ -787,8 +1267,28 @@ document.addEventListener("click", async (e) => {
   } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
 })
 
-// ---------- settings ----------
-function settingsView() {
+// ---------- settings: a modal, its settings grouped into sections down the left ----------
+const SETTINGS_SECTIONS = [
+  ["providers", "Providers", '<path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/>'],
+  ["threads", "New threads", '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/>'],
+  ["memory", "Memory", '<path d="M8 2.5a5.5 5.5 0 1 0 5.5 5.5"/><path d="M8 5v3l2 1.5"/><path d="M11 1.8 13.8 2l.2 2.8"/>'],
+  ["genome", "Genome", '<path d="M5 1.5c0 4 6 5 6 9.5M11 1.5c0 4-6 5-6 9.5M5 14.5v-3.5M11 14.5v-3.5M6 4h4M6.3 11h3.4"/>'],
+  ["storage", "Storage", '<ellipse cx="8" cy="4" rx="5.5" ry="2"/><path d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2"/>']
+]
+let settingsTab = load("settingsTab", "providers")
+function openSettings() {
+  paintSettings()
+  const d = $("settings")
+  if (!d.open) d.showModal()
+  d.querySelector(`.set-nav [data-tab="${settingsTab}"]`)?.focus()
+}
+$("open-settings").addEventListener("click", openSettings)
+// A click on the backdrop (outside the box) closes it, as Escape does.
+$("settings").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close() })
+
+/** Paint the modal: the section list, and the chosen section's settings. Saved as they change. */
+function paintSettings() {
+  const d = $("settings")
   const s = structuredClone(S.settings)
   const commit = async () => {
     try {
@@ -797,11 +1297,9 @@ function settingsView() {
       S.providers = r.providers
       toast("Settings saved.")
       // Statuses may have changed (a provider turned on): paint them, keeping focus where it was.
-      if (S.route.name === "settings") {
-        const label = document.activeElement?.getAttribute("aria-label")
-        renderMain()
-        if (label) document.querySelector(`.page [aria-label="${CSS.escape(label)}"]`)?.focus()
-      }
+      const label = document.activeElement?.getAttribute("aria-label")
+      paintSettings()
+      if (label) d.querySelector(`[aria-label="${CSS.escape(label)}"]`)?.focus()
     } catch (e) { fail(e) }
   }
   const sw = (get, set, label) => {
@@ -815,47 +1313,67 @@ function settingsView() {
     return x
   }
   const row = (label, help, control) => el("div", { class: "row" }, el("div", {}, el("div", { class: "row-label", text: label }), help ? el("div", { class: "row-help", text: help }) : null), control)
+  const group = (title, hint, ...rows) => el("section", { class: "set-group" },
+    title ? el("h4", { class: "set-group-title" }, title) : null,
+    hint ? el("p", { class: "hint", text: hint }) : null,
+    el("div", { class: "rows" }, rows))
+  const pill = (on, yes, no) => el("span", { class: `pill${on ? "" : " off"}` }, el("i"), on ? yes : no)
   const st = status("claude")
   const other = (p, about) => {
     const ps = status(p)
     return row(providerLabel(p), s[p].enabled ? (ps?.detail ?? about) : about,
-      el("span", { class: "row-end" }, s[p].enabled ? el("span", { class: `pill${ps?.available ? "" : " off"}` }, el("i"), ps?.available ? "Ready" : "Unavailable") : null,
+      el("span", { class: "row-end" }, s[p].enabled ? pill(ps?.available, "Ready", "Unavailable") : null,
         sw(() => s[p].enabled, (v) => (s[p].enabled = v), `${providerLabel(p)} on`)))
   }
-  return el("div", { class: "page" }, el("div", { class: "page-inner" },
-    el("div", {}, menuButton(), el("h1", { text: "Settings" }), el("p", { class: "lede", text: "Saved as you change them. New threads pick them up; open threads keep their own model and access." })),
-    el("section", { class: "card" },
-      el("div", { class: "lineage-head" }, el("h2", { text: "Claude" }), el("span", { class: `pill${st?.available ? "" : " off"}` }, el("i"), st?.available ? "Ready" : "Off")),
-      el("p", { class: "hint", text: "Through the Claude Agent SDK, signed in the way Claude Code is on this machine." }),
-      el("div", { class: "rows" },
+  const sections = {
+    providers: () => [
+      group(el("span", { class: "set-title-row" }, "Claude", pill(st?.available, "Ready", "Off")),
+        "Through the Claude Agent SDK, signed in the way Claude Code is on this machine.",
         row("On", "Off stops new turns; threads stay.", sw(() => s.claude.enabled, (v) => (s.claude.enabled = v), "Claude on")),
         row("Model for new threads", "Each thread can switch from its composer.", sel((st?.models ?? [s.claude.model]).map((m) => [m, modelName(m)]), () => s.claude.model, (v) => (s.claude.model = v), "Model")),
-        row("Effort for new threads", "How hard Claude thinks each step. Higher is slower and costs more.", sel(EFFORTS.claude, () => s.claude.effort, (v) => (s.claude.effort = v), "Effort")))),
-    el("section", { class: "card" },
-      el("h2", { text: "More providers" }),
-      el("p", { class: "hint", text: "Their models join the model menu, grouped by provider. Switching a thread to another provider starts a new session." }),
-      el("div", { class: "rows" },
+        row("Effort for new threads", "How hard Claude thinks each step. Higher is slower and costs more.", sel(EFFORTS.claude, () => s.claude.effort, (v) => (s.claude.effort = v), "Effort"))),
+      group("More providers", "Their models join the model menu, grouped by provider. Switching a thread to another provider starts a new session.",
         other("codex", "OpenAI's Codex, signed in as the Codex CLI is. Runs in its own sandbox and can't stop to ask."),
-        other("ollama", "Models on this machine through Ollama, as plain chat: no tools."))),
-    el("section", { class: "card" },
-      el("h2", { text: "New threads" }),
-      el("div", { class: "rows" },
-        row("What Claude may do without asking", ACCESS.find(([v]) => v === s.defaultAccess)[2], sel(ACCESS.map(([v, l]) => [v, l]), () => s.defaultAccess, (v) => (s.defaultAccess = v), "Default access")))),
-    el("section", { class: "card" },
-      el("h2", { text: "singularity memory" }),
-      el("p", { class: "hint", text: "Memory of changes committed in each repository. It needs singularity installed; without it, threads work the same." }),
-      el("div", { class: "rows" },
+        other("ollama", "Models on this machine through Ollama, as plain chat: no tools."))
+    ],
+    threads: () => [
+      group(null, "What new threads start with. Open threads keep their own model and access.",
+        row("What Claude may do without asking", ACCESS.find(([v]) => v === s.defaultAccess)[2], sel(ACCESS.map(([v, l]) => [v, l]), () => s.defaultAccess, (v) => (s.defaultAccess = v), "Default access")))
+    ],
+    memory: () => [
+      group("singularity", "Memory of changes committed in each repository. It needs singularity installed; without it, threads work the same.",
         row("Recall at a thread's first message", "Hand Claude the past change in this project most like what you asked.", sw(() => s.memory.recall, (v) => (s.memory.recall = v), "Recall")),
-        row("Store what threads commit", "After a turn that commits, keep that commit for the next thread to recall.", sw(() => s.memory.store, (v) => (s.memory.store = v), "Store")))),
-    el("section", { class: "card" },
-      el("h2", { text: "zero's genome" }),
-      el("div", { class: "rows" },
-        row("Use zero's evolved instructions", "Add zero's solver instructions and lessons to every thread. Evolution improves them.", sw(() => s.useGenome, (v) => (s.useGenome = v), "Use genome")))),
-    el("section", { class: "card" },
-      el("h2", { text: "Where things are" }),
-      el("div", { class: "rows" },
+        row("Store what threads commit", "After a turn that commits, keep that commit for the next thread to recall.", sw(() => s.memory.store, (v) => (s.memory.store = v), "Store")))
+    ],
+    genome: () => [
+      group(null, "zero's solver instructions and lessons, which Evolution improves.",
+        row("Use zero's evolved instructions", "Add them to every thread.", sw(() => s.useGenome, (v) => (s.useGenome = v), "Use genome")))
+    ],
+    storage: () => [
+      group(null, null,
         row("Threads, projects and settings", null, el("span", { class: "path", text: S.home })),
-        row("zero itself", null, el("span", { class: "path", text: S.zeroRoot }))))))
+        row("zero itself", null, el("span", { class: "path", text: S.zeroRoot })))
+    ]
+  }
+  if (!sections[settingsTab]) settingsTab = "providers"
+  const [, title] = SETTINGS_SECTIONS.find(([k]) => k === settingsTab)
+  const pick = (k) => { settingsTab = k; save("settingsTab", k); paintSettings(); d.querySelector(`.set-nav [data-tab="${k}"]`)?.focus() }
+  const nav = el("nav", { class: "set-nav", "aria-label": "Settings sections" },
+    el("h2", { class: "set-heading", id: "settings-title", text: "Settings" }),
+    SETTINGS_SECTIONS.map(([k, label, paths], i) => el("button", {
+      class: `set-tab${k === settingsTab ? " on" : ""}`, type: "button", "data-tab": k, "aria-current": k === settingsTab ? "page" : null,
+      onclick: () => pick(k),
+      // Up and Down move between sections.
+      onkeydown: (e) => {
+        if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
+        e.preventDefault()
+        pick(SETTINGS_SECTIONS[(i + (e.key === "ArrowDown" ? 1 : -1) + SETTINGS_SECTIONS.length) % SETTINGS_SECTIONS.length][0])
+      }
+    }, icon(paths), el("span", { text: label }))))
+  const close = el("button", { class: "icon-btn set-close", type: "button", title: "Close (Esc)", "aria-label": "Close settings", text: "×", onclick: () => d.close() })
+  d.replaceChildren(nav, el("div", { class: "set-body" },
+    el("header", { class: "set-head" }, el("h3", { text: title }), el("span", { class: "hint", text: "Saved as you change them." }), close),
+    el("div", { class: "set-scroll" }, sections[settingsTab]())))
 }
 
 // ---------- evolution ----------
@@ -894,7 +1412,7 @@ function paintEvo() {
   const blocked = evoMode !== "bench" && E.tree.length > 0
   const log = el("div", { class: "log", id: "evo-log" }, E.log.length ? E.log.map((l) => logLine(l.line)) : el("span", { text: "Output from the next run streams here." }))
   root.replaceChildren(
-    el("div", {}, menuButton(), el("h1", { text: "Evolution" }), el("p", { class: "lede", text: `zero rewrites its own genome and keeps a change only when the benchmark says it's better. Spent so far: ${usd(E.spentUsd)}.` })),
+    el("div", {}, el("h1", { text: "Evolution" }), el("p", { class: "lede", text: `zero rewrites its own genome and keeps a change only when the benchmark says it's better. Spent so far: ${usd(E.spentUsd)}.` })),
     el("section", { class: "card" },
       el("div", { class: "lineage-head" },
         el("div", {}, el("h2", { text: "Lineage" }), el("p", { class: "hint", text: "The line moves only when a generation is kept. Turned-down attempts hang below it; × marks one a guard stopped." })),
@@ -1042,7 +1560,7 @@ function connect() {
       if (feed && document.activeElement !== feed.title) feed.title.value = meta.title
       if (feed) {
         feed.models.set({ provider: meta.provider, model: meta.model, effort: meta.effort ?? defaultEffort(meta.provider) })
-        feed.access.set(meta.access)
+        feed.models.setAccess(meta.access)
         paintReady(S.open)
       }
       paintWorking()
@@ -1102,7 +1620,7 @@ function connect() {
 // ---------- keys ----------
 document.addEventListener("keydown", (e) => {
   if ($("dialog").open) return
-  const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
+  const typing = e.target.isContentEditable || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
   if (e.altKey && (e.key === "n" || e.key === "N")) {
     e.preventDefault()
     const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
@@ -1124,6 +1642,10 @@ $("new-thread").addEventListener("click", () => {
   pid ? go(`#/new/${pid}`) : addProject()
 })
 $("add-project").addEventListener("click", addProject)
+// A file dropped anywhere but the composer would open in place of the app; it does nothing instead.
+for (const type of ["dragover", "drop"]) {
+  addEventListener(type, (e) => { if (e.dataTransfer?.types.includes("Files") && !e.target.closest?.(".composer")) e.preventDefault() })
+}
 addEventListener("resize", () => { if (S.route.name === "evolution" && S.evo) paintEvo() })
 setInterval(() => renderSide(), 60_000)
 

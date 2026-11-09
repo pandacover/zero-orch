@@ -4,6 +4,7 @@
  * page are checked against `Settings` before they're saved.
  */
 import { Schema } from "effect"
+import type { Attachment } from "./Attachments.ts"
 
 export const ProviderId = Schema.Literals(["claude", "codex", "ollama"])
 export type ProviderId = typeof ProviderId.Type
@@ -80,7 +81,14 @@ export interface Project {
 }
 
 export type Item =
-  | { readonly kind: "user"; readonly id: string; readonly at: string; text: string }
+  | {
+    readonly kind: "user"
+    readonly id: string
+    readonly at: string
+    /** The message; `{{att:<id>}}` marks where an attached file sits among the words. */
+    text: string
+    attachments?: ReadonlyArray<Attachment> | undefined
+  }
   | { readonly kind: "assistant"; readonly id: string; readonly at: string; text: string }
   | {
     readonly kind: "tool"

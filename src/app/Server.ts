@@ -9,10 +9,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { randomBytes } from "node:crypto"
+import { createReadStream } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import { extname, join } from "node:path"
 import * as Singularity from "../Singularity.ts"
+import { type Attachment, findAttachment, isInlineImage, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
 import { type Access, ACCESSES, metaOf, type ProviderId } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
@@ -77,6 +79,21 @@ export const startServer = (options: ServerOptions) =>
           }
         })
       })
+    /** A body as bytes, or undefined once it passes `limit`. */
+    const readRaw = (req: IncomingMessage, limit: number) =>
+      new Promise<Buffer | undefined>((resolve) => {
+        const chunks: Array<Buffer> = []
+        let size = 0
+        req.on("data", (c: Buffer) => {
+          size += c.length
+          if (size > limit) {
+            resolve(undefined)
+            req.destroy()
+          } else chunks.push(c)
+        })
+        req.on("end", () => resolve(Buffer.concat(chunks)))
+        req.on("error", () => resolve(undefined))
+      })
     const providers = async () => {
       const { store } = await ready
       const s = store.settings()
@@ -105,6 +122,40 @@ export const startServer = (options: ServerOptions) =>
         const { store, threads } = await ready
         const parts = url.pathname.split("/").slice(2) // after /api/
         const m = req.method ?? "GET"
+
+        // --- attachments: the file itself is the body, so this comes before the JSON is read ---
+        if (parts[0] === "attachments") {
+          if (m === "POST" && parts.length === 1) {
+            const size = Number(req.headers["content-length"] ?? 0)
+            if (size > MAX_ATTACHMENT_BYTES) return json(res, 413, { error: `files up to ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB attach` })
+            const bytes = await readRaw(req, MAX_ATTACHMENT_BYTES)
+            if (bytes === undefined) return json(res, 413, { error: `files up to ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB attach` })
+            if (bytes.length === 0) return json(res, 400, { error: "that file is empty" })
+            let name = ""
+            try {
+              name = decodeURIComponent(String(req.headers["x-file-name"] ?? ""))
+            } catch {}
+            const saved = saveAttachment(store.home, name, String(req.headers["content-type"] ?? ""), bytes)
+            return json(res, 201, saved)
+          }
+          if (m === "GET" && parts[1] && parts.length === 2) {
+            const a = findAttachment(store.home, parts[1])
+            if (!a) return json(res, 404, { error: "no such file" })
+            const inline = isInlineImage(a.mime)
+            res.writeHead(200, {
+              "content-type": inline ? a.mime : "application/octet-stream",
+              "content-length": String(a.size),
+              "cache-control": "private, max-age=86400",
+              "x-content-type-options": "nosniff",
+              // A file someone pasted is shown, never run: it shares this page's origin and its token.
+              "content-security-policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+              "content-disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(a.name)}`
+            })
+            return createReadStream(a.path).pipe(res)
+          }
+          return json(res, 404, { error: "not found" })
+        }
+
         const body = m === "GET" ? {} : await readBody(req)
         if (body === undefined) return json(res, 400, { error: "the request body isn't JSON" })
 
@@ -153,6 +204,7 @@ export const startServer = (options: ServerOptions) =>
           }
           if (m === "DELETE" && parts[1]) {
             if (store.threads().some((t) => t.projectId === parts[1] && threads.isRunning(t.id))) return json(res, 409, { error: "stop this project's running threads first" })
+            for (const t of store.threads()) if (t.projectId === parts[1]) removeAttachments(store.home, store.thread(t.id))
             await runtime.runPromise(store.removeProject(parts[1]))
             hub.send("projects", store.projects())
             hub.send("threads", store.threads())
@@ -189,6 +241,7 @@ export const startServer = (options: ServerOptions) =>
           }
           if (m === "DELETE" && parts.length === 2) {
             threads.stop(thread.id)
+            removeAttachments(store.home, thread)
             store.deleteThread(thread.id)
             hub.send("threads", store.threads())
             return json(res, 200, { removed: thread.id })
@@ -196,12 +249,19 @@ export const startServer = (options: ServerOptions) =>
           if (m === "POST" && parts[2] === "messages") {
             const text = typeof body["text"] === "string" ? body["text"].trim() : ""
             if (!text) return json(res, 400, { error: "write a message first" })
+            // The files are the ones the text marks; each must have been uploaded.
+            const attachments: Array<Attachment> = []
+            for (const id of markersIn(text)) {
+              const a = findAttachment(store.home, id)
+              if (!a) return json(res, 400, { error: "an attached file is gone; attach it again" })
+              attachments.push(a)
+            }
             if (threads.isRunning(thread.id)) return json(res, 409, { error: "this thread is still working; stop it or wait" })
             const project = store.project(thread.projectId)
             if (!project) return json(res, 409, { error: "this thread's project was removed" })
             const status = (await providers())[thread.provider]
             if (!status?.available) return json(res, 409, { error: `${PROVIDERS[thread.provider].label} isn't available: ${status?.detail ?? "unknown"}` })
-            runtime.runFork(threads.turn(thread, project, text))
+            runtime.runFork(threads.turn(thread, project, text, attachments))
             return json(res, 202, { started: true })
           }
           if (m === "POST" && parts[2] === "stop") return threads.stop(thread.id) ? json(res, 202, { stopping: true }) : json(res, 409, { error: "this thread isn't working" })

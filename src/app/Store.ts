@@ -4,6 +4,7 @@
  *     settings.json          Settings
  *     projects.json          Project[]
  *     threads/<id>.json      Thread (meta and items)
+ *     attachments/<id>/<name>  a file attached to a message (src/app/Attachments.ts)
  *
  * Everything is held in memory and written through; a thread that's
  * streaming is written at most every half second, and once more when its
