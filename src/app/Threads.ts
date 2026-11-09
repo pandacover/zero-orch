@@ -425,6 +425,9 @@ export const makeThreads = (options: {
           outcome: result.outcome,
           error: result.error
         }, false)
+        // The branch the turn left the project on: the one the thread's Git panel follows (it may have made it).
+        const branch = yield* git(project.path, ["branch", "--show-current"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
+        if (branch) t.branch = branch
         live.delete(t.id)
         t.status = "idle"
         touch(t)

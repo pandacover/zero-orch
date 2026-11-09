@@ -16,6 +16,7 @@ import { extname, join } from "node:path"
 import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, isInlineImage, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
+import { gitView, parseAction, runAction } from "./GitInfo.ts"
 import { type Access, ACCESSES, compactionOffered, metaOf, type ProviderId } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
@@ -265,6 +266,18 @@ export const startServer = (options: ServerOptions) =>
             const compactFirst = body["compact"] === true && compactionOffered(thread)
             runtime.runFork(threads.turn(thread, project, text, attachments, { compactFirst }))
             return json(res, 202, { started: true })
+          }
+          // --- the thread's git: its branch, working tree, commits, and its pull request ---
+          if (parts[2] === "git") {
+            const project = store.project(thread.projectId)
+            if (!project) return json(res, 409, { error: "this thread's project was removed" })
+            if (m === "GET" && parts.length === 3) return json(res, 200, await gitView(project.path, thread.branch))
+            if (m === "POST" && parts[3] && parts.length === 4) {
+              const action = parseAction(parts[3], body)
+              if (typeof action === "string") return json(res, 400, { error: action })
+              const done = await runAction(project.path, action)
+              return done.ok ? json(res, 200, done) : json(res, 502, { error: done.error })
+            }
           }
           if (m === "POST" && parts[2] === "stop") return threads.stop(thread.id) ? json(res, 202, { stopping: true }) : json(res, 409, { error: "this thread isn't working" })
           if (m === "POST" && parts[2] === "permissions" && parts[3]) {
