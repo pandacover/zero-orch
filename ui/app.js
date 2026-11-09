@@ -543,7 +543,11 @@ function threadView(t) {
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight })
   return [
     el("div", { class: "bar" }, menuButton(),
-      el("div", { class: "title-wrap" }, title, el("div", { class: "crumb" }, project ? project.name : "removed project", " · ", el("code", { text: project?.path ?? "" }))),
+      // One line: the project, a middle dot, the thread's title (editable in place).
+      el("div", { class: "title-wrap title-line" },
+        el("span", { class: "title-project", title: project?.path ?? "", text: project ? project.name : "removed project" }),
+        el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
+        title),
       el("div", { class: "pickers" }, del)),
     scroll,
     el("div", { class: "composer-wrap" }, box.node)
