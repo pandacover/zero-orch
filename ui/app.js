@@ -588,7 +588,7 @@ function paintEvo() {
       E.attempts.length === 0
         ? el("p", { class: "hint", text: "No generations yet. The first one measures the genome, then tries to beat it." })
         : el("ol", { class: "attempts", reversed: true }, E.attempts.slice().reverse().map((a) => {
-          const cost = a.childScore === null ? null : genomeCost(E, a.childId)
+          const cost = a.childScore === null ? null : judgedCost(E, a.childId, a.at)
           return el("li", { class: `attempt${a.accepted ? " kept" : ""}` },
             el("span", { class: "gen", text: `gen ${a.generation}` }),
             el("span", {}, el("span", { class: "v", text: a.accepted ? "Kept" : "Turned down" }), a.summary),
@@ -614,6 +614,16 @@ function logLine(text) {
 
 // Cost of a genome's benchmark run, from the ledger. Prefers the latest measurement
 // over the current tasks with the current reps, then over the current tasks, then any.
+/**
+ * What a genome cost in the measurement a verdict was made on: its latest
+ * measurement up to that attempt. Later re-measurements (a bigger benchmark,
+ * more reps) mustn't rewrite what an old verdict compared.
+ */
+function judgedCost(E, id, at) {
+  const m = E.measures.filter((x) => x.genomeId === id && x.at <= at).at(-1)
+  return m ? m.costUsd : null
+}
+
 function genomeCost(E, id) {
   const ms = E.measures.filter((m) => m.genomeId === id)
   if (!ms.length) return null
@@ -634,8 +644,8 @@ function drawLineage(box, E, live) {
     const W = Math.max(box.clientWidth, 300), H = box.clientHeight
     const n = atts.length + (live ? 1 : 0)
     // Cost labels for the start and each kept generation; turned-down and guard-stopped points stay quiet.
-    const labels = [{ i: 0, s: start, c: genomeCost(E, atts.length ? atts[0].parentId : E.genome?.id) }]
-    atts.forEach((a, k) => { if (a.accepted && a.childScore !== null) labels.push({ i: k + 1, s: a.childScore, c: genomeCost(E, a.childId) }) })
+    const labels = [{ i: 0, s: start, c: atts.length ? judgedCost(E, atts[0].parentId, atts[0].at) : genomeCost(E, E.genome?.id) }]
+    atts.forEach((a, k) => { if (a.accepted && a.childScore !== null) labels.push({ i: k + 1, s: a.childScore, c: judgedCost(E, a.childId, a.at) }) })
     const shown = labels.filter((l) => l.c !== null)
     const pad = { l: 36, r: 20, t: shown.length ? 26 : 12, b: 24 }
     const scores = [start, ...atts.flatMap((a) => (a.childScore === null ? [] : [a.childScore]))]
