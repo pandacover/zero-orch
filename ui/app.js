@@ -587,12 +587,14 @@ function paintEvo() {
       el("h2", { text: "Attempts" }),
       E.attempts.length === 0
         ? el("p", { class: "hint", text: "No generations yet. The first one measures the genome, then tries to beat it." })
-        : el("ol", { class: "attempts", reversed: true }, E.attempts.slice().reverse().map((a) =>
-          el("li", { class: `attempt${a.accepted ? " kept" : ""}` },
+        : el("ol", { class: "attempts", reversed: true }, E.attempts.slice().reverse().map((a) => {
+          const cost = a.childScore === null ? null : genomeCost(E, a.childId)
+          return el("li", { class: `attempt${a.accepted ? " kept" : ""}` },
             el("span", { class: "gen", text: `gen ${a.generation}` }),
             el("span", {}, el("span", { class: "v", text: a.accepted ? "Kept" : "Turned down" }), a.summary),
-            el("span", { class: "delta", text: `${pct(a.parentScore)} → ${a.childScore === null ? "—" : pct(a.childScore)}` }),
-            el("span", { class: "why", text: a.reason })))))
+            el("span", { class: "delta", text: `${pct(a.parentScore)} → ${a.childScore === null ? "—" : pct(a.childScore)}${cost === null ? "" : ` · ${usd(cost)}`}` }),
+            el("span", { class: "why", text: a.reason }))
+        })))
   )
   drawLineage(chart, E, running && E.job.request.kind !== "bench")
   log.scrollTop = log.scrollHeight
@@ -610,6 +612,17 @@ function logLine(text) {
   return el("div", { class: cls }, m ? el("span", { class: "tag", text: m[1] }) : null, m ? m[2].trim() : text)
 }
 
+// Cost of a genome's benchmark run, from the ledger. Prefers the latest measurement
+// over the current tasks with the current reps, then over the current tasks, then any.
+function genomeCost(E, id) {
+  const ms = E.measures.filter((m) => m.genomeId === id)
+  if (!ms.length) return null
+  const ids = E.tasks.map((t) => t.id).sort().join("\n")
+  const same = (m) => m.results.map((r) => r.id).sort().join("\n") === ids
+  const pick = ms.filter((m) => same(m) && (m.reps ?? 1) === evoReps).at(-1) ?? ms.filter(same).at(-1) ?? ms.at(-1)
+  return pick.costUsd
+}
+
 const NS = "http://www.w3.org/2000/svg"
 const svg = (tag, attrs = {}) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n }
 function drawLineage(box, E, live) {
@@ -619,8 +632,12 @@ function drawLineage(box, E, live) {
   if (start === null) return box.append(el("div", { class: "chart-empty", text: "No score yet. A benchmark places the first point." }))
   requestAnimationFrame(() => {
     const W = Math.max(box.clientWidth, 300), H = box.clientHeight
-    const pad = { l: 36, r: 20, t: 12, b: 24 }
     const n = atts.length + (live ? 1 : 0)
+    // Cost labels for the start and each kept generation; turned-down and guard-stopped points stay quiet.
+    const labels = [{ i: 0, s: start, c: genomeCost(E, atts.length ? atts[0].parentId : E.genome?.id) }]
+    atts.forEach((a, k) => { if (a.accepted && a.childScore !== null) labels.push({ i: k + 1, s: a.childScore, c: genomeCost(E, a.childId) }) })
+    const shown = labels.filter((l) => l.c !== null)
+    const pad = { l: 36, r: 20, t: shown.length ? 26 : 12, b: 24 }
     const scores = [start, ...atts.flatMap((a) => (a.childScore === null ? [] : [a.childScore]))]
     const lo = Math.max(0, Math.floor((Math.min(...scores) - 0.02) * 10) / 10)
     const tick = 1 - lo <= 0.2 ? 0.05 : 1 - lo <= 0.5 ? 0.1 : 0.25
@@ -649,6 +666,17 @@ function drawLineage(box, E, live) {
       if (m.kind === "kept") root.append(svg("circle", { class: "node-kept", cx, cy: y(m.s), r: 5.5 }))
       else if (m.kind === "down") root.append(svg("line", { class: "stub", x1: cx, x2: cx, y1: y(m.from), y2: y(m.s) }), svg("circle", { class: "node-down", cx, cy: y(m.s), r: 4 }))
       else { const gy = y(m.from) + 14; root.append(svg("line", { class: "guard", x1: cx - 3.5, y1: gy - 3.5, x2: cx + 3.5, y2: gy + 3.5 }), svg("line", { class: "guard", x1: cx - 3.5, y1: gy + 3.5, x2: cx + 3.5, y2: gy - 3.5 })) }
+    }
+    // Centered above the point, but clamped between the y-axis labels (which end at pad.l - 8)
+    // and the right edge; a label that would collide with the previous one is skipped.
+    let prev = null
+    for (const l of shown) {
+      const text = usd(l.c), half = text.length * 3.1 // 10px mono ≈ 6.2px per character
+      const lx = Math.min(Math.max(x(l.i), pad.l + half), W - 2 - half)
+      const ly = y(l.s) - 10
+      if (prev && lx - half < prev.right + 4 && Math.abs(ly - prev.y) < 12) continue
+      const t = svg("text", { class: "axis", x: lx, y: ly, "text-anchor": "middle" }); t.textContent = text; root.append(t)
+      prev = { right: lx + half, y: ly }
     }
     box.replaceChildren(root)
   })
