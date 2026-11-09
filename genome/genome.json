@@ -1,5 +1,5 @@
 {
-  "solverModel": "claude-opus-5-5",
+  "solverModel": "claude-sonnet-5-5",
   "solverEffort": "medium",
   "maxTurns": 30,
   "improverModel": "claude-opus-5-5",
