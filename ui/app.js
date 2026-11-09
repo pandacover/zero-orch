@@ -31,6 +31,8 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
 
 // ---------- state ----------
 const S = {
+  /** Threads where the person turned Compact off; it's on by default whenever it shows. */
+  compactOff: new Set(),
   settings: null,
   projects: [],
   threads: [],
@@ -559,7 +561,7 @@ function startView(project) {
   const box = composer({
     controls: [models.node],
     onSend: async (text) => {
-      const projectId = pick.value
+      const projectId = project.id
       const { provider, model, effort, access } = models.value()
       const t = await api("POST", "threads", { projectId, provider, model, effort, access })
       await api("POST", `threads/${t.id}/messages`, { text })
@@ -572,8 +574,6 @@ function startView(project) {
     box.setAttach(status(p)?.tools !== false, `${providerLabel(p)} can't open files`)
   }
   readyFor(first)
-  const pick = el("select", { class: "select", "aria-label": "Project", title: "Project for the new thread", onchange: () => go(`#/new/${pick.value}`) },
-    S.projects.map((p) => el("option", { value: p.id, selected: p.id === project.id }, p.name)))
   const ready = status(first)?.available
   const list = el("div", { class: "suggest", role: "list" })
   const kinds = el("div", { class: "kinds", role: "tablist", "aria-label": "Kinds of things to ask" })
@@ -589,7 +589,7 @@ function startView(project) {
   }
   paintIdeas()
   return el("div", { class: "main-col" },
-    el("div", { class: "bar bar-quiet" }, el("div", { class: "title-wrap" }), el("div", { class: "pickers" }, pick)),
+    el("div", { class: "bar bar-quiet" }, el("div", { class: "title-wrap" })),
     el("div", { class: "start" }, el("div", { class: "start-inner" },
       el("h1", {}, "What should we do in ", el("em", { text: project.name }), "?"),
       el("p", { class: "lede", text: ready
@@ -656,8 +656,30 @@ function plainText(item) {
   return item.text.replace(ATT, (_, id) => known.get(id)?.name ?? "a file")
 }
 /** A sent message: click it (or Enter on it) to edit it and send it again. */
+/** How many lines of a sent prompt show before Show more. */
+const USER_LINES = 5
 function userMessage(item) {
-  const bubble = el("div", { class: "msg-user", tabindex: "0" }, userNodes(item))
+  // A long prompt shows its first 5 lines; Show more opens the rest (and stays open while the page is).
+  const body = el("div", { class: "msg-user-body" }, userNodes(item))
+  const key = `msg:${item.id}`
+  const more = el("button", { class: "msg-more", type: "button", hidden: true })
+  const bubble = el("div", { class: "msg-user", tabindex: "0" }, body, more)
+  const paintMore = () => {
+    const open = S.expanded.has(key)
+    const lines = parseFloat(getComputedStyle(body).lineHeight) * USER_LINES
+    more.hidden = !(body.scrollHeight > lines + 2)
+    bubble.classList.toggle("clamped", !more.hidden && !open)
+    // Opened in full, it reads in the feed: not stuck to the top, not scrolling inside itself.
+    bubble.parentElement?.classList.toggle("expanded", !more.hidden && open)
+    more.textContent = open ? "Show less" : "Show more"
+    more.setAttribute("aria-expanded", String(open))
+  }
+  more.addEventListener("click", (e) => {
+    e.stopPropagation() // not an edit
+    S.expanded.has(key) ? S.expanded.delete(key) : S.expanded.add(key)
+    paintMore()
+  })
+  new ResizeObserver(paintMore).observe(body)
   const wrap = el("div", { class: "msg msg-u" }, bubble, msgActions(() => plainText(item)))
   const start = () => { if (!wrap.classList.contains("editing")) editMessage(item, wrap, bubble) }
   bubble.addEventListener("click", (e) => {
@@ -957,13 +979,19 @@ function threadView(t) {
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
   const working = el("div", { class: "working", hidden: true }, el("i"), el("i"), el("i"), el("span", { text: "Working" }))
   const scroll = el("div", { class: "scroll" }, list)
+  // Compact: shown when the context is filling. On, the next message waits while the session compacts first.
+  const compact = el("button", { class: "pill-btn compact-toggle", type: "button", role: "switch", onclick: () => {
+    S.compactOff.has(t.id) ? S.compactOff.delete(t.id) : S.compactOff.add(t.id)
+    paintCompact(S.open)
+  } }, el("span", { class: "compact-knob", "aria-hidden": "true" }), el("span", { text: "Compact" }))
   const box = composer({
     running: t.status === "running",
-    controls: [models.node],
-    onSend: (text) => api("POST", `threads/${t.id}/messages`, { text }),
+    controls: [compact, models.node],
+    onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
-  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, composer: box, stick: true, models, title }
+  const queued = el("div", { class: "queued", hidden: true })
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact }
   paintReady(t)
   scroll.addEventListener("scroll", () => { feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60 })
   renderFeed()
@@ -988,6 +1016,37 @@ function paintReady(t) {
   const ready = status(t.provider)?.available === true
   feed.composer.setReady(ready, ready ? "Reply…" : `${providerLabel(t.provider)} is turned off in Settings`)
   feed.composer.setAttach(status(t.provider)?.tools !== false, `${providerLabel(t.provider)} can't open files`)
+  paintCompact(t)
+}
+
+/**
+ * When the context is this full (of where the provider compacts on its own), Compact shows in the
+ * composer. The server keeps the same number (COMPACT_SOON, src/app/Model.ts).
+ */
+const COMPACT_SOON = 0.7
+const needsCompaction = (t) => !!t?.context && t.context.limit > 0 && t.context.used >= COMPACT_SOON * t.context.limit
+/** A thread left this long has a cold cache: compacting first makes the next turn cheaper. Same as IDLE_COMPACT_MS on the server. */
+const IDLE_COMPACT_MS = 60 * 60 * 1000
+const idleMs = (t) => { const at = t?.items?.at(-1)?.at; return at ? Date.now() - Date.parse(at) : 0 }
+const idleLong = (t) => t?.status !== "running" && idleMs(t) >= IDLE_COMPACT_MS
+/** Compact shows only for a provider that takes `/compact`, in a session whose context is filling or that has sat idle an hour. */
+const compactShown = (t) => !!t && status(t.provider)?.compaction === "manual" && !!t.resume && (needsCompaction(t) || idleLong(t))
+const compactOn = (t) => compactShown(t) && !S.compactOff.has(t.id)
+function paintCompact(t) {
+  if (!feed?.compact || !t) return
+  const shown = compactShown(t)
+  feed.compact.hidden = !shown
+  if (!shown) return
+  const on = !S.compactOff.has(t.id)
+  const hours = Math.floor(idleMs(t) / IDLE_COMPACT_MS)
+  const why = needsCompaction(t)
+    ? `Context ${Math.round((t.context.used / t.context.limit) * 100)}% full.`
+    : `Idle for ${hours} hour${hours === 1 ? "" : "s"}: the next message would reload the whole thread.`
+  feed.compact.setAttribute("aria-checked", String(on))
+  feed.compact.classList.toggle("on", on)
+  feed.compact.title = on
+    ? `${why} Your next message waits while ${providerLabel(t.provider)} compacts this thread, then runs. Click to send as is.`
+    : `${why} Your next message is sent as is; ${providerLabel(t.provider)} still compacts on its own when the context is full. Click to compact first.`
 }
 
 function paintWorking() {
@@ -995,9 +1054,19 @@ function paintWorking() {
   const running = S.open.status === "running"
   const asking = S.open.items.some((i) => i.kind === "permission" && i.state === "pending")
   feed.working.hidden = !running || asking
-  feed.list.append(feed.working)
+  // While a compaction runs, the working line says so (its card in the feed shows the detail).
+  const compacting = running && S.open.items.some((i) => i.kind === "compact" && i.state === "running")
+  feed.working.querySelector("span").textContent = compacting ? "Compacting context" : "Working"
+  // A message waiting for the session to compact first.
+  feed.queued.hidden = !S.open.queued
+  if (S.open.queued && feed.queued.dataset.text !== S.open.queued) {
+    feed.queued.dataset.text = S.open.queued
+    feed.queued.replaceChildren(el("span", { class: "queued-label", text: "Queued · runs once the context is compacted" }), el("div", { class: "queued-text", text: S.open.queued }))
+  }
+  feed.list.append(feed.queued, feed.working)
   feed.composer.setBusy(running)
   feed.models.setBusy(running)
+  paintCompact(S.open)
 }
 const follow = () => { if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight }
 
@@ -1057,7 +1126,7 @@ function renderFeed() {
     reconcile(section, nodes)
     return section
   })
-  reconcile(feed.list, [...sections, feed.working])
+  reconcile(feed.list, [...sections, feed.queued, feed.working])
   // Only a turn's last agent response (its answer, not the narration between tool calls) has the
   // action row, and the turn's details (model, time, cost, tokens) sit in that row beside Copy.
   for (const [id, { node }] of feed.cache) {
@@ -1121,11 +1190,45 @@ function paintGroup(g, key) {
   g.body.inert = !open
   g.head.setAttribute("aria-expanded", String(open))
   g.head.title = last.detail ?? ""
+  const line = (item) => el("span", { class: "reel-line" },
+    el("span", { class: "tool-name", text: item.kind === "tool" ? item.name : item.tool }),
+    el("span", { class: "tool-detail", text: rel(item.detail) }))
+  // The reel stays put across repaints, so a call finishing mid-spin doesn't cut the spin short.
+  if (!g.reel) g.win = el("span", { class: "reel-window" }, (g.reel = el("span", { class: "reel" })))
   g.head.replaceChildren(
     el("span", { class: "tool-state", "aria-label": state }),
-    el("span", { class: "tool-name", text: last.kind === "tool" ? last.name : last.tool }),
-    el("span", { class: "tool-detail", text: rel(last.detail) }),
+    g.win,
     el("span", { class: "tool-count", text: `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}` }))
+  // A new call spins the row like a lottery drum and lands on it; the same call just repaints.
+  const was = g.shown === undefined ? undefined : g.items.find((i) => i.id === g.shown)
+  const spin = was !== undefined && g.shown !== last.id && !matchMedia("(prefers-reduced-motion: reduce)").matches
+  g.shown = last.id
+  if (spin) spinReel(g, [was, ...blurs(tools, last), last].map(line))
+  else if (!g.spinning) g.reel.replaceChildren(line(last))
+  else g.landing = line(last) // lands on the latest text once the spin ends
+}
+/** A few other calls from the run (or the same one again) for the drum to flick past. */
+function blurs(tools, last) {
+  const pool = tools.filter((i) => i.id !== last.id)
+  return Array.from({ length: 4 }, () => pool[Math.floor(Math.random() * pool.length)] ?? last)
+}
+/** Roll the drum from the first line to the last: fast and blurred, then easing to a stop with a small bounce. */
+function spinReel(g, lines) {
+  g.spinning?.cancel()
+  g.landing = lines.at(-1)
+  g.reel.replaceChildren(...lines)
+  const run = g.reel.animate([
+    { transform: "translateY(0)", filter: "blur(0)" },
+    { offset: 0.2, filter: "blur(1.4px)" },
+    { offset: 0.75, filter: "blur(0.4px)" },
+    { transform: `translateY(-${((lines.length - 1) / lines.length) * 100}%)`, filter: "blur(0)" }
+  ], { duration: 720, easing: "cubic-bezier(.12,.75,.22,1.12)" })
+  g.spinning = run
+  run.onfinish = () => {
+    if (g.spinning !== run) return
+    g.spinning = null
+    g.reel.replaceChildren(g.landing)
+  }
 }
 function upsertItem(item) {
   const t = S.open
@@ -1202,6 +1305,7 @@ function renderItem(item) {
       // A recall shows what singularity handed the agent, word for word.
       return el("div", { class: `mem ${item.action}` }, head, item.text ? el("pre", { class: "mem-text", text: item.text }) : null)
     }
+    case "compact": return compactCard(item)
     case "turn": {
       if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
       return el("div", { class: "turn-meta" }, turnMeta(item))
@@ -1209,6 +1313,39 @@ function renderItem(item) {
   }
   return el("div")
 }
+/**
+ * A compaction, as it happens: while it runs, a moving bar, how much it's summarizing and for how long;
+ * once done, how much smaller the context got, how long it took, and the summary the session goes on from.
+ */
+function compactCard(item) {
+  const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k` : String(n))
+  const why = item.trigger === "auto" ? `${providerLabel(S.open?.provider)} compacted on its own as the context filled` : "Compacted as asked"
+  const head = (title, ...rest) => el("div", { class: "compact-head" }, el("span", { class: "compact-icon", "aria-hidden": "true" }), el("b", { text: title }), ...rest)
+  if (item.state === "running") {
+    const size = item.preTokens !== null ? `Summarizing about ${k(item.preTokens)} tokens of this thread` : "Summarizing this thread so far"
+    return el("div", { class: "compact-card running", role: "status", "aria-live": "polite" },
+      head("Compacting context", el("span", { class: "compact-time", "data-since": item.at, text: elapsed(item.at) })),
+      el("div", { class: "compact-bar", "aria-hidden": "true" }, el("i")),
+      el("div", { class: "compact-sub", text: `${size}. ${item.trigger === "auto" ? "Claude started this on its own; the turn goes on after." : "Your next step waits for it."}` }))
+  }
+  if (item.state === "failed") {
+    return el("div", { class: "compact-card failed", role: "status" }, head("Compaction failed"), el("div", { class: "compact-sub", text: item.error || "The provider didn't finish compacting. The thread goes on as it was." }))
+  }
+  const facts = [
+    item.preTokens !== null && item.postTokens !== null ? `${k(item.preTokens)} → ${k(item.postTokens)} tokens` : null,
+    item.preTokens && item.postTokens !== null ? `${Math.max(0, Math.round((1 - item.postTokens / item.preTokens) * 100))}% smaller` : null,
+    item.durationMs ? `${(item.durationMs / 1000).toFixed(1)}s` : null
+  ].filter(Boolean)
+  return el("div", { class: "compact-card done", role: "status" },
+    head("Context compacted", el("span", { class: "compact-facts", text: facts.join(" · ") })),
+    el("div", { class: "compact-sub", text: `${why}. What came before is now this summary.` }),
+    item.summary ? el("details", { class: "compact-summary" }, el("summary", { text: "What Claude kept" }), el("div", { class: "prose" }, mdNodes(item.summary))) : null)
+}
+/** m:ss since an ISO time. */
+const elapsed = (iso) => { const s = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` }
+// A running compaction's clock ticks every second.
+setInterval(() => { for (const n of document.querySelectorAll(".compact-time[data-since]")) n.textContent = elapsed(n.dataset.since) }, 1000)
+
 /** What singularity told the agent when it asked mid-task: the question, the commit it pointed to, and its words. */
 function memoryCard(item) {
   const command = /singularity (recall|changes)\b.*/.exec(item.detail ?? "")?.[0] ?? item.detail
@@ -1362,7 +1499,10 @@ function paintSettings() {
     ],
     threads: () => [
       group(null, "What new threads start with. Open threads keep their own model and access.",
-        row("What Claude may do without asking", ACCESS.find(([v]) => v === s.defaultAccess)[2], sel(ACCESS.map(([v, l]) => [v, l]), () => s.defaultAccess, (v) => (s.defaultAccess = v), "Default access")))
+        row("What Claude may do without asking", ACCESS.find(([v]) => v === s.defaultAccess)[2], sel(ACCESS.map(([v, l]) => [v, l]), () => s.defaultAccess, (v) => (s.defaultAccess = v), "Default access"))),
+      group("Titles", "A new thread is named from its first message. You can rename any thread by its title.",
+        row("Name threads with a small model", "Off keeps the first line of your first message as the title. Needs Claude on.", sw(() => s.titles.auto, (v) => (s.titles.auto = v), "Name threads with a small model")),
+        row("Model that names them", "Small is fast and cheap; a title is a few words.", sel((st?.models ?? [s.titles.model]).map((m) => [m, modelName(m)]), () => s.titles.model, (v) => (s.titles.model = v), "Title model")))
     ],
     memory: () => [
       group("singularity", "Memory of changes committed in each repository. It needs singularity installed; without it, threads work the same.",
@@ -1661,11 +1801,9 @@ document.addEventListener("keydown", (e) => {
     if (ask) api("POST", `threads/${S.open.id}/permissions/${ask.id}`, { allow: e.key === "y" }).catch(fail)
   }
 })
-$("new-thread").addEventListener("click", () => {
-  const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
-  pid ? go(`#/new/${pid}`) : addProject()
-})
 $("add-project").addEventListener("click", addProject)
+// An hour idle is reached by the clock, not by an event: look again each minute.
+setInterval(() => { if (S.open) paintCompact(S.open) }, 60_000)
 // A file dropped anywhere but the composer would open in place of the app; it does nothing instead.
 for (const type of ["dragover", "drop"]) {
   addEventListener(type, (e) => { if (e.dataTransfer?.types.includes("Files") && !e.target.closest?.(".composer")) e.preventDefault() })
