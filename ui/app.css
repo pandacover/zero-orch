@@ -75,7 +75,7 @@ button, a, .thread-link, .foot-link, .proj-head { transition: background-color .
 .turn > * { animation: item-in .26s var(--ease) backwards; }
 @keyframes item-in { from { opacity: 0; transform: translateY(6px); } }
 
-/* ---------- shell: the sidebar sits on the frame; the main panel is inset with a rounded corner ---------- */
+/* ---------- shell: the sidebar sits on the frame; the main panel runs flush to the window's edges ---------- */
 .shell { display: grid; grid-template-columns: var(--side-w, 272px) minmax(0, 1fr); height: 100vh; height: 100dvh; background: var(--frame); }
 .shell.side-hidden { grid-template-columns: 0 minmax(0, 1fr); }
 .shell.side-hidden .side { visibility: hidden; }
@@ -164,13 +164,13 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 
 .main {
   min-width: 0; min-height: 0; display: flex; flex-direction: column; outline: none; overflow: hidden;
-  /* inset from the top only, running to the window's right edge; rounded at the top left only */
-  margin: 14px 0 0 0; background: var(--bg); border: 1px solid var(--line); border-right: 0; border-bottom: 0; border-radius: 18px 0 0 0;
+  /* flush with the window's top and right edges; a single left border divides it from the sidebar */
+  margin: 0; background: var(--bg); border: 0; border-left: 1px solid var(--line);
 }
-/* hidden sidebar: the panel meets the window edges; the border stays (transparent) so nothing shifts by a pixel */
-.shell.side-hidden .main { margin: 0; border-color: transparent; border-radius: 0; }
+/* hidden sidebar: the border stays (transparent) so nothing shifts by a pixel */
+.shell.side-hidden .main { border-color: transparent; }
 .main-col { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-/* the sidebar's top row (where the toggle sits) lines up with the panel's title row: both centre 42px down */
+/* the sidebar's top row (where the toggle sits) clears the toggle on narrow screens; wide screens align it below */
 .side { padding-top: 26px; }
 @media (min-width: 821px) {
   /*
@@ -181,12 +181,14 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
   .shell { transition: grid-template-columns var(--side-move); }
   .side { width: var(--side-w, 272px); transition: transform var(--side-move), visibility var(--side-move); }
   .shell.side-hidden .side { transform: translateX(-100%); }
-  .main { position: relative; z-index: 1; transition: margin var(--side-move), border-radius var(--side-move), border-color var(--side-move); }
+  .main { position: relative; z-index: 1; transition: border-color var(--side-move); }
   body.resizing .shell, body.resizing .side { transition: none; }
-  /* the header keeps its place: as the panel's top inset closes, its top padding grows by the same amount;
-     its left padding grows to clear the toggle, which now sits over the panel */
-  .bar { transition: padding var(--side-move), min-height var(--side-move); }
-  .shell.side-hidden .bar { padding-top: 24px; padding-left: 56px; min-height: 68px; }
+  /* the panel's header row is 54px tall from the window top, so the toggle and the sidebar's top row centre 27px down */
+  .icon-btn.side-toggle { top: 11px; }
+  .side { padding-top: 11px; }
+  /* with the sidebar hidden the header's left padding grows to clear the toggle, which now sits over the panel */
+  .bar { transition: padding var(--side-move); }
+  .shell.side-hidden .bar { padding-left: 56px; }
   .shell.side-hidden .page-inner { padding-top: 64px; }
 }
 
