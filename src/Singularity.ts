@@ -200,9 +200,16 @@ export const layer = Layer.effect(
   })
 )
 
-/** `afterTool` for an Agent SDK hook: a promise that never fails, of the note or undefined. */
+/**
+ * `afterTool` for an Agent SDK hook: a promise that never fails, of the note or undefined.
+ *
+ * The notes go under their own session (`<session>-tools`). singularity skips the notes on a commit
+ * its session was already handed at the task's start, yet that hand-over is the pointer alone and
+ * tells the agent `git show` will bring the rest: under one session, the commands the pointed-to
+ * change's session ran would never arrive. A note still comes once per commit.
+ */
 export const toolNotes = (memory: Memory["Service"], session: string) => (input: Readonly<Record<string, unknown>>): Promise<string | undefined> =>
-  Effect.runPromise(memory.afterTool(input, session).pipe(Effect.map(Option.getOrUndefined), Effect.orElseSucceed(() => undefined)))
+  Effect.runPromise(memory.afterTool(input, `${session}-tools`).pipe(Effect.map(Option.getOrUndefined))).catch(() => undefined)
 
 /** Memory with nothing in it: for runs where singularity isn't installed, and tests. */
 export const empty = Layer.succeed(

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import * as Singularity from "../src/Singularity.ts"
-import { hookContext, Memory, pointedCommit, readsCommits } from "../src/Singularity.ts"
+import { hookContext, Memory, pointedCommit, readsCommits, toolNotes } from "../src/Singularity.ts"
 
 /** A stand-in for singularity's hook.ts: answers as the real one does, and logs what it was given. */
 const FAKE_HOOK = `
@@ -61,6 +61,32 @@ describe("singularity's hooks, as zero runs them", () => {
     expect(shown).toEqual(Option.some("Its session checked it with: npm run typecheck"))
     expect(listed).toEqual(Option.none())
     expect(log()).toMatchObject([{ event: "post-tool-use", input: { session_id: "zero-thr_1" } }])
+  })
+})
+
+describe("notes on a commit the agent reads", () => {
+  it("come under their own session, so the change handed over at the start still gets its commands", async () => {
+    const sessions: Array<string> = []
+    const memory = Memory.of({
+      recall: () => Effect.succeedNone,
+      handOver: () => Effect.succeedNone,
+      afterTool: (_input, session) => Effect.sync(() => (sessions.push(session), Option.some("ran: npm test"))),
+      store: () => Effect.void,
+      changes: () => Effect.succeed([])
+    })
+    expect(await toolNotes(memory, "zero-thr_1")({ tool_name: "Bash" })).toBe("ran: npm test")
+    expect(sessions).toEqual(["zero-thr_1-tools"])
+  })
+
+  it("never fail the agent's call", async () => {
+    const memory = Memory.of({
+      recall: () => Effect.succeedNone,
+      handOver: () => Effect.succeedNone,
+      afterTool: () => Effect.die("boom"),
+      store: () => Effect.void,
+      changes: () => Effect.succeed([])
+    })
+    expect(await toolNotes(memory, "s")({})).toBeUndefined()
   })
 })
 
