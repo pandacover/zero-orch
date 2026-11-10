@@ -1471,13 +1471,15 @@ function makeGitPanel(t) {
   const body = el("div", { class: "git-body" }, el("p", { class: "git-empty", text: "Loading…" }))
   const refresh = el("button", { class: "icon-btn git-refresh", type: "button", title: "Refresh", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${REFRESH_PATHS}</svg>`, onclick: () => loadGit() })
   const resize = el("div", { class: "git-resize", role: "separator", "aria-orientation": "vertical", "aria-label": "Resize Git panel", tabindex: "0", title: "Drag to resize · double-click to reset" })
-  const node = el("aside", { class: "git-panel", id: "git-panel", "aria-label": "Git", hidden: !load("gitOpen", false) },
+  // Closed, it stays in the page (inert) so it can slide and fade both ways; see setGitOpen.
+  const node = el("aside", { class: "git-panel", id: "git-panel", "aria-label": "Git" },
     resize,
     el("div", { class: "git-head" },
       el("h2", { text: "Git" }),
       el("span", { class: "git-at" }),
       refresh),
     body)
+  showGit(node, load("gitOpen", false))
   gitPanel = { node, body, toggle, badge, refresh, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "", folds: new Map() }
   setGitWidth(load("gitWidth", GIT.base), false)
   wireGitResize(resize)
@@ -1486,20 +1488,28 @@ function makeGitPanel(t) {
   // While it's open, look again: often while checks run, now and then otherwise.
   gitPanel.timer = setInterval(() => {
     const g = gitPanel
-    if (!g || node.hidden || document.hidden || g.loading) return
+    if (!g || !gitOpenNow() || document.hidden || g.loading) return
     const waiting = g.data?.pr?.checks.some((c) => c.state === "running" || c.state === "pending")
     if (Date.now() - g.at > (waiting ? 15_000 : 90_000)) loadGit()
   }, 5_000)
   return { node, toggle }
 }
-const gitOpenNow = () => !!gitPanel && !gitPanel.node.hidden
+const gitOpenNow = () => !!gitPanel && !gitPanel.node.classList.contains("closed")
+/** Open or close the panel's node: the CSS slides it and fades its content; closed, it can't be focused or clicked. */
+function showGit(node, open) {
+  node.classList.toggle("closed", !open)
+  node.inert = !open
+}
 function setGitOpen(open) {
   if (!gitPanel) return
-  gitPanel.node.hidden = !open
+  showGit(gitPanel.node, open)
   save("gitOpen", open)
   paintGitToggle()
-  if (open && Date.now() - gitPanel.at > 10_000) loadGit()
+  // Look again once it has slid open: repainting its content mid-slide would stall the animation.
+  if (open && Date.now() - gitPanel.at > 10_000) setTimeout(loadGit, sideMoveMs())
 }
+/** How long a sidebar takes to slide (--side-move in app.css), in ms. */
+const sideMoveMs = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--side-move")) * 1000 || 0
 function setGitWidth(w, persist = true) {
   const width = Math.round(Math.min(GIT.max, Math.max(GIT.min, w)))
   document.querySelector(".shell").style.setProperty("--git-w", `${width}px`)
@@ -1539,7 +1549,7 @@ function wireGitResize(handle) {
 function paintGitToggle() {
   const g = gitPanel
   if (!g) return
-  const open = !g.node.hidden
+  const open = gitOpenNow()
   g.toggle.classList.toggle("on", open)
   g.toggle.setAttribute("aria-expanded", String(open))
   const d = g.data
