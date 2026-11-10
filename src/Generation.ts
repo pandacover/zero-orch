@@ -215,6 +215,7 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
   // setup, and earlier improvers' check scripts come with it. One session for it and the notes on `git show`.
   const session = `zero-improver-${generation}-${Date.now().toString(36)}`
   const recall = yield* memory.handOver({ session, prompt: objective, cwd: root, startsTask: true }).pipe(
+    Effect.map((a) => a.handOver),
     Effect.catchTag("MemoryError", (e) => Effect.sync(() => (log(`singularity recall failed, going on without it: ${e.message}`), Option.none<HandOver>())))
   )
   log(

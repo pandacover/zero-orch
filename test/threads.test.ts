@@ -62,7 +62,7 @@ describe("tool failures", () => {
     try {
       const memory = Layer.succeed(Singularity.Memory, Singularity.Memory.of({
         recall: () => Effect.succeedNone,
-        handOver: () => Effect.succeedNone,
+        handOver: () => Effect.succeed({ handOver: Option.none(), searched: false }),
         afterTool: () => Effect.succeedNone,
         store: () => Effect.void,
         changes: () => Effect.succeed([])
@@ -213,7 +213,9 @@ describe("memory at each task start", () => {
       recall,
       handOver: ({ prompt, cwd, startsTask, session }) => {
         seen.push({ prompt, startsTask, session })
-        return startsTask ? recall(prompt, cwd).pipe(Effect.map(Option.map((r) => ({ text: r.text, commit: r.commit })))) : Effect.succeedNone
+        return startsTask
+          ? recall(prompt, cwd).pipe(Effect.map((r) => ({ handOver: Option.map(r, (r) => ({ text: r.text, commit: r.commit })), searched: true })))
+          : Effect.succeed({ handOver: Option.none(), searched: false })
       },
       afterTool: () => Effect.succeedNone,
       store: () => Effect.void,
@@ -233,6 +235,20 @@ describe("memory at each task start", () => {
     expect(given.prompt).toBe("add a retry to the fetch helper")
     expect(given.instructions).toContain("singularity recall")
     expect(memories).toMatchObject([{ action: "checked", commit: "", title: "nothing stored in this repo is like this task yet" }])
+  })
+
+  it("claims no search singularity didn't make: a message it didn't search for gets no row", async () => {
+    const memory = Layer.succeed(Singularity.Memory, Singularity.Memory.of({
+      recall: () => Effect.succeedNone,
+      handOver: () => Effect.succeed({ handOver: Option.none(), searched: false }),
+      afterTool: () => Effect.succeedNone,
+      store: () => Effect.void,
+      changes: () => Effect.succeed([])
+    }))
+    const { given, memories } = await firstTurn(memory, { messages: ["hi"] })
+    expect(given.prompt).toBe("hi")
+    expect(given.instructions).toContain(Singularity.MEMORY_NOTE)
+    expect(memories).toEqual([])
   })
 
   it("says so when singularity didn't answer, instead of going quiet", async () => {
@@ -256,7 +272,7 @@ describe("memory at each task start", () => {
     const card = "# Check scripts earlier sessions here ran\n\n- scripts/e2e.mjs"
     const memory = Layer.succeed(Singularity.Memory, Singularity.Memory.of({
       recall: () => Effect.succeedNone,
-      handOver: () => Effect.succeedSome({ text: card, commit: null }),
+      handOver: () => Effect.succeed({ handOver: Option.some({ text: card, commit: null }), searched: true }),
       afterTool: () => Effect.succeedNone,
       store: () => Effect.void,
       changes: () => Effect.succeed([])

@@ -37,7 +37,10 @@ export const solve = Effect.fn("Solve.run")(function*(input: {
   const before = yield* head(input.cwd)
   // One session for the hand-over and the notes on `git show`, so neither repeats the other.
   const session = `zero-solve-${Date.now().toString(36)}`
-  const recall = yield* memory.handOver({ session, prompt: input.task, cwd: input.cwd, startsTask: true }).pipe(Effect.orElseSucceed(() => Option.none<HandOver>()))
+  const recall = yield* memory.handOver({ session, prompt: input.task, cwd: input.cwd, startsTask: true }).pipe(
+    Effect.map((a) => a.handOver),
+    Effect.orElseSucceed(() => Option.none<HandOver>())
+  )
   input.log(
     Option.isNone(recall)
       ? "singularity: no past change like this here"

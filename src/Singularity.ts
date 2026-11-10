@@ -20,7 +20,9 @@
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import { ChildProcessSpawner } from "effect/process"
 import { MemoryError } from "./Errors.ts"
-import { procOk, runProcess, singularityCommand, singularityHook, tail } from "./Proc.ts"
+import { readFileSync, statSync } from "node:fs"
+import { join } from "node:path"
+import { procOk, runProcess, singularityCommand, singularityHome, singularityHook, tail } from "./Proc.ts"
 
 /**
  * What every agent zero starts in a git repo is told about singularity, added
@@ -62,6 +64,17 @@ export interface HandOver {
   readonly commit: string | null
 }
 
+/** What singularity answered at a message: its hand-over, if any, and whether it searched at all. */
+export interface HandOverAnswer {
+  readonly handOver: Option.Option<HandOver>
+  /**
+   * Whether singularity took the message for a task's start and searched its memory. It doesn't for a
+   * follow-up, or for a message that asks for nothing ("commit and push", "hi"): no hand-over then
+   * doesn't mean nothing stored is like the task.
+   */
+  readonly searched: boolean
+}
+
 /** A change singularity stored, as `changes --json` lists it. */
 export interface StoredChange {
   readonly id: string
@@ -80,7 +93,7 @@ export class Memory extends Context.Service<Memory, {
    * install), singularity decides what starts a task, as it does in Claude Code, and its model picks the
    * change when the person chose one in its setup. Without it, `recall` runs when `startsTask` says so.
    */
-  handOver(input: { readonly session: string; readonly prompt: string; readonly cwd: string; readonly startsTask: boolean }): Effect.Effect<Option.Option<HandOver>, MemoryError>
+  handOver(input: { readonly session: string; readonly prompt: string; readonly cwd: string; readonly startsTask: boolean }): Effect.Effect<HandOverAnswer, MemoryError>
   /**
    * What singularity adds after a shell call that read a stored commit (`git show`, `git log`): what git
    * doesn't show, such as the commands its session ran. `input` is Claude Code's PostToolUse input.
@@ -119,6 +132,56 @@ export const hookContext = (stdout: string): string | undefined => {
   }
 }
 
+/**
+ * singularity's log of what it decided at each task's start, a JSON line each (its scripts/Start.ts
+ * `logHandover`), and the log its hooks write an error to before they exit 0 with no output.
+ */
+const singularityLogs = (): { readonly handovers: string; readonly errors: string } => {
+  const home = singularityHome()
+  let tenant = "local"
+  try {
+    const named: unknown = JSON.parse(readFileSync(join(home, "config.json"), "utf8"))?.tenant
+    if (typeof named === "string" && named !== "") tenant = named
+  } catch {
+    // No config yet: singularity uses its default tenant.
+  }
+  return { handovers: join(home, "tenants", tenant, "workflows", "handovers.jsonl"), errors: join(home, "hook-errors.log") }
+}
+
+/** A log's size in bytes, or -1 when there's no such file. */
+const sizeOf = (file: string): number => {
+  try {
+    return statSync(file).size
+  } catch {
+    return -1
+  }
+}
+
+/** What was added to a log after it was `from` bytes long. */
+const addedTo = (file: string, from: number): string => {
+  try {
+    return readFileSync(file).subarray(Math.max(0, from)).toString("utf8")
+  } catch {
+    return ""
+  }
+}
+
+/** Whether lines singularity added to its hand-over log say it searched at a task's start in `session`. */
+export const searchedIn = (lines: string, session: string): boolean =>
+  lines.split("\n").some((line) => {
+    try {
+      const entry: unknown = JSON.parse(line)
+      return typeof entry === "object" && entry !== null && "session_id" in entry && "moment" in entry &&
+        entry.session_id === session && (entry.moment === "start" || entry.moment === "pick")
+    } catch {
+      return false
+    }
+  })
+
+/** An error singularity's task-start hooks logged, among lines added to its error log. */
+export const hookError = (lines: string): string | undefined =>
+  lines.split("\n").find((l) => / workflows user-prompt-(?:submit|pick): /.test(l))?.replace(/^\S+ workflows /, "")
+
 /** The commit a hand-over points to (`committed as <sha>: "…"`), if it points to one. */
 export const pointedCommit = (text: string): string | null => /committed as ([0-9a-f]{7,40})\b/.exec(text)?.[1] ?? null
 
@@ -136,14 +199,27 @@ export const layer = Layer.effect(
     const [command, prefix] = singularityCommand()
     const hookScript = singularityHook()
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-    /** singularity's hook for `event`, fed Claude Code's hook input: what it hands the agent, if anything. */
+    /**
+     * singularity's hook for `event`, fed Claude Code's hook input: what it hands the agent, if anything.
+     * A hook that timed out or crashed fails: its silence isn't "nothing like this task".
+     */
     const hook = (event: ReadonlyArray<string>, input: Readonly<Record<string, unknown>>, cwd: string, timeoutS: number) =>
       hookScript === undefined
         ? Effect.succeed(undefined)
         : runProcess(process.execPath, [hookScript, ...event], { cwd, timeoutS, input: JSON.stringify(input) }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.mapError((e) => new MemoryError({ message: `singularity hook ${event[0]}: ${String(e)}` })),
-          Effect.map((r) => hookContext(r.stdout))
+          Effect.flatMap((r) =>
+            procOk(r)
+              ? Effect.succeed(hookContext(r.stdout))
+              : Effect.fail(
+                new MemoryError({
+                  message: r.timedOut
+                    ? `singularity hook ${event[0]}: no answer in ${timeoutS} s`
+                    : `singularity hook ${event[0]} exited ${r.exitCode}: ${tail(r.stderr || r.stdout, 300)}`
+                })
+              )
+          )
         )
     const run = (args: ReadonlyArray<string>, cwd: string) =>
       runProcess(command, [...prefix, ...args], { cwd, timeoutS: 120 }).pipe(
@@ -170,16 +246,30 @@ export const layer = Layer.effect(
       handOver: ({ session, prompt, cwd, startsTask }) => {
         if (hookScript === undefined) {
           return startsTask
-            ? recall(prompt, cwd).pipe(Effect.map(Option.map((r): HandOver => ({ text: r.text, commit: r.commit }))))
-            : Effect.succeedNone
+            ? recall(prompt, cwd).pipe(
+              Effect.map((r): HandOverAnswer => ({ handOver: Option.map(r, (r): HandOver => ({ text: r.text, commit: r.commit })), searched: true }))
+            )
+            : Effect.succeed<HandOverAnswer>({ handOver: Option.none(), searched: false })
         }
         // As Claude Code runs them: the card (and, with no model chosen, the pointer) and, beside it,
         // the model's pick of the pointer when the person chose a model in singularity's setup.
+        // singularity alone decides what starts a task: its logs say whether it searched, and what went wrong.
         const input = { session_id: session, cwd, prompt, hook_event_name: "UserPromptSubmit" }
+        const logs = singularityLogs()
+        const from = { handovers: sizeOf(logs.handovers), errors: sizeOf(logs.errors) }
         return Effect.all([hook(["user-prompt-pick"], input, cwd, 120), hook(["user-prompt-submit", "--picks"], input, cwd, 90)], { concurrency: 2 }).pipe(
-          Effect.map((parts) => {
+          Effect.flatMap((parts) => {
+            const error = hookError(addedTo(logs.errors, from.errors))
+            if (error !== undefined) return Effect.fail(new MemoryError({ message: `singularity's hook logged ${tail(error, 300)}` }))
             const text = parts.filter((p) => p !== undefined).join("\n\n")
-            return text === "" ? Option.none() : Option.some({ text, commit: pointedCommit(text) })
+            // A singularity that keeps no hand-over log: take zero's own view of a task's start.
+            const searched = from.handovers < 0 && sizeOf(logs.handovers) < 0
+              ? startsTask
+              : searchedIn(addedTo(logs.handovers, from.handovers), session)
+            return Effect.succeed<HandOverAnswer>({
+              handOver: text === "" ? Option.none() : Option.some({ text, commit: pointedCommit(text) }),
+              searched: searched || text !== ""
+            })
           })
         )
       },
@@ -216,7 +306,7 @@ export const empty = Layer.succeed(
   Memory,
   Memory.of({
     recall: () => Effect.succeedNone,
-    handOver: () => Effect.succeedNone,
+    handOver: ({ startsTask }) => Effect.succeed({ handOver: Option.none(), searched: startsTask }),
     afterTool: () => Effect.succeedNone,
     store: () => Effect.void,
     changes: () => Effect.succeed([])

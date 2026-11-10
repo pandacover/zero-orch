@@ -133,8 +133,11 @@ export const singularityCommand = (): readonly [string, ReadonlyArray<string>] =
   return ["singularity", []]
 }
 
+/** singularity's home: its install, config and memory (`SINGULARITY_HOME`, else ~/.singularity). */
+export const singularityHome = (): string => process.env["SINGULARITY_HOME"] || join(homedir(), ".singularity")
+
 /** Where an install keeps singularity's CLI sources (apps/cli/src). */
-const singularityApp = () => join(process.env["SINGULARITY_HOME"] ?? join(homedir(), ".singularity"), "app", "apps", "cli", "src")
+const singularityApp = () => join(singularityHome(), "app", "apps", "cli", "src")
 
 /**
  * singularity's hook script, the one its setup gives Claude Code: the hand-over at a task's start
