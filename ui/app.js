@@ -2086,56 +2086,180 @@ function addressPrompt(pr) {
 }
 
 // ---------- markdown (escaped first; only our own tags come out) ----------
-function inline(s) {
-  const codes = []
-  let t = esc(s).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`)
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`)
-  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, "$1<em>$2</em>")
-  return t.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[Number(i)]}</code>`)
+// GitHub-flavored: headings, rules, fences (``` and ~~~), quotes, nested, task and numbered lists,
+// tables, emphasis, strikethrough, code spans, links and bare URLs. Links open only http(s) and mailto;
+// images become links, since the page's policy loads no remote images.
+const safeUrl = (u) => /^(https?:\/\/|mailto:)/i.test(u)
+const linkTag = (url, label) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+function emphasis(t) {
+  return t
+    .replace(/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/g, "<strong><em>$1</em></strong>")
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^\w])__(?=\S)([\s\S]*?\S)__(?!\w)/g, "$1<strong>$2</strong>")
+    .replace(/(^|[^*\w])\*(?=[^\s*])([^*]*?[^\s*]|[^\s*])\*(?![*\w])/g, "$1<em>$2</em>")
+    .replace(/(^|[^\w])_(?=[^\s_])([^_]*?[^\s_]|[^\s_])_(?!\w)/g, "$1<em>$2</em>")
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, "<del>$1</del>")
 }
-function md(src) {
-  const lines = src.replace(/\r\n/g, "\n").split("\n")
+function inline(s) {
+  const kept = []
+  const keep = (html) => `\u0000${kept.push(html) - 1}\u0000`
+  // On the raw text: code spans, backslash escapes and <autolinks>, which nothing else may touch.
+  let t = s.replace(/(?<!`)(`+)(?!`)([\s\S]*?[^`])\1(?!`)|\\([!-/:-@[-`{-~])|<((?:https?:\/\/|mailto:)[^\s<>]+)>/g, (_, ticks, code, ch, auto) => {
+    if (ticks) {
+      const c = code.replace(/\n/g, " ")
+      return keep(`<code>${esc(/^ .*[^ ].* $/.test(c) ? c.slice(1, -1) : c)}</code>`)
+    }
+    if (ch) return keep(esc(ch))
+    return keep(linkTag(esc(auto), esc(auto)))
+  })
+  t = esc(t)
+  // [label](url "title") and ![alt](url); a URL may hold one level of parentheses.
+  t = t.replace(/(!?)\[([^\]]*)\]\(\s*((?:[^\s()]|\([^\s()]*\))+)(?:\s+&quot;[^]*?&quot;)?\s*\)/g, (_, bang, label, url) => {
+    const text = bang ? (label || url) : label
+    return safeUrl(url) ? keep(linkTag(url, emphasis(text))) : emphasis(text)
+  })
+  // Bare URLs, less trailing punctuation and an unmatched closing parenthesis.
+  t = t.replace(/\bhttps?:\/\/[^\s\u0000]+/g, (m) => {
+    let url = m.split(/&(?:lt|gt|quot|#39);/)[0]
+    let rest = m.slice(url.length)
+    for (;;) {
+      const end = /[.,:;!?*_~]+$/.exec(url)?.[0] ?? (url.endsWith(")") && (url.match(/\(/g)?.length ?? 0) < (url.match(/\)/g)?.length ?? 0) ? ")" : "")
+      if (!end) break
+      url = url.slice(0, -end.length)
+      rest = end + rest
+    }
+    return (/^https?:\/\/[^/]/.test(url) ? keep(linkTag(url, url)) : url) + rest
+  })
+  t = emphasis(t)
+  while (/\u0000\d+\u0000/.test(t)) t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => kept[Number(i)])
+  return t
+}
+
+const indentOf = (l) => { let n = 0; for (const c of l) { if (c === " ") n++; else if (c === "\t") n += 4 - (n % 4); else break } return n }
+const dedent = (l, n) => { let col = 0, k = 0; while (k < l.length && col < n && (l[k] === " " || l[k] === "\t")) { col += l[k] === "\t" ? 4 - (col % 4) : 1; k++ } return l.slice(k) }
+const MD_FENCE = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)/
+const MD_ATX = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/
+const MD_HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/
+const MD_ITEM = /^( {0,3})([-*+]|\d{1,9}[.)])(?:([ \t]+)(.*))?$/
+const MD_QUOTE = /^ {0,3}> ?/
+const MD_TABLE_SEP = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/
+const isFence = (l) => { const m = MD_FENCE.exec(l); return !!m && !(m[1][0] === "`" && l.slice(m[0].length).includes("`")) }
+const isMdBlockStart = (l) => isFence(l) || MD_ATX.test(l) || MD_HR.test(l) || MD_QUOTE.test(l) || /^ {0,3}([-*+]|\d{1,9}[.)])[ \t]+\S/.test(l)
+
+/** A table row's cells: split on pipes outside code spans, \| kept as a pipe. */
+function tableCells(line) {
+  let s = line.trim()
+  if (s.startsWith("|")) s = s.slice(1)
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1)
+  const cells = []
+  let cur = "", code = 0
+  for (let k = 0; k < s.length; k++) {
+    const c = s[k]
+    if (c === "\\" && s[k + 1] === "|") { cur += "|"; k++; continue }
+    if (c === "`") { let n = 1; while (s[k + n] === "`") n++; code = code === n ? 0 : code || n; cur += s.slice(k, k + n); k += n - 1; continue }
+    if (c === "|" && !code) { cells.push(cur.trim()); cur = ""; continue }
+    cur += c
+  }
+  cells.push(cur.trim())
+  return cells
+}
+const isTableStart = (lines, i) => i + 1 < lines.length && lines[i].includes("|") && MD_TABLE_SEP.test(lines[i + 1]) && lines[i + 1].includes("-") &&
+  tableCells(lines[i]).length === tableCells(lines[i + 1]).length
+
+const codeBlock = (lang, body) => `<div class="code"><div class="code-head"><span>${esc(lang || "text")}</span><button class="copy" type="button">Copy</button></div><pre><code>${esc(body)}</code></pre></div>`
+
+/** Block markup for these lines. `tight` leaves paragraphs unwrapped, as in a tight list's items. */
+function mdBlocks(lines, tight = false) {
   const out = []
-  const isBlockStart = (l) => /^```|^#{1,6}\s|^>\s?|^\s*([-*+]|\d+[.)])\s+|^(-{3,}|\*{3,})\s*$/.test(l)
-  for (let i = 0; i < lines.length;) {
+  let i = 0
+  while (i < lines.length) {
     const line = lines[i]
-    const fence = /^```\s*([\w+#.-]*)\s*$/.exec(line)
-    if (fence) {
+    if (!line.trim()) { i++; continue }
+    if (isFence(line)) {
+      const [, mark, lang] = MD_FENCE.exec(line)
+      const ind = indentOf(line)
+      const close = new RegExp(`^ {0,3}${mark[0] === "`" ? "`" : "~"}{${mark.length},}[ \\t]*$`)
       const body = []
       i++
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) body.push(lines[i++])
+      while (i < lines.length && !close.test(lines[i])) body.push(dedent(lines[i++], ind))
       i++
-      out.push(`<div class="code"><div class="code-head"><span>${esc(fence[1] || "text")}</span><button class="copy" type="button">Copy</button></div><pre><code>${esc(body.join("\n"))}</code></pre></div>`)
+      out.push(codeBlock(lang, body.join("\n")))
       continue
     }
-    if (!line.trim()) { i++; continue }
-    const h = /^(#{1,6})\s+(.*)$/.exec(line)
-    if (h) { const n = Math.min(3, h[1].length); out.push(`<h${n}>${inline(h[2])}</h${n}>`); i++; continue }
-    if (/^(-{3,}|\*{3,})\s*$/.test(line)) { out.push("<hr>"); i++; continue }
-    if (/^>\s?/.test(line)) {
+    const h = MD_ATX.exec(line)
+    if (h) { out.push(`<h${h[1].length}>${inline(h[2] ?? "")}</h${h[1].length}>`); i++; continue }
+    if (MD_HR.test(line)) { out.push("<hr>"); i++; continue }
+    if (MD_QUOTE.test(line)) {
       const q = []
-      while (i < lines.length && /^>\s?/.test(lines[i])) q.push(lines[i++].replace(/^>\s?/, ""))
-      out.push(`<blockquote>${md(q.join("\n"))}</blockquote>`)
+      while (i < lines.length && lines[i].trim() && (MD_QUOTE.test(lines[i]) || (q.length && !isMdBlockStart(lines[i])))) q.push(lines[i++].replace(MD_QUOTE, ""))
+      out.push(`<blockquote>${mdBlocks(q)}</blockquote>`)
       continue
     }
-    const li = /^(\s*)([-*+]|\d+[.)])\s+/.exec(line)
-    if (li) {
-      const ordered = /\d/.test(li[2])
+    if (isTableStart(lines, i)) {
+      const head = tableCells(lines[i])
+      const align = tableCells(lines[i + 1]).map((c) => c.startsWith(":") ? (c.endsWith(":") ? "center" : "left") : c.endsWith(":") ? "right" : "")
+      const cell = (tag, text, k) => `<${tag}${align[k] ? ` class="al-${align[k]}"` : ""}>${inline(text ?? "")}</${tag}>`
+      const rows = []
+      i += 2
+      while (i < lines.length && lines[i].trim() && !isMdBlockStart(lines[i])) rows.push(tableCells(lines[i++]))
+      out.push(`<div class="table-wrap"><table><thead><tr>${head.map((c, k) => cell("th", c, k)).join("")}</tr></thead>` +
+        (rows.length ? `<tbody>${rows.map((r) => `<tr>${head.map((_, k) => cell("td", r[k], k)).join("")}</tr>`).join("")}</tbody>` : "") + "</table></div>")
+      continue
+    }
+    const first = MD_ITEM.exec(line)
+    if (first) {
+      const ordered = /\d/.test(first[2])
       const items = []
+      let loose = false
       while (i < lines.length) {
-        const m = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(lines[i])
-        if (m) { items.push(m[3]); i++; continue }
-        if (lines[i].trim() && /^\s{2,}/.test(lines[i]) && items.length) { items[items.length - 1] += ` ${lines[i].trim()}`; i++; continue }
-        break
+        const m = MD_ITEM.exec(lines[i])
+        if (!m || /\d/.test(m[2]) !== ordered || MD_HR.test(lines[i])) break
+        if (items.length && items[items.length - 1].blankAfter) loose = true
+        const markerAt = m[1].length
+        const gap = m[3] ? indentOf(m[3]) : 1
+        const contentAt = markerAt + m[2].length + (gap > 4 ? 1 : gap)
+        const body = [m[4] ?? ""]
+        i++
+        let blank = false
+        while (i < lines.length) {
+          const l = lines[i]
+          if (!l.trim()) { body.push(""); blank = true; i++; continue }
+          const ind = indentOf(l)
+          if (ind >= Math.min(contentAt, markerAt + 2)) { body.push(dedent(l, Math.min(ind, contentAt))); blank = false; i++; continue }
+          if (!blank && !isMdBlockStart(l)) { body.push(l.trim()); i++; continue }
+          break
+        }
+        let trailing = 0
+        while (body.length > 1 && body[body.length - 1] === "") { body.pop(); trailing++ }
+        if (body.some((l, k) => l === "" && k > 0 && body[k - 1] !== "")) loose = true
+        let task = null
+        const tm = /^\[([ xX])\][ \t]+/.exec(body[0])
+        if (tm) { task = tm[1] !== " "; body[0] = body[0].slice(tm[0].length) }
+        items.push({ body, task, blankAfter: trailing > 0, n: ordered ? parseInt(m[2], 10) : 0 })
       }
-      out.push(`<${ordered ? "ol" : "ul"}>${items.map((x) => `<li>${inline(x)}</li>`).join("")}</${ordered ? "ol" : "ul"}>`)
+      const tag = ordered ? "ol" : "ul"
+      const start = ordered && items[0].n !== 1 ? ` start="${items[0].n}"` : ""
+      out.push(`<${tag}${start}>${items.map((it) => it.task === null
+        ? `<li>${mdBlocks(it.body, !loose)}</li>`
+        : `<li class="task"><input type="checkbox" disabled${it.task ? " checked" : ""}> ${mdBlocks(it.body, !loose)}</li>`).join("")}</${tag}>`)
       continue
     }
     const para = []
-    while (i < lines.length && lines[i].trim() && (para.length === 0 || !isBlockStart(lines[i]))) para.push(lines[i++])
-    out.push(`<p>${para.map(inline).join("<br>")}</p>`)
+    let heading = 0
+    while (i < lines.length && lines[i].trim()) {
+      if (para.length && /^ {0,3}=+[ \t]*$/.test(lines[i])) { heading = 1; i++; break }
+      if (para.length && /^ {0,3}-+[ \t]*$/.test(lines[i])) { heading = 2; i++; break }
+      if (para.length && (isMdBlockStart(lines[i]) || isTableStart(lines, i))) break
+      para.push(lines[i++].trim())
+    }
+    // A line ending in a backslash or two spaces is a hard break; every line break shows as one here.
+    const html = inline(para.map((l, k) => k < para.length - 1 ? l.replace(/\\$/, "") : l).join("\n")).replace(/\n/g, "<br>")
+    out.push(heading ? `<h${heading}>${html}</h${heading}>` : tight ? html : `<p>${html}</p>`)
   }
   return out.join("")
+}
+function md(src) {
+  return mdBlocks(src.replace(/\r\n?/g, "\n").split("\n"))
 }
 function mdNodes(src) {
   const t = document.createElement("template")
