@@ -20,6 +20,8 @@ export interface ApiOptions {
   readonly root: string
   /** zero's CLI, which evolution runs start. */
   readonly cli: string
+  /** Why evolution runs can't start yet, or undefined. */
+  readonly blocked?: (() => string | undefined) | undefined
 }
 
 /** An answer, with an HTTP-style status so the page can tell errors (>= 400, `body.error`) apart. */
@@ -53,13 +55,13 @@ const choices = (b: Record<string, unknown>) => ({
   ...(typeof b["effort"] === "string" ? { effort: b["effort"] } : {})
 })
 
-export const makeApi = async ({ root, cli }: ApiOptions): Promise<Api> => {
+export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> => {
   const runtime = ManagedRuntime.make(
     Layer.mergeAll(Singularity.layer, StoreModule.layer()).pipe(Layer.provideMerge(NodeServices.layer))
   )
   const listeners = new Set<Listener>()
   const hub: Hub = { send: (event, data) => { for (const l of listeners) l(event, data) } }
-  const evolution = makeEvolution({ root, cli, hub })
+  const evolution = makeEvolution({ root, cli, hub, blocked })
   const { store, threads } = await runtime.runPromise(Effect.gen(function*() {
     const store = yield* Store
     // zero is a project from the start: the place to talk about zero itself.

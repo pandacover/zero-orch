@@ -11,6 +11,7 @@ import { enableCompileCache } from "node:module"
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { isInlineImage } from "../app/Attachments.ts"
+import { openWorkspace, useLoginPath } from "./Workspace.ts"
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url)).replace(/[\\/]$/, "")
 const PAGE = "zero://app/"
@@ -28,12 +29,15 @@ else {
   // The backend loads while Electron and the window start up, from V8's compile cache after
   // the first run: it's imported here rather than at the top so neither waits for the other.
   enableCompileCache()
-  const api = import("../app/Api.ts").then(({ makeApi }) => makeApi({ root: ROOT, cli: join(ROOT, "src", "cli.ts") }))
+  const packaged = app.isPackaged
+  const workspace = (packaged ? useLoginPath() : Promise.resolve()).then(() => openWorkspace({ packaged, bundled: ROOT }))
+  const api = Promise.all([import("../app/Api.ts"), workspace]).then(([{ makeApi }, { root, blocked }]) =>
+    makeApi({ root, cli: join(root, "src", "cli.ts"), blocked }))
   api.catch(fail)
   let win: BrowserWindow | null = null
 
   const notFound = () => new Response("not found", { status: 404 })
-  /** The page's own files from ui/, and attachments by id. */
+  /** The page's own files from ui/ (fonts in ui/fonts/), and attachments by id. */
   const serve = async (req: Request): Promise<Response> => {
     const url = new URL(req.url)
     if (url.host !== "app") return notFound()
@@ -52,7 +56,7 @@ else {
       })
     }
     const file = url.pathname === "/" ? "index.html" : url.pathname.slice(1)
-    return /^[\w.-]+$/.test(file) ? net.fetch(pathToFileURL(join(ROOT, "ui", file)).href) : notFound()
+    return /^(fonts\/)?[\w.-]+$/.test(file) ? net.fetch(pathToFileURL(join(ROOT, "ui", file)).href) : notFound()
   }
 
   /** Only our page may call the backend: not an attachment, not a page a link led to. */
@@ -118,11 +122,13 @@ else {
     if (closed) return
     e.preventDefault()
     closed = true
-    api.then((a) => a.close()).finally(() => app.exit(0))
+    // Quitting again, now past this handler, lets a downloaded update install on the way out.
+    api.then((a) => a.close()).finally(() => app.quit())
   })
 
   app.whenReady().then(() => {
     protocol.handle("zero", serve)
     createWindow()
+    if (packaged) void import("./Updates.ts").then((u) => u.pollForUpdates())
   }, fail)
 }

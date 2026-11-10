@@ -1,0 +1,55 @@
+# Installers for the desktop app: `npm run dist` builds for the OS it runs on.
+# .github/workflows/release.yml builds all three on a v* tag and publishes them
+# to this repo's GitHub release, where the installed app looks for updates.
+appId: com.pandacover.zero
+productName: zero
+artifactName: zero-${version}-${os}-${arch}.${ext}
+copyright: MIT license
+directories:
+  output: release
+  buildResources: build
+# Node runs zero's TypeScript as is, and can't do that from inside an asar archive.
+asar: false
+files:
+  - package.json
+  - src/**
+  - ui/**
+  - genome/**
+  - assets/**
+  # Codex is off by default and its binaries are about 400 MB; the musl build of Claude Code is for Alpine.
+  - "!node_modules/@openai/codex-{darwin,linux,win32}*{,/**}"
+  - "!node_modules/@anthropic-ai/claude-agent-sdk-linux-*-musl{,/**}"
+  # Types, source maps and docs do nothing at runtime.
+  - "!node_modules/**/*.{map,d.ts,d.mts,d.cts,md}"
+  - "!node_modules/effect/src{,/**}"
+publish:
+  provider: github
+  owner: pandacover
+  repo: zero-orch
+  releaseType: release
+
+mac:
+  category: public.app-category.developer-tools
+  # The zip is what updates download; the dmg is what people install.
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+win:
+  target:
+    - target: nsis
+      arch: x64
+nsis:
+  oneClick: true
+  perMachine: false
+linux:
+  category: Development
+  syncDesktopName: true
+  maintainer: pandacover <pandacover@users.noreply.github.com>
+  # AppImage updates itself; the deb is for apt.
+  target:
+    - target: AppImage
+      arch: x64
+    - target: deb
+      arch: x64

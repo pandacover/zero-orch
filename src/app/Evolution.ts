@@ -62,8 +62,14 @@ export const parseJobRequest = (body: unknown, knownTasks: ReadonlyArray<string>
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
 
-export const makeEvolution = (options: { readonly root: string; readonly cli: string; readonly hub: Hub }) => {
-  const { root, cli, hub } = options
+export const makeEvolution = (options: {
+  readonly root: string
+  readonly cli: string
+  readonly hub: Hub
+  /** Why runs can't start yet (the installed app's clone of zero isn't ready), or undefined. */
+  readonly blocked?: (() => string | undefined) | undefined
+}) => {
+  const { root, cli, hub, blocked } = options
   let job: Job | undefined
   let child: ChildProcess | undefined
   let nextId = 1
@@ -160,6 +166,8 @@ export const makeEvolution = (options: { readonly root: string; readonly cli: st
   const request = (body: unknown) =>
     Effect.gen(function*() {
       if (running()) return { status: 409, body: { error: "a run is already going; stop it first" } }
+      const why = blocked?.()
+      if (why) return { status: 409, body: { error: why } }
       const tasks = (yield* loadTasks(join(root, "bench")).pipe(Effect.orElseSucceed(() => []))).map((t) => t.id)
       const parsed = parseJobRequest(body, tasks)
       if (typeof parsed === "string") return { status: 400, body: { error: parsed } }

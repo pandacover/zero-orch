@@ -1,0 +1,76 @@
+# Builds the desktop installers on each OS: Windows (x64 NSIS), macOS (Apple
+# silicon dmg + zip) and Linux (x64 AppImage + deb). A v* tag publishes them to
+# that tag's GitHub release, where installed apps find updates. Any other run
+# only builds, and keeps the files as workflow artifacts for a week.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [claude/pensive-gates-uim1kb] # TEMP: verify the builds once
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # One release per tag, made before the builds so the three don't race to create it.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "zero $TAG" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+
+  build:
+    needs: release
+    if: ${{ !failure() && !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - if: runner.os == 'Linux'
+        run: npm run typecheck && npm test
+      - if: startsWith(github.ref, 'refs/tags/v')
+        name: The tag matches package.json's version
+        shell: bash
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - name: Build
+        shell: bash
+        run: |
+          publish=never
+          [[ "$GITHUB_REF" == refs/tags/v* ]] && publish=always
+          # Without a Developer ID the Mac app is signed ad hoc: Apple silicon won't run it unsigned.
+          [[ "$RUNNER_OS" == macOS && -z "$CSC_LINK" ]] && adhoc=(-c.mac.identity=-)
+          npx electron-builder --publish "$publish" "${adhoc[@]}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Optional signing secrets. With them, macOS builds are signed and notarized and can
+          # install their own updates; without them they update by download.
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CERT_P12_BASE64 || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CERT_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-${{ runner.os }}
+          retention-days: 7
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+            release/*.yml

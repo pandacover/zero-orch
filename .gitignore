@@ -1,3 +1,4 @@
 node_modules/
 # Run state: the ledger of every attempt, bench workspaces, logs.
 .zero/
+release/

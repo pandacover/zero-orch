@@ -115,6 +115,31 @@ port. Only one copy of the app runs at a time. Codex and Ollama providers exist
 in `src/app/providers/` but are off: Codex's Windows sandbox asks for admin
 elevation on every command.
 
+### Installers and updates
+
+Each [release](https://github.com/pandacover/zero-orch/releases) has the app for
+Windows (x64 `.exe`), macOS on Apple silicon (`.dmg`) and Linux (x64 `.AppImage`
+or `.deb`). It bundles Claude Code, so you only need to sign in to Claude
+(`claude auth login`). Codex isn't bundled.
+
+- **First open:** builds aren't signed yet. On macOS, open it once from
+  System Settings → Privacy & Security → **Open Anyway**. On Windows, choose
+  **More info → Run anyway**.
+- **Updates:** the app checks GitHub for a newer release every five minutes,
+  downloads it, and offers a restart (or installs it when you quit). An unsigned
+  Mac build can't replace itself, so it offers the download page instead.
+- **zero's own repo:** an installed app's files are read-only, so on first run it
+  clones this repo into `~/.zero/zero` and runs `npm ci` there in the background.
+  The "zero" project and Evolution use that clone. This needs `git`, Node and npm.
+
+To release: bump `version` in `package.json`, then push a matching tag
+(`git tag v0.2.0 && git push origin v0.2.0`). `.github/workflows/release.yml`
+builds on all three OSes and publishes to the tag's release. Running it by hand
+only builds, and keeps the installers as workflow artifacts. `npm run dist`
+builds for the OS you're on. Optional secrets `MAC_CERT_P12_BASE64`,
+`MAC_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and
+`APPLE_TEAM_ID` sign and notarize the Mac build, which lets it update itself.
+
 A generation refuses to start on a dirty tree: commit or stash first.
 `evolve` runs each generation in a fresh process, so it always reads the
 genome and code the last generation left. It stops at the budget, and stops on
@@ -165,7 +190,8 @@ src/Fitness.ts     the accept/reject rule
 src/Generation.ts  one generation
 src/Solve.ts       the evolved solver on a real repo
 src/app/           the control plane's backend: Api, threads, store, providers (ui/ is the page)
-src/desktop/       the Electron shell: main.ts (window, IPC, zero:// files) and preload.cjs
+src/desktop/       the Electron shell: main.ts (window, IPC, zero:// files), preload.cjs,
+                   Workspace.ts (zero's repo for an installed app), Updates.ts
 src/cli.ts         effect/cli commands
 test/              offline tests with fake Agent and Memory layers
 ```
