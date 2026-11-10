@@ -5,7 +5,7 @@
  */
 import * as NodeServices from "@effect/platform-node/NodeServices"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Option } from "effect"
 import { execFileSync } from "node:child_process"
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -90,7 +90,7 @@ const fakeAgent = (improver: Improver, calls: Array<AgentRun>) =>
 const fakeMemory = (stored: Array<string>) =>
   Layer.succeed(Memory, Memory.of({
     recall: () => Effect.succeedSome({ commit: "abc1234567", text: "# A past change\n`git show abc1234567`", score: 0.8 }),
-    handOver: () => Effect.succeedSome({ text: "# A past change\n`git show abc1234567`", commit: "abc1234567" }),
+    handOver: () => Effect.succeed({ handOver: Option.some({ text: "# A past change\n`git show abc1234567`", commit: "abc1234567" }), searched: true }),
     afterTool: () => Effect.succeedNone,
     store: (cwd) => Effect.sync(() => void stored.push(sh(cwd, "rev-parse", "HEAD"))),
     changes: () => Effect.sync(() => stored.map((commit) => ({ id: commit, commit, title: "t", task: "", retired: false })))

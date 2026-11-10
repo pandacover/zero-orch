@@ -434,8 +434,8 @@ export const makeThreads = (options: {
           const handed = new Set(t.items.flatMap((i) => (i.kind === "memory" && i.action === "recalled" && i.commit ? [i.commit] : [])))
           const asked = yield* memory.handOver({ session: memorySession(t), prompt: words, cwd: project.path, startsTask }).pipe(
             Effect.match({
-              onFailure: (e) => ({ handOver: Option.none<HandOver>(), failed: e.message }),
-              onSuccess: (handOver) => ({ handOver, failed: "" })
+              onFailure: (e) => ({ handOver: Option.none<HandOver>(), searched: false, failed: e.message }),
+              onSuccess: (answer) => ({ ...answer, failed: "" })
             })
           )
           const h = Option.getOrUndefined(asked.handOver)
@@ -446,8 +446,10 @@ export const makeThreads = (options: {
             const title = h.commit !== null ? recalledTitle(h.text) : "check scripts earlier sessions here ran"
             put(t, { kind: "memory", id: newId("m"), at: now(), action: "recalled", commit: h.commit ?? "", title, text: h.text })
             prompt = `${prompt}\n\n${h.text}`
-          } else if (asked.failed || startsTask) {
-            // The thread shows what came of a task's start either way, so a miss or a failure isn't silent.
+          } else if (asked.failed || asked.searched) {
+            // The thread shows what came of a search either way, so a miss or a failure isn't silent. A message
+            // singularity didn't search for ("commit and push", "hi", a follow-up) gets nothing, as in Claude Code:
+            // "nothing stored is like this task" would claim a search that never ran.
             put(t, {
               kind: "memory",
               id: newId("m"),

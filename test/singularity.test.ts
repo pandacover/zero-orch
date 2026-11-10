@@ -9,29 +9,43 @@ import { hookContext, Memory, pointedCommit, readsCommits, toolNotes } from "../
 
 /** A stand-in for singularity's hook.ts: answers as the real one does, and logs what it was given. */
 const FAKE_HOOK = `
-import { appendFileSync, readFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 const event = process.argv[2]
 const input = JSON.parse(readFileSync(0, "utf8"))
 appendFileSync(process.env.FAKE_HOOK_LOG, JSON.stringify({ event, args: process.argv.slice(3), input }) + "\\n")
+const home = process.env.SINGULARITY_HOME
 const say = (text) => process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: text } }))
-if (event === "user-prompt-pick") say('# A past change in this repository like your task\\n\\nAn earlier task here asked for something like yours, committed as 0123abcd: "Retry uploads"')
-if (event === "user-prompt-submit") say("# Check scripts earlier sessions here ran\\n\\n- scripts/e2e.mjs")
+// Like singularity: a task's start is searched and logged; "commit and push" asks for nothing, so isn't.
+const logSearch = (session) => {
+  mkdirSync(join(home, "tenants", "local", "workflows"), { recursive: true })
+  appendFileSync(join(home, "tenants", "local", "workflows", "handovers.jsonl"), JSON.stringify({ session_id: session, moment: "pick", picked: null }) + "\\n")
+}
+if (input.prompt === "crash") process.exit(3)
+if (input.prompt === "logged error") appendFileSync(join(home, "hook-errors.log"), "2026-11-11T00:00:00.000Z workflows " + event + ": boom\\n")
+else if (event === "user-prompt-pick" && input.prompt === "another thread searched") logSearch("zero-other")
+else if (event === "user-prompt-pick" && input.prompt !== undefined && !input.prompt.startsWith("commit")) logSearch(input.session_id)
+if (input.prompt === "retry uploads") {
+  if (event === "user-prompt-pick") say('# A past change in this repository like your task\\n\\nAn earlier task here asked for something like yours, committed as 0123abcd: "Retry uploads"')
+  if (event === "user-prompt-submit") say("# Check scripts earlier sessions here ran\\n\\n- scripts/e2e.mjs")
+}
 if (event === "post-tool-use") say("Its session checked it with: npm run typecheck")
 `
 
 describe("singularity's hooks, as zero runs them", () => {
   let dir = ""
   const log = () => readFileSync(join(dir, "log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l))
-  const env = { hook: process.env["ZERO_SINGULARITY_HOOK"], log: process.env["FAKE_HOOK_LOG"] }
+  const env = { hook: process.env["ZERO_SINGULARITY_HOOK"], log: process.env["FAKE_HOOK_LOG"], home: process.env["SINGULARITY_HOME"] }
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "zero-hook-"))
     writeFileSync(join(dir, "hook.mjs"), FAKE_HOOK)
     writeFileSync(join(dir, "log.jsonl"), "")
     process.env["ZERO_SINGULARITY_HOOK"] = join(dir, "hook.mjs")
     process.env["FAKE_HOOK_LOG"] = join(dir, "log.jsonl")
+    process.env["SINGULARITY_HOME"] = join(dir, "home")
   })
   afterAll(() => {
-    for (const [k, v] of [["ZERO_SINGULARITY_HOOK", env.hook], ["FAKE_HOOK_LOG", env.log]] as const) {
+    for (const [k, v] of [["ZERO_SINGULARITY_HOOK", env.hook], ["FAKE_HOOK_LOG", env.log], ["SINGULARITY_HOME", env.home]] as const) {
       if (v === undefined) delete process.env[k]
       else process.env[k] = v
     }
@@ -45,12 +59,29 @@ describe("singularity's hooks, as zero runs them", () => {
 
   it("hands over the model's pick and the check scripts together, under the thread's session", async () => {
     const h = await memory((m) => m.handOver({ session: "zero-thr_1", prompt: "retry uploads", cwd: dir, startsTask: false }))
-    expect(Option.getOrThrow(h).commit).toBe("0123abcd")
-    expect(Option.getOrThrow(h).text).toContain("# Check scripts earlier sessions here ran")
+    expect(Option.getOrThrow(h.handOver).commit).toBe("0123abcd")
+    expect(Option.getOrThrow(h.handOver).text).toContain("# Check scripts earlier sessions here ran")
+    expect(h.searched).toBe(true)
     const calls = log()
     expect(calls.map((c) => c.event).sort()).toEqual(["user-prompt-pick", "user-prompt-submit"])
     expect(calls.find((c) => c.event === "user-prompt-submit").args).toEqual(["--picks"])
     expect(calls[0].input).toMatchObject({ session_id: "zero-thr_1", prompt: "retry uploads", cwd: dir, hook_event_name: "UserPromptSubmit" })
+  })
+
+  it("tells a search that found nothing from a message singularity didn't search for", async () => {
+    const ask = (prompt: string) => memory((m) => m.handOver({ session: "zero-thr_2", prompt, cwd: dir, startsTask: true }))
+    expect(await ask("add a dark mode to the settings page")).toEqual({ handOver: Option.none(), searched: true })
+    // zero took it for a task's start (a commit came before it); singularity, rightly, didn't.
+    expect(await ask("commit and push")).toEqual({ handOver: Option.none(), searched: false })
+    // Another thread's search, logged meanwhile, isn't this one's.
+    expect(await ask("another thread searched")).toEqual({ handOver: Option.none(), searched: false })
+  })
+
+  it("fails when a hook crashed or logged an error, rather than answer \"nothing like this\"", async () => {
+    const ask = (prompt: string) =>
+      memory((m) => Effect.flip(m.handOver({ session: "zero-thr_3", prompt, cwd: dir, startsTask: true })))
+    expect((await ask("crash")).message).toMatch(/^singularity hook user-prompt-(pick|submit) exited 3/)
+    expect((await ask("logged error")).message).toMatch(/^singularity's hook logged user-prompt-(pick|submit): boom/)
   })
 
   it("passes on a git show to the tool-call hook, and nothing else", async () => {
@@ -69,7 +100,7 @@ describe("notes on a commit the agent reads", () => {
     const sessions: Array<string> = []
     const memory = Memory.of({
       recall: () => Effect.succeedNone,
-      handOver: () => Effect.succeedNone,
+      handOver: () => Effect.succeed({ handOver: Option.none(), searched: false }),
       afterTool: (_input, session) => Effect.sync(() => (sessions.push(session), Option.some("ran: npm test"))),
       store: () => Effect.void,
       changes: () => Effect.succeed([])
@@ -81,7 +112,7 @@ describe("notes on a commit the agent reads", () => {
   it("never fail the agent's call", async () => {
     const memory = Memory.of({
       recall: () => Effect.succeedNone,
-      handOver: () => Effect.succeedNone,
+      handOver: () => Effect.succeed({ handOver: Option.none(), searched: false }),
       afterTool: () => Effect.die("boom"),
       store: () => Effect.void,
       changes: () => Effect.succeed([])
