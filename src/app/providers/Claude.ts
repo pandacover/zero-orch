@@ -8,6 +8,7 @@
  * person to allow it in the thread.
  */
 import { type CanUseTool, type Query, query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import { memoryHooks } from "../../Claude.ts"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
@@ -91,7 +92,8 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
         PostCompact: [{ hooks: [async (h) => {
           if (h.hook_event_name === "PostCompact") summary = summaryOf(h.compact_summary)
           return {}
-        }] }]
+        }] }],
+        ...memoryHooks(input.afterTool)
       },
       env: cleanEnv({ DISABLE_AUTO_COMPACT: undefined, DISABLE_COMPACT: undefined }),
       ...(input.resume ? { resume: input.resume } : {})

@@ -59,6 +59,16 @@ both levels:
 | **improver** (zero on itself) | the past *self-improvement* most like this one | each accepted genome change, filed under the improver session that made the edit |
 | **solver** (`zero solve` on your repos) | the past change in that repo most like the task | the solver's commit, after the repo's checks pass |
 
+zero's sessions load no settings files, so singularity's own Claude Code hooks
+don't run in them. zero runs the same hook script itself (`src/Singularity.ts`):
+its task-start hook, so singularity decides what starts a task, adds its card of
+check scripts, and lets its model pick the change if you chose one in
+`singularity setup`; and its tool-call hook, so an agent that reads a stored
+commit with `git show` or `git log` gets the commands that commit's session ran.
+singularity's own results put most of its help there. Without an install in
+`~/.singularity` (or `ZERO_SINGULARITY_HOOK`), zero falls back to `singularity
+recall` at each task start.
+
 Sessions whose work gets committed run with `persistSession: true` and `cwd`
 set to the repo root: singularity finds a commit's session by its Claude Code
 transcript, either the session that ran `git commit` or, when none did, the one
@@ -95,8 +105,10 @@ A desktop chat app, instead of the CLI:
   asking) or **Read-only**. A change applies at once, even mid-turn. A
   command or edit that needs approval waits as a card in the thread:
   **Allow** / **Deny**, or `Y` / `N`.
-- **singularity in every thread:** a thread's first message in a git project is
-  handed the most similar past change there ("Recalled from memory"); a turn
+- **singularity in every thread:** where a task starts in a git project (the
+  thread's first request, and the first after a commit) it is handed the most
+  similar past change there and the check scripts earlier sessions ran
+  ("Recalled from memory"). Follow-ups get nothing, so they cost nothing. A turn
   that commits is stored for the next thread ("Stored in memory").
 - **zero's genome in every thread:** threads get zero's evolved solver
   instructions and lessons, so what evolution learns reaches your work.

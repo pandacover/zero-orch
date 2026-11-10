@@ -12,7 +12,7 @@ import { Effect, Option, Stream } from "effect"
 import { type Attachment, plainText, promptText } from "./Attachments.ts"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
-import { Memory, MEMORY_NOTE, type Recall } from "../Singularity.ts"
+import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "../Singularity.ts"
 import type { Access, Item, Project, ProviderId, Settings, Thread } from "./Model.ts"
 import { isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
 import { type Provider, turnStream } from "./providers/Provider.ts"
@@ -80,6 +80,13 @@ export const withEffort = (settings: Settings, provider: ProviderId, effort: str
   if (provider === "codex") return { ...settings, codex: { ...settings.codex, effort: effort as Settings["codex"]["effort"] } }
   return settings
 }
+
+/** How singularity heads a hand-over's pointer, and its card of check scripts (its scripts/Render.ts). */
+const LIKE_HEADER = "# A past change in this repository like your task"
+const CARD_HEADER = "# Check scripts earlier sessions here ran"
+
+/** The session singularity keeps a thread's hand-overs under, whichever provider runs it. */
+export const memorySession = (t: { readonly id: string }): string => `zero-${t.id}`
 
 export const recalledTitle = (text: string): string => /committed as \w+: "([^"]+)"/.exec(text)?.[1] ?? "a past change"
 
@@ -242,7 +249,7 @@ export const makeThreads = (options: {
           put(t, compaction, false)
         }
         /** One prompt to the provider, its events onto the thread; how it ended. */
-        const run = (prompt: string, instructions: string) =>
+        const run = (prompt: string, instructions: string, remembers: boolean) =>
           turnStream(provider, {
             cwd: project.path,
             prompt,
@@ -253,7 +260,13 @@ export const makeThreads = (options: {
             access: () => t.access,
             settings,
             ask: ask(t, l),
-            signal: l.abort.signal
+            signal: l.abort.signal,
+            // singularity's notes on a stored commit the agent reads with `git show` or `git log`.
+            ...(remembers
+              ? {
+                afterTool: toolNotes(memory, memorySession(t))
+              }
+              : {})
           }).pipe(
             Stream.runForEach((e) =>
               Effect.sync(() => {
@@ -315,7 +328,7 @@ export const makeThreads = (options: {
           t.status = "running"
           touch(t)
           startCompaction()
-          yield* run("/compact", "")
+          yield* run("/compact", "", false)
           // A compaction that ended without saying so is over either way.
           if (compaction?.state === "running") put(t, { ...compaction, state: l.abort.signal.aborted ? "failed" : "done" })
           compaction = undefined
@@ -352,26 +365,28 @@ export const makeThreads = (options: {
         // singularity keeps memory per git repo, and the person may turn recall off.
         const remembers = settings.memory.recall && Option.isSome(before) && !compact
         let prompt = compact ? text.trim() : promptText(text, attachments)
-        if (remembers && !l.abort.signal.aborted) {
-          // Every message is a task start, as singularity's own hook treats it: ask singularity for
-          // the past change here most like it. The thread shows what came of it either way, so a
-          // miss or a failure isn't silent.
-          const handed = new Set(t.items.flatMap((i) => (i.kind === "memory" && i.action === "recalled" ? [i.commit] : [])))
-          const asked = yield* memory.recall(words, project.path).pipe(
+        if (remembers && !l.abort.signal.aborted && Option.isSome(before)) {
+          // A hand-over only where a task starts: the thread's first request, and the first after a commit,
+          // as singularity's own hook does in Claude Code. A follow-up adds nothing, so it costs no tokens.
+          const startsTask = t.taskHead !== before.value
+          t.taskHead = before.value
+          const handed = new Set(t.items.flatMap((i) => (i.kind === "memory" && i.action === "recalled" && i.commit ? [i.commit] : [])))
+          const asked = yield* memory.handOver({ session: memorySession(t), prompt: words, cwd: project.path, startsTask }).pipe(
             Effect.match({
-              onFailure: (e) => ({ recall: Option.none<Recall>(), failed: e.message }),
-              onSuccess: (recall) => ({ recall, failed: "" })
+              onFailure: (e) => ({ handOver: Option.none<HandOver>(), failed: e.message }),
+              onSuccess: (handOver) => ({ handOver, failed: "" })
             })
           )
-          if (Option.isSome(asked.recall) && handed.has(asked.recall.value.commit)) {
+          const h = Option.getOrUndefined(asked.handOver)
+          if (h && h.commit !== null && handed.has(h.commit) && h.text.trim().startsWith(LIKE_HEADER) && !h.text.includes(CARD_HEADER)) {
             // The agent already has this one from earlier in the thread: point at it, don't hand it over twice.
-            const recall = asked.recall.value
-            put(t, { kind: "memory", id: newId("m"), at: now(), action: "checked", commit: recall.commit, title: `the same past change as earlier in this thread: ${recalledTitle(recall.text)}` })
-          } else if (Option.isSome(asked.recall)) {
-            const recall = asked.recall.value
-            put(t, { kind: "memory", id: newId("m"), at: now(), action: "recalled", commit: recall.commit, title: recalledTitle(recall.text), text: recall.text })
-            prompt = `${prompt}\n\n${recall.text}`
-          } else {
+            put(t, { kind: "memory", id: newId("m"), at: now(), action: "checked", commit: h.commit, title: `the same past change as earlier in this thread: ${recalledTitle(h.text)}` })
+          } else if (h) {
+            const title = h.commit !== null ? recalledTitle(h.text) : "check scripts earlier sessions here ran"
+            put(t, { kind: "memory", id: newId("m"), at: now(), action: "recalled", commit: h.commit ?? "", title, text: h.text })
+            prompt = `${prompt}\n\n${h.text}`
+          } else if (asked.failed || startsTask) {
+            // The thread shows what came of a task's start either way, so a miss or a failure isn't silent.
             put(t, {
               kind: "memory",
               id: newId("m"),
@@ -390,7 +405,7 @@ export const makeThreads = (options: {
 
         if (compact && !l.abort.signal.aborted) startCompaction()
         // Stopped while the message was queued: it's on the thread, but doesn't run.
-        const outcome = l.abort.signal.aborted ? { outcome: "stopped" as const, error: "" } : yield* run(prompt, instructions)
+        const outcome = l.abort.signal.aborted ? { outcome: "stopped" as const, error: "" } : yield* run(prompt, instructions, remembers)
         const result = l.abort.signal.aborted && outcome.outcome === "done" ? { outcome: "stopped" as const, error: "" } : outcome
         // Tool calls (and a compaction) a stopped turn left running didn't finish.
         for (const i of t.items) if (i.kind === "tool" && i.status === "running" && result.outcome !== "done") put(t, { ...i, status: "failed" })

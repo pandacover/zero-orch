@@ -28,7 +28,7 @@ import { GENOME_DIR, type Genome, loadGenome, MODELS } from "./Genome.ts"
 import { changes, head, revert, git } from "./Git.ts"
 import { appendLedger, type Attempt, attempts, lastMeasure, readLedger, type Scorecard } from "./Ledger.ts"
 import { improverPolicy } from "./Policy.ts"
-import { Memory, MEMORY_NOTE, type Recall } from "./Singularity.ts"
+import { Memory, MEMORY_NOTE, type Recall, toolNotes } from "./Singularity.ts"
 
 /** Most an improver session may spend. */
 export const IMPROVER_BUDGET_USD = 5
@@ -229,7 +229,9 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
     policy: improverPolicy(root),
     outputSchema: ImproverOutput,
     persist: true,
-    onEvent: (line) => log(`[improver]${line}`)
+    onEvent: (line) => log(`[improver]${line}`),
+    // Reading a past improvement with `git show` brings the commands its improver ran.
+    afterTool: toolNotes(memory, `zero-improver-${generation}-${Date.now().toString(36)}`)
   }).pipe(
     // A crashed session is a failed attempt: the guard below reverts whatever it left.
     Effect.catchTag("AgentError", (e) =>

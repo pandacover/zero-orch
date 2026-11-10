@@ -39,7 +39,26 @@ export interface AgentRun {
   readonly persist: boolean
   /** Progress lines (one per tool call), for a person watching. */
   readonly onEvent?: ((line: string) => void) | undefined
+  /** What memory adds after a shell call (singularity's notes on a commit read with `git show`). */
+  readonly afterTool?: ((input: Readonly<Record<string, unknown>>) => Promise<string | undefined>) | undefined
 }
+
+/**
+ * The PostToolUse hook that hands memory's notes to the agent. Sessions here load no settings files, so
+ * singularity's own Claude Code hooks never run in them; this does their tool-call part.
+ */
+export const memoryHooks = (afterTool: ((input: Readonly<Record<string, unknown>>) => Promise<string | undefined>) | undefined) =>
+  afterTool === undefined
+    ? {}
+    : {
+      PostToolUse: [{
+        matcher: "Bash",
+        hooks: [async (h: { readonly hook_event_name: string }) => {
+          const text = h.hook_event_name === "PostToolUse" ? await afterTool(h as unknown as Record<string, unknown>) : undefined
+          return text ? { hookSpecificOutput: { hookEventName: "PostToolUse" as const, additionalContext: text } } : {}
+        }]
+      }]
+    }
 
 export interface AgentResult {
   readonly sessionId: string
@@ -87,6 +106,7 @@ const runSession = (spec: AgentRun) =>
         persistSession: spec.persist,
         abortController: abort,
         env: cleanEnv(),
+        hooks: memoryHooks(spec.afterTool),
         ...(spec.outputSchema ? { outputFormat: { type: "json_schema" as const, schema: spec.outputSchema } } : {}),
         ...(spec.resume ? { resume: spec.resume } : {})
       }
