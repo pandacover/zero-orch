@@ -90,7 +90,7 @@ const fakeAgent = (improver: Improver, calls: Array<AgentRun>) =>
 const fakeMemory = (stored: Array<string>) =>
   Layer.succeed(Memory, Memory.of({
     recall: () => Effect.succeedSome({ commit: "abc1234567", text: "# A past change\n`git show abc1234567`", score: 0.8 }),
-    handOver: () => Effect.succeedNone,
+    handOver: () => Effect.succeedSome({ text: "# A past change\n`git show abc1234567`", commit: "abc1234567" }),
     afterTool: () => Effect.succeedNone,
     store: (cwd) => Effect.sync(() => void stored.push(sh(cwd, "rev-parse", "HEAD"))),
     changes: () => Effect.sync(() => stored.map((commit) => ({ id: commit, commit, title: "t", task: "", retired: false })))

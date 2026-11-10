@@ -28,7 +28,7 @@ import { GENOME_DIR, type Genome, loadGenome, MODELS } from "./Genome.ts"
 import { changes, head, revert, git } from "./Git.ts"
 import { appendLedger, type Attempt, attempts, lastMeasure, readLedger, type Scorecard } from "./Ledger.ts"
 import { improverPolicy } from "./Policy.ts"
-import { Memory, MEMORY_NOTE, type Recall, toolNotes } from "./Singularity.ts"
+import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "./Singularity.ts"
 
 /** Most an improver session may spend. */
 export const IMPROVER_BUDGET_USD = 5
@@ -116,7 +116,7 @@ export const improverPrompt = (input: {
   readonly genome: Genome
   readonly card: Scorecard
   readonly history: ReadonlyArray<Attempt>
-  readonly recall: Option.Option<Recall>
+  readonly recall: Option.Option<{ readonly text: string }>
 }): string => {
   const { card } = input
   const lines: Array<string> = [
@@ -211,10 +211,19 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
   const objective = failing.length > 0
     ? `improve zero's genome so the solver passes more hidden cases on ${failing.join(", ")}`
     : "improve zero's genome so the solver passes every task for less cost"
-  const recall = yield* memory.recall(objective, root).pipe(
-    Effect.catchTag("MemoryError", (e) => Effect.sync(() => (log(`singularity recall failed, going on without it: ${e.message}`), Option.none<Recall>())))
+  // singularity's own hand-over at a task's start: its model picks the change when one was chosen in its
+  // setup, and earlier improvers' check scripts come with it. One session for it and the notes on `git show`.
+  const session = `zero-improver-${generation}-${Date.now().toString(36)}`
+  const recall = yield* memory.handOver({ session, prompt: objective, cwd: root, startsTask: true }).pipe(
+    Effect.catchTag("MemoryError", (e) => Effect.sync(() => (log(`singularity recall failed, going on without it: ${e.message}`), Option.none<HandOver>())))
   )
-  log(Option.isSome(recall) ? `singularity recalled ${recall.value.commit.slice(0, 10)}` : "singularity: nothing recalled")
+  log(
+    Option.isNone(recall)
+      ? "singularity: nothing recalled"
+      : recall.value.commit !== null
+      ? `singularity recalled ${recall.value.commit.slice(0, 10)}`
+      : "singularity: check scripts only"
+  )
 
   // 4. The improver.
   log(`gen ${generation}: improver running`)
@@ -231,7 +240,7 @@ export const runGeneration = Effect.fn("Generation.run")(function*(options: Gene
     persist: true,
     onEvent: (line) => log(`[improver]${line}`),
     // Reading a past improvement with `git show` brings the commands its improver ran.
-    afterTool: toolNotes(memory, `zero-improver-${generation}-${Date.now().toString(36)}`)
+    afterTool: toolNotes(memory, session)
   }).pipe(
     // A crashed session is a failed attempt: the guard below reverts whatever it left.
     Effect.catchTag("AgentError", (e) =>
