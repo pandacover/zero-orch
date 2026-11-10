@@ -27,6 +27,9 @@ const fail = (e: unknown) => {
 // One app per machine: two would share ~/.zero and run the same threads twice.
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
+  // Windows shows a toast only for an app with an AppUserModelID: installed, electron-builder.yml's
+  // appId (its Start menu shortcut carries it); run from source, electron.exe's path.
+  if (process.platform === "win32") app.setAppUserModelId(app.isPackaged ? "com.pandacover.zero" : process.execPath)
   // The backend loads while Electron and the window start up, from V8's compile cache after
   // the first run: it's imported here rather than at the top so neither waits for the other.
   enableCompileCache()

@@ -27,6 +27,8 @@ export const notice = (event: string, data: Event, titles: ReadonlyMap<string, s
 
 export const notifier = (window: () => BrowserWindow | null) => {
   const titles = new Map<string, string>()
+  // Held until dismissed: a Notification nothing references is collected, and its click goes nowhere.
+  const live = new Set<Notification>()
   return (event: string, data: unknown) => {
     const e = data as Event
     if (event === "thread" && e.id && e.title) titles.set(e.id, e.title)
@@ -35,7 +37,12 @@ export const notifier = (window: () => BrowserWindow | null) => {
     const n = notice(event, e, titles)
     if (!n) return
     const shown = new Notification({ title: n.title, body: n.body, silent: false })
+    live.add(shown)
+    const gone = () => live.delete(shown)
+    shown.on("close", gone)
+    shown.on("failed", gone)
     shown.on("click", () => {
+      gone()
       if (win.isDestroyed()) return
       if (win.isMinimized()) win.restore()
       win.show()

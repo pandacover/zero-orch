@@ -46,6 +46,30 @@ export type TurnEvent =
     readonly cumulative?: boolean | undefined
   }
 
+/**
+ * How an approval ended. Only `declined` is the person saying no: an agent told "declined"
+ * for anything else stops and waits on someone who never answered.
+ * - `allowed`: the person, or the thread's access, let it run.
+ * - `declined`: the person pressed Deny.
+ * - `refused`: the thread's access changed, while it waited, to one that refuses it.
+ * - `stopped`: the turn was stopped before anyone answered.
+ */
+export type Verdict = "allowed" | "declined" | "refused" | "stopped"
+
+/**
+ * What an agent is told when a call doesn't run, by why. `failure` is an approval that broke
+ * on the way (an error, not an answer): the person never saw it, so it's no one's no.
+ */
+export const notRun = (why: Exclude<Verdict, "allowed"> | { readonly failure: string }): string =>
+  typeof why === "object"
+    ? `Asking the person to approve this call failed (${why.failure}). They did not decline it, and it did not run. ` +
+      "Retry the same call once. If it fails again, tell the person what is done, what isn't, and anything left broken, then stop."
+    : why === "declined"
+    ? "The person declined this call; it did not run. Ask them how to proceed, or take another way."
+    : why === "refused"
+    ? "This thread's access changed to read-only while the call waited; it did not run. Say what you'd change instead."
+    : "The person stopped this turn; the call did not run."
+
 export interface TurnInput {
   readonly cwd: string
   readonly prompt: string
@@ -59,11 +83,11 @@ export interface TurnInput {
   readonly access: () => Access
   readonly settings: Settings
   /**
-   * Ask the person whether a tool call may run; resolves false when denied or the turn stops.
+   * Ask the person whether a tool call may run, and hear why it may not.
    * `recheck` says what the thread's access makes of the call now, so a change of access
    * can answer a request still waiting.
    */
-  readonly ask: (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask") => Promise<boolean>
+  readonly ask: (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask") => Promise<Verdict>
   readonly signal: AbortSignal
   /** What memory adds after a tool call, given Claude Code's PostToolUse input; providers without hooks skip it. */
   readonly afterTool?: ((input: Readonly<Record<string, unknown>>) => Promise<string | undefined>) | undefined

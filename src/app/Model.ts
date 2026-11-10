@@ -142,6 +142,16 @@ export type Item =
     error: string
   }
   | {
+    /**
+     * zero sent the agent a follow-up of its own, not the person's: its turn ended right after
+     * a tool call failed, without saying where things stand. `reason` says which call.
+     */
+    readonly kind: "followup"
+    readonly id: string
+    readonly at: string
+    reason: string
+  }
+  | {
     readonly kind: "turn"
     readonly id: string
     readonly at: string

@@ -60,16 +60,39 @@ async function api(method, path, body) {
   return data
 }
 
-function toast(text, error = false) {
-  const t = el("div", { class: `toast${error ? " error" : ""}`, role: error ? "alert" : "status", text })
+/**
+ * A note in the corner. `action` ({ label, run }) adds a button that does something about it;
+ * such a toast stays longer, and waits while the pointer is on it. `thread` ties it to a thread,
+ * so it goes away once that thread is open.
+ */
+function toast(text, error = false, { action = null, thread = null } = {}) {
   const box = $("toasts")
+  const t = el("div", { class: `toast${error ? " error" : ""}${action ? " has-cta" : ""}`, role: error ? "alert" : "status", "data-thread": thread },
+    el("span", { class: "toast-text", text }))
+  const close = () => { t.remove(); if (!box.children.length && box.matches(":popover-open")) box.hidePopover() }
+  if (action) t.append(el("button", { class: "toast-cta", type: "button", onclick: () => { close(); action.run() } }, action.label))
   box.append(t)
   // Shown afresh so it lands above anything in the top layer (an open modal); put away when empty.
   if (box.matches(":popover-open")) box.hidePopover()
   box.showPopover()
-  setTimeout(() => { t.remove(); if (!box.children.length && box.matches(":popover-open")) box.hidePopover() }, error ? 7000 : 3000)
+  const ms = action ? 9000 : error ? 7000 : 3000
+  let timer = setTimeout(close, ms)
+  if (action) {
+    t.addEventListener("pointerenter", () => clearTimeout(timer))
+    t.addEventListener("pointerleave", () => { timer = setTimeout(close, 3000) })
+  }
+}
+/** A toast about a thread, with a button that opens it. */
+const threadToast = (threadId, text, error = false) =>
+  toast(text, error, { thread: threadId, action: { label: "Open thread", run: () => go(`#/t/${threadId}`) } })
+/** Opening a thread puts away the toasts about it. */
+function clearThreadToasts(threadId) {
+  const box = $("toasts")
+  for (const t of box.querySelectorAll(".toast[data-thread]")) if (t.dataset.thread === threadId) t.remove()
+  if (!box.children.length && box.matches(":popover-open")) box.hidePopover()
 }
 const fail = (e) => toast(e.message, true)
+const threadName = (id) => S.threads.find((t) => t.id === id)?.title ?? "A thread"
 
 // ---------- tooltips: shown at once, not after the browser's delay ----------
 // Elements keep using `title`; on hover it moves to data-tip (so the native one never shows) and this one shows it.
@@ -159,6 +182,7 @@ async function route() {
     try {
       S.open = await api("GET", `threads/${S.route.id}`)
       save("last", S.route.id)
+      clearThreadToasts(S.route.id)
     } catch {
       S.open = null
       return go("#/")
@@ -185,8 +209,9 @@ function renderSide() {
     const hits = all.filter((t) => t.title.toLowerCase().includes(q))
     return hits.length ? [[p, hits]] : []
   })
-  if (q && shown.length === 0) return tree.replaceChildren(el("p", { class: "tree-empty", text: `No threads match “${S.query.trim()}”.` }))
-  tree.replaceChildren(...shown.map(([p, threads]) => {
+  const draftsSec = draftsSection()
+  if (q && shown.length === 0 && !draftsSec) return tree.replaceChildren(el("p", { class: "tree-empty", text: `No threads match “${S.query.trim()}”.` }))
+  tree.replaceChildren(...(draftsSec ? [draftsSec] : []), ...shown.map(([p, threads]) => {
     const closed = !q && S.collapsed.has(p.id)
     return el("section", { class: `proj${closed ? " closed" : ""}`, "data-id": p.id },
       el("div", { class: "proj-head" },
@@ -210,6 +235,53 @@ function renderSide() {
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
 }
+/**
+ * Drafts: every box with words not yet sent, newest first, above the projects. A new thread's
+ * draft goes back to its project's start page, a reply's to its thread. Its words are its title.
+ */
+function draftsSection() {
+  const q = S.query.trim().toLowerCase()
+  const rows = []
+  for (const [key, d] of drafts) {
+    const cut = key.indexOf(":")
+    const kind = key.slice(0, cut), id = key.slice(cut + 1)
+    const thread = kind === "t" ? S.threads.find((t) => t.id === id) : null
+    const project = S.projects.find((p) => p.id === (thread ? thread.projectId : id))
+    // A draft whose thread or project was removed goes with it.
+    if (!project || (kind === "t" && !thread)) { drafts.delete(key); continue }
+    const where = thread ? `Reply in “${thread.title}”` : `New thread in ${project.name}`
+    if (q && !`${d.title} ${where}`.toLowerCase().includes(q)) continue
+    rows.push({ key, d, where, href: thread ? `#/t/${thread.id}` : `#/new/${project.id}` })
+  }
+  if (!rows.length) return null
+  rows.sort((a, b) => b.d.at.localeCompare(a.d.at))
+  return el("section", { class: "proj drafts" },
+    el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: "Drafts" })),
+    el("ul", { class: "threads" }, rows.map(({ key, d, where, href }) => {
+      const active = location.hash === href
+      return el("li", { class: "thread-row draft-row" },
+        el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: where, "aria-current": active ? "page" : null },
+          el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
+          el("span", { class: "t", text: d.title }),
+          el("span", { class: "age", text: ago(d.at) })),
+        el("button", { class: "icon-btn thread-del", type: "button", title: "Discard draft", "aria-label": `Discard draft: ${d.title}`, html: TRASH_ICON, onclick: () => discardDraft(key) }))
+    })))
+}
+/** Repaint only the Drafts section: typing changes nothing else in the sidebar. */
+function paintDrafts() {
+  const tree = $("tree")
+  if (!tree) return
+  if (S.query.trim()) return renderSide()
+  const old = tree.querySelector(":scope > .drafts")
+  const fresh = draftsSection()
+  if (old && fresh) old.replaceWith(fresh)
+  else if (old) old.remove()
+  else if (fresh) tree.prepend(fresh)
+}
+let draftsTimer = 0
+/** One repaint for a burst of keystrokes. */
+const paintDraftsSoon = () => { if (!draftsTimer) draftsTimer = setTimeout(() => { draftsTimer = 0; paintDrafts() }, 30) }
+const DRAFT_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/><path d="M9 4l3 3"/></svg>'
 const PIN_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/></svg>'
 const TRASH_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/></svg>'
 async function deleteThread(t) {
@@ -562,6 +634,7 @@ function startView(project) {
   })
   const box = composer({
     controls: [models.node],
+    draftKey: `new:${project.id}`,
     onSend: async (text) => {
       const projectId = project.id
       const { provider, model, effort, access } = models.value()
@@ -652,22 +725,56 @@ function msgActions(text, ...extra) {
   })
   return el("div", { class: "msg-actions" }, copy, extra)
 }
-/** Quote a reply in the composer: the words selected in it, or all of it, as a `>` block to answer below. */
-function quoteButton(item) {
-  return el("button", { class: "icon-btn msg-quote", type: "button", title: "Quote in your reply (the selection, or all of it)", "aria-label": "Quote message", html: QUOTE_ICON,
-    // Keep the selection: pressing the button mustn't clear it before the click reads it.
-    onmousedown: (e) => e.preventDefault(),
-    onclick: (e) => {
-      e.stopPropagation()
-      const message = e.currentTarget.closest(".msg")
-      const sel = getSelection()
-      const picked = sel && !sel.isCollapsed && message?.contains(sel.anchorNode) && message.contains(sel.focusNode) ? sel.toString() : ""
-      const words = (picked || item.text).trim()
-      const cut = words.length > 1500 ? `${words.slice(0, 1500).trimEnd()}…` : words
-      feed?.composer.quote(cut.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n"))
-    } })
-}
 const QUOTE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 4.5h10M3 8h7M3 11.5h10M1.5 3v10"/></svg>'
+/**
+ * Select words in a reply and a Quote button shows just above them: it puts them in the
+ * composer as a `>` block to answer below. A manual popover, so it floats over the feed.
+ */
+const quoteBtn = el("button", { class: "quote-pop", type: "button", popover: "manual", "aria-label": "Quote in your reply" }, el("span", { html: QUOTE_ICON, "aria-hidden": "true" }), "Quote")
+document.body.append(quoteBtn)
+let quoteText = ""
+const quoteShown = () => quoteBtn.matches(":popover-open")
+const hideQuote = () => { if (quoteShown()) quoteBtn.hidePopover(); quoteText = "" }
+/** The selection's words, when all of it sits in one reply of the open thread. */
+function quotable() {
+  const sel = getSelection()
+  if (!feed || !sel || sel.isCollapsed || !sel.rangeCount) return null
+  const prose = (n) => (n?.nodeType === Node.ELEMENT_NODE ? n : n?.parentElement)?.closest(".msg-a .prose")
+  const at = prose(sel.anchorNode)
+  if (!at || at !== prose(sel.focusNode) || !feed.list.contains(at)) return null
+  const text = sel.toString().trim()
+  return text ? { text, range: sel.getRangeAt(0) } : null
+}
+function placeQuote() {
+  const q = quotable()
+  if (!q) return hideQuote()
+  // The first line's box: the button sits over where the selection starts, not the middle of a long one.
+  const rects = [...q.range.getClientRects()].filter((r) => r.width > 0)
+  const r = rects[0] ?? q.range.getBoundingClientRect()
+  quoteText = q.text
+  if (!quoteShown()) quoteBtn.showPopover()
+  const w = quoteBtn.offsetWidth, h = quoteBtn.offsetHeight
+  const x = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, innerWidth - w - 8))
+  const above = r.top - h - 6
+  quoteBtn.style.left = `${x}px`
+  quoteBtn.style.top = `${above < 8 ? r.bottom + 6 : above}px`
+}
+// Shown once the selection settles (mouse up, or Shift+arrows), gone as soon as it collapses or leaves a reply.
+document.addEventListener("mouseup", () => setTimeout(placeQuote))
+document.addEventListener("keyup", (e) => { if (e.shiftKey || e.key === "Shift") placeQuote() })
+document.addEventListener("selectionchange", () => { if (quoteShown() && !quotable()) hideQuote() })
+addEventListener("scroll", () => quoteShown() && placeQuote(), true)
+addEventListener("resize", () => quoteShown() && placeQuote())
+// Pressing it mustn't clear the selection before the click reads it.
+quoteBtn.addEventListener("mousedown", (e) => e.preventDefault())
+quoteBtn.addEventListener("click", () => {
+  const words = quoteText
+  hideQuote()
+  if (!words || !feed) return
+  const cut = words.length > 1500 ? `${words.slice(0, 1500).trimEnd()}…` : words
+  getSelection()?.removeAllRanges()
+  feed.composer.quote(cut.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n"))
+})
 
 /** A sent message as words, each attached file by its name. */
 function plainText(item) {
@@ -799,13 +906,34 @@ function serialize(root) {
 
 // ---------- composer ----------
 /**
+ * Unsent words per box ("new:<project>", "t:<thread>"), kept while zero is open: the box's own
+ * nodes (so file chips come back too), the words as one line for the sidebar, and when they changed.
+ */
+const drafts = new Map()
+/** A draft as one line: its words, each file by its name. */
+function draftTitle(input) {
+  const names = new Map([...input.querySelectorAll(".att[data-att]")].map((c) => [c.dataset.att, c.querySelector(".att-name")?.textContent || "a file"]))
+  return serialize(input).replace(ATT, (_, id) => names.get(id) ?? "a file").replace(/\s+/g, " ").trim() || "A file"
+}
+/** Throw a draft away, and empty its box if it's on screen. */
+function discardDraft(key) {
+  const d = drafts.get(key)
+  drafts.delete(key)
+  const box = d?.nodes.find((n) => n.parentNode)?.parentNode
+  if (box) { box.replaceChildren(); box.dispatchEvent(new Event("input")) }
+  paintDrafts()
+}
+/**
  * The message box. It's an editable div rather than a textarea so a file
  * can sit among the words: paste one, drop one, or pick one with Attach and
  * it lands as a chip where the caret was. Each file uploads as it lands;
  * Send waits until they all have.
  */
-function composer({ onSend, onStop, controls = [], running = false, disabled = false }) {
+function composer({ onSend, onStop, controls = [], running = false, disabled = false, draftKey = "" }) {
   const input = el("div", { class: "input empty", contenteditable: disabled ? "false" : "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message", "data-placeholder": "" })
+  // What was written here before going elsewhere comes back, chips and all.
+  const kept = draftKey && drafts.get(draftKey)?.nodes
+  if (kept) input.append(...kept)
   const picker = el("input", { type: "file", multiple: true, hidden: true, tabindex: "-1" })
   const attach = el("button", { class: "pill-btn", type: "button", title: "Attach files. You can paste or drop them too." }, icon(CLIP_PATHS), el("span", { text: "Attach" }))
   const send = el("button", { class: "send", type: "button" })
@@ -834,6 +962,16 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
     // Clear only what the browser leaves behind (a stray <br>), never a space or line the person typed.
     if (isEmpty && input.textContent === "" && input.childNodes.length) input.replaceChildren()
     input.classList.toggle("empty", isEmpty)
+    if (draftKey) {
+      const was = drafts.get(draftKey)
+      if (isEmpty) drafts.delete(draftKey)
+      else {
+        const title = draftTitle(input)
+        drafts.set(draftKey, { nodes: [...input.childNodes], title, at: was?.title === title ? was.at : new Date().toISOString() })
+      }
+      // The sidebar's Drafts follow along, once per burst of typing.
+      if (Boolean(was) !== !isEmpty || (was && was.title !== drafts.get(draftKey)?.title)) paintDraftsSoon()
+    }
     paint()
   }
   const track = () => {
@@ -872,11 +1010,14 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
       const chip = attChip("span", { name: file.name || "pasted file", mime: file.type, src: local, attrs: { contenteditable: "false", "data-state": "uploading", title: "Uploading…" } })
       const x = el("button", { class: "att-x", type: "button", tabindex: "-1", "aria-label": `Remove ${file.name || "file"}`, title: "Remove", text: "×" })
       x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
+      // A chip can move to another composer with its draft: it tells the box it's in now, not this one.
+      const changed = (box) => box?.dispatchEvent(new Event("input"))
       x.addEventListener("click", () => {
+        const box = chip.closest(".input")
         const next = chip.nextSibling
         if (next?.nodeType === Node.TEXT_NODE && next.nodeValue === " ") next.remove()
         chip.remove()
-        sync()
+        changed(box)
       })
       chip.append(x)
       nodes.push(chip, document.createTextNode(" "))
@@ -887,13 +1028,14 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
         delete chip.dataset.state
         chip.title = `${a.name} · ${bytes(a.size)}`
         chip.querySelector(".att-name").textContent = a.name
-        paint()
+        changed(chip.closest(".input"))
       }, (e) => {
+        const box = chip.closest(".input")
         if (local) URL.revokeObjectURL(local)
         chip.nextSibling?.nodeValue === " " && chip.nextSibling.remove()
         chip.remove()
         fail(e)
-        sync()
+        changed(box)
       })
     }
     if (nodes.length) { insert(nodes); sync() }
@@ -975,8 +1117,13 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
   send.addEventListener("click", submit)
   // Attach on the left; the model picker sits on the right, beside Send.
   node.append(input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach), hint, el("div", { class: "composer-end" }, controls, send)), picker)
-  paint()
-  queueMicrotask(() => !disabled && input.focus())
+  sync()
+  queueMicrotask(() => {
+    if (disabled) return
+    input.focus()
+    // Back to a draft: the caret goes at its end, where you left off.
+    if (kept) { const r = document.createRange(); r.selectNodeContents(input); r.collapse(false); caretTo(r) }
+  })
   return {
     node,
     setBusy: (b) => { busy = b; paint() },
@@ -1041,6 +1188,7 @@ function threadView(t) {
   const box = composer({
     running: t.status === "running",
     controls: [compact, models.node],
+    draftKey: `t:${t.id}`,
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
@@ -1328,7 +1476,7 @@ function rel(text) {
 function renderItem(item) {
   switch (item.kind) {
     case "user": return userMessage(item)
-    case "assistant": return el("div", { class: "msg msg-a" }, el("div", { class: "msg-ai" }, el("div", { class: "prose" }, mdNodes(item.text))), msgActions(() => item.text, quoteButton(item), el("span", { class: "msg-meta" })))
+    case "assistant": return el("div", { class: "msg msg-a" }, el("div", { class: "msg-ai" }, el("div", { class: "prose" }, mdNodes(item.text))), msgActions(() => item.text, el("span", { class: "msg-meta" })))
     case "tool": {
       if (memoryRead(item)) return memoryCard(item)
       const open = S.expanded.has(item.id)
@@ -1364,6 +1512,11 @@ function renderItem(item) {
       return el("div", { class: `mem ${item.action}` }, head, item.text ? el("pre", { class: "mem-text", text: item.text }) : null)
     }
     case "compact": return compactCard(item)
+    // zero's own follow-up, not the person's: the agent stopped on a failed call without saying where things stand.
+    case "followup": return el("div", { class: "mem followup" },
+      el("div", { class: "mem-head", title: item.reason },
+        el("span", { class: "mem-label", text: "zero sent it on" }),
+        el("span", { class: "mem-title", text: `${providerLabel(S.open?.provider)} stopped after a failed call (${item.reason}) without saying where things stand` })))
     case "turn": {
       if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
       return el("div", { class: "turn-meta" }, turnMeta(item))
@@ -2285,7 +2438,12 @@ function connect() {
     if (item.kind === "permission") {
       item.state === "pending" ? S.asking.add(threadId) : S.asking.delete(threadId)
       renderSide()
-      if (item.state === "pending" && S.open?.id !== threadId) toast(`A thread is waiting for your approval.`)
+      if (item.state === "pending" && S.open?.id !== threadId) threadToast(threadId, `${threadName(threadId)} is waiting for your approval.`)
+    }
+    // A thread you're not looking at finished: say so here (the desktop notification is for when zero is behind).
+    if (item.kind === "turn" && S.open?.id !== threadId && document.hasFocus()) {
+      if (item.outcome === "done") threadToast(threadId, `${threadName(threadId)}: done. Your turn.`)
+      else if (item.outcome === "failed") threadToast(threadId, `${threadName(threadId)} stopped on an error.`, true)
     }
     if (S.open?.id === threadId && feed) upsertItem(item)
   }
