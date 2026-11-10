@@ -1686,7 +1686,7 @@ function commitBox(g) {
     if (!ta.value.trim()) return toast("Write a commit message first, or let Claude write one.", true)
     if (await gitAction("commit", { message: ta.value }, "Committed.")) g.commitDraft = ""
   }) }, "Commit all")
-  const write = el("button", { class: "btn btn-quiet btn-xs", type: "button", title: "Claude's small model reads the diff and writes the message (about a tenth of a cent)", onclick: (e) => withBusy(e.currentTarget, async () => {
+  const write = el("button", { class: "btn btn-quiet btn-xs", type: "button", title: "Claude's small model reads the diff (up to 12,000 characters) and writes the message", onclick: (e) => withBusy(e.currentTarget, async () => {
     try {
       const r = await api("POST", `threads/${g.threadId}/git/message`, {})
       ta.value = g.commitDraft = r.message

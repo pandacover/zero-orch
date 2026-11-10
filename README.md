@@ -119,7 +119,8 @@ A desktop chat app, instead of the CLI:
 
 - **Git panel:** click a changed file to see its diff. **Commit all** commits
   everything; **Write message** has the small model that names threads write the
-  message from the diff (about a tenth of a cent).
+  message from the diff. It reads at most 12,000 characters of it; a small
+  change cost $0.0006 with Haiku in testing.
 - **Pinned threads** stay at the top of their project (the pin on a row's hover).
 - **Quote** on a reply puts it (or the part you selected) in the composer as a
   `>` block, to answer it point by point.
