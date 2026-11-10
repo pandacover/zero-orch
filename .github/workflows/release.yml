@@ -7,7 +7,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-    branches: [claude/pensive-gates-uim1kb] # TEMP: verify the builds once
   workflow_dispatch:
 
 permissions:
