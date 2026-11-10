@@ -11,7 +11,7 @@ import { BENCH_WORK_DIR, loadTasks } from "../Bench.ts"
 import { GENOME_DIR, GENOME_FILES, loadGenome } from "../Genome.ts"
 import { changes, revert } from "../Git.ts"
 import { attempts, readLedger, totalCost } from "../Ledger.ts"
-import { cleanEnv } from "../Proc.ts"
+import { envFor } from "../Proc.ts"
 import { Memory, type StoredChange } from "../Singularity.ts"
 import type { Hub } from "./Threads.ts"
 
@@ -85,7 +85,7 @@ export const makeEvolution = (options: { readonly root: string; readonly cli: st
     job = { id, request, startedAt: new Date().toISOString(), state: "running", exitCode: null, endedAt: null }
     log.length = 0
     pushLine(`$ zero ${jobArgs(request).join(" ")}`)
-    child = spawn(process.execPath, [cli, ...jobArgs(request)], { cwd: root, env: cleanEnv(), windowsHide: true })
+    child = spawn(process.execPath, [cli, ...jobArgs(request)], { cwd: root, env: envFor(process.execPath), windowsHide: true })
     for (const stream of [child.stdout, child.stderr]) {
       let pending = ""
       stream?.setEncoding("utf8")

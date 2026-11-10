@@ -61,6 +61,13 @@ export const cleanEnv = (extra: Readonly<Record<string, string | undefined>> = {
   return env
 }
 
+/**
+ * `cleanEnv` for a child that runs `command`. In the desktop app `process.execPath` is
+ * Electron, and ELECTRON_RUN_AS_NODE makes it act as Node; any other child is left alone.
+ */
+export const envFor = (command: string, extra: Readonly<Record<string, string | undefined>> = {}): Record<string, string> =>
+  cleanEnv(command === process.execPath && process.versions.electron ? { ...extra, ELECTRON_RUN_AS_NODE: "1" } : extra)
+
 /** Run `command` with `args`, no shell. */
 export const runProcess = Effect.fn("Proc.run")(function*(
   command: string,
@@ -80,7 +87,7 @@ export const runProcess = Effect.fn("Proc.run")(function*(
     Effect.gen(function*() {
       const handle = yield* spawner.spawn(ChildProcess.make(command, args, {
         cwd: options.cwd,
-        env: cleanEnv(options.env),
+        env: envFor(command, options.env),
         extendEnv: false,
         stdin: options.input === undefined ? "ignore" : Stream.make(new TextEncoder().encode(options.input))
       }))

@@ -5,6 +5,7 @@
   "description": "A recursive self-improving agent built on singularity's procedural memory",
   "license": "MIT",
   "type": "module",
+  "main": "src/desktop/main.ts",
   "engines": {
     "node": ">=24"
   },
@@ -13,7 +14,7 @@
   },
   "scripts": {
     "zero": "node src/cli.ts",
-    "ui": "node src/cli.ts ui",
+    "app": "electron .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -21,7 +22,8 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.319",
     "@effect/platform-node": "4.0.0",
     "@openai/codex-sdk": "0.163.0",
-    "effect": "4.0.0"
+    "effect": "4.0.0",
+    "electron": "44.9.3"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",

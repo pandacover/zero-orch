@@ -2,7 +2,6 @@
 // No framework: state in `S`, views rebuilt on navigation, live items patched in place.
 "use strict"
 
-const TOKEN = document.querySelector('meta[name="zero-token"]').content
 const $ = (id) => document.getElementById(id)
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag)
@@ -54,14 +53,10 @@ function save(key, value) {
   try { localStorage.setItem(`zero.${key}`, JSON.stringify(value)) } catch {}
 }
 
+/** One call to the backend in the app's main process (src/app/Api.ts), through src/desktop/preload.cjs. */
 async function api(method, path, body) {
-  const res = await fetch(`/api/${path}`, {
-    method,
-    headers: { "x-zero-token": TOKEN, "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body)
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || `request failed (${res.status})`)
+  const { status, body: data } = await zero.call(method, path, body)
+  if (status >= 400) throw new Error(data?.error || `request failed (${status})`)
   return data
 }
 
@@ -607,7 +602,7 @@ const accessText = (a) => ({ "ask": "asks before edits and commands", "auto-edit
 /** Where a message's text marks an attached file; the server reads the same marker (src/app/Attachments.ts). */
 const ATT = /\{\{att:(att_[a-z0-9]{6,32})\}\}/g
 const MAX_FILE = 25 * 1024 * 1024
-const fileUrl = (id) => `/api/attachments/${id}?token=${encodeURIComponent(TOKEN)}`
+const fileUrl = (id) => `/attachments/${id}`
 const isRaster = (mime) => /^image\/(png|jpeg|gif|webp|bmp)$/.test(mime ?? "")
 const bytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`)
 const FILE_PATHS = '<path d="M9 1.75H4.5a1.5 1.5 0 0 0-1.5 1.5v9.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5V5.75z"/><path d="M9 1.75v4h4"/>'
@@ -749,13 +744,8 @@ function editMessage(item, wrap, bubble) {
   getSelection().addRange(r)
 }
 async function upload(file) {
-  const res = await fetch("/api/attachments", {
-    method: "POST",
-    headers: { "x-zero-token": TOKEN, "content-type": file.type || "application/octet-stream", "x-file-name": encodeURIComponent(file.name || "") },
-    body: file
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || `couldn't attach ${file.name || "the file"} (${res.status})`)
+  const { status, body: data } = await zero.upload(file.name || "", file.type || "application/octet-stream", new Uint8Array(await file.arrayBuffer()))
+  if (status >= 400) throw new Error(data?.error || `couldn't attach ${file.name || "the file"} (${status})`)
   return data
 }
 
@@ -2136,9 +2126,8 @@ function drawLineage(box, E, live) {
 // ---------- live events ----------
 let evoTimer = 0
 function connect() {
-  const es = new EventSource(`/api/events?token=${encodeURIComponent(TOKEN)}`)
-  es.addEventListener("thread", (e) => {
-    const meta = JSON.parse(e.data)
+  const on = {}
+  on["thread"] = (meta) => {
     const i = S.threads.findIndex((t) => t.id === meta.id)
     if (i >= 0) S.threads[i] = meta
     else S.threads.unshift(meta)
@@ -2159,34 +2148,31 @@ function connect() {
       paintWorking()
     }
     renderSide()
-  })
-  es.addEventListener("threads", (e) => {
-    S.threads = JSON.parse(e.data)
+  }
+  on["threads"] = (data) => {
+    S.threads = data
     if (S.open && !S.threads.some((t) => t.id === S.open.id)) go("#/")
     renderSide()
-  })
-  es.addEventListener("item", (e) => {
-    const { threadId, item } = JSON.parse(e.data)
+  }
+  on["item"] = ({ threadId, item }) => {
     if (item.kind === "permission") {
       item.state === "pending" ? S.asking.add(threadId) : S.asking.delete(threadId)
       renderSide()
       if (item.state === "pending" && S.open?.id !== threadId) toast(`A thread is waiting for your approval.`)
     }
     if (S.open?.id === threadId && feed) upsertItem(item)
-  })
-  es.addEventListener("delta", (e) => {
-    const { threadId, itemId, delta } = JSON.parse(e.data)
+  }
+  on["delta"] = ({ threadId, itemId, delta }) => {
     if (S.open?.id === threadId) applyDelta(itemId, delta)
-  })
-  es.addEventListener("projects", (e) => {
-    S.projects = JSON.parse(e.data)
+  }
+  on["projects"] = (data) => {
+    S.projects = data
     renderSide()
     if (S.route.name === "home" || S.route.name === "new") renderMain()
-  })
-  es.addEventListener("settings", (e) => { S.settings = JSON.parse(e.data) })
-  es.addEventListener("zero-log", (e) => {
+  }
+  on["settings"] = (data) => { S.settings = data }
+  on["zero-log"] = (entry) => {
     if (!S.evo) return
-    const entry = JSON.parse(e.data)
     S.evo.log.push(entry)
     const log = $("evo-log")
     if (log) {
@@ -2195,19 +2181,16 @@ function connect() {
       log.append(logLine(entry.line))
       if (stick) log.scrollTop = log.scrollHeight
     }
-  })
+  }
   const evoRefresh = () => { clearTimeout(evoTimer); evoTimer = setTimeout(() => S.route.name === "evolution" && loadEvo(), 300) }
-  es.addEventListener("zero-job", (e) => {
-    const j = JSON.parse(e.data)
+  on["zero-job"] = (j) => {
     if (j.state === "done") toast("Evolution run finished.")
     if (j.state === "failed") toast("Evolution run failed. The output says why.", true)
     evoRefresh()
-  })
-  es.addEventListener("zero-state", evoRefresh)
-  es.onerror = () => {
-    es.close()
-    setTimeout(() => boot(true), 2000)
   }
+  on["zero-state"] = evoRefresh
+  // The backend runs in this app, so the stream never drops: no reconnecting.
+  zero.on((event, data) => on[event]?.(data))
 }
 
 // ---------- keys ----------
@@ -2246,15 +2229,14 @@ addEventListener("resize", () => { if (S.route.name === "evolution" && S.evo) pa
 setInterval(() => renderSide(), 60_000)
 
 // ---------- start ----------
-async function boot(reconnect = false) {
+async function boot() {
   try {
     const b = await api("GET", "bootstrap")
     Object.assign(S, { settings: b.settings, projects: b.projects, threads: b.threads, providers: b.providers, home: b.home, zeroRoot: b.zeroRoot })
   } catch (e) {
     $("main").replaceChildren(el("div", { class: "start" }, el("div", { class: "start-inner" },
       el("h1", { text: "Can't reach zero" }),
-      el("p", { class: "lede", text: `${e.message}. Start it with \`node src/cli.ts ui\`, then reload this page.` }))))
-    if (reconnect) setTimeout(() => boot(true), 4000)
+      el("p", { class: "lede", text: `${e.message}. Restart the app; if it keeps happening, run it from a terminal with \`npm run app\` to see why.` }))))
     return
   }
   connect()

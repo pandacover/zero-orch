@@ -79,10 +79,10 @@ npm run typecheck && npm test                      # all offline: fake agent and
 ### Control plane
 
 ```sh
-npm run ui                    # then open http://127.0.0.1:4747  (--port to change it)
+npm run app                   # the desktop app (Electron); runs zero's TypeScript as is, no build
 ```
 
-A chat app in the browser, instead of the CLI:
+A desktop chat app, instead of the CLI:
 
 - **Projects:** folders on this machine. zero itself is the first one; add more
   with **+ Add project** by pasting a folder's path.
@@ -108,8 +108,10 @@ A chat app in the browser, instead of the CLI:
 Keys: `Alt+N` new thread, `Enter` send (`Shift+Enter` new line), `Esc` stop.
 
 Threads, projects and settings live in `~/.zero` (`ZERO_HOME` to move them).
-The server listens only on 127.0.0.1, refuses any other Host header, and wants
-a token minted at startup on every API call. Codex and Ollama providers exist
+The backend (`src/app/Api.ts`) runs in Electron's main process. The page
+reaches it only over IPC through `src/desktop/preload.cjs`, runs sandboxed with
+no Node, and gets its files from the `zero://` scheme, so nothing listens on a
+port. Only one copy of the app runs at a time. Codex and Ollama providers exist
 in `src/app/providers/` but are off: Codex's Windows sandbox asks for admin
 elevation on every command.
 
@@ -162,7 +164,8 @@ src/Bench.ts       fitness: solver sessions + hidden checks → scorecard
 src/Fitness.ts     the accept/reject rule
 src/Generation.ts  one generation
 src/Solve.ts       the evolved solver on a real repo
-src/app/           the control plane: server, threads, store, providers (ui/ is the page)
+src/app/           the control plane's backend: Api, threads, store, providers (ui/ is the page)
+src/desktop/       the Electron shell: main.ts (window, IPC, zero:// files) and preload.cjs
 src/cli.ts         effect/cli commands
 test/              offline tests with fake Agent and Memory layers
 ```
