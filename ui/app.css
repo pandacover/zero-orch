@@ -76,6 +76,12 @@ button, a, .thread-link, .foot-link, .proj-head { transition: background-color .
 @keyframes item-in { from { opacity: 0; transform: translateY(6px); } }
 
 /* ---------- shell: the sidebar sits on the frame; the main panel runs flush to the window's edges ---------- */
+/*
+ * Both sidebars (projects on the left, Git on the right) move on one clock: the panel slides for --side-move,
+ * and what's inside it fades so it never rides past in plain view. Closing, the content is gone in the first
+ * ~40% of the slide; opening, it waits until the panel has made room, then fades in to land with the slide.
+ */
+:root { --side-move: .28s cubic-bezier(.4, 0, .2, 1); --fade-out: .12s ease; --fade-in: .18s ease .1s; }
 .shell { display: grid; grid-template-columns: var(--side-w, 272px) minmax(0, 1fr); height: 100vh; height: 100dvh; background: var(--frame); }
 .shell.side-hidden { grid-template-columns: 0 minmax(0, 1fr); }
 .shell.side-hidden .side { visibility: hidden; }
@@ -84,6 +90,7 @@ button, a, .thread-link, .foot-link, .proj-head { transition: background-color .
   background: var(--side); padding: 12px 12px 10px;
 }
 /* the drag handle runs along the sidebar's right edge */
+.side > :not(.side-resize) { transition: opacity var(--fade-in); }
 .side-resize { position: absolute; top: 0; bottom: 0; right: 0; width: 8px; cursor: col-resize; z-index: 5; touch-action: none; }
 .side-resize::after { content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 2px; background: transparent; transition: background .12s ease; }
 /* no line on hover: the cursor says it's draggable; the line shows only while dragging or keyboard-focused */
@@ -179,10 +186,10 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
    * Hiding the sidebar: its column closes while the sidebar itself, kept at full width, slides left by the same
    * amount on the same curve, so its edge rides the panel's edge. The panel sits above it, so nothing pokes out.
    */
-  :root { --side-move: .28s cubic-bezier(.4, 0, .2, 1); }
   .shell { transition: grid-template-columns var(--side-move); }
   .side { width: var(--side-w, 272px); transition: transform var(--side-move), visibility var(--side-move); }
   .shell.side-hidden .side { transform: translateX(-100%); }
+  .shell.side-hidden .side > :not(.side-resize) { opacity: 0; transition: opacity var(--fade-out); }
   .main { position: relative; z-index: 1; transition: border-color var(--side-move); }
   body.resizing .shell, body.resizing .side { transition: none; }
   /* the panel's header row is 54px tall from the window top, so the toggle and the sidebar's top row centre 27px down */
@@ -719,7 +726,7 @@ dialog p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
 .git-toggle svg { width: 17px; height: 17px; }
 .git-toggle.on { color: var(--accent-text); }
 .thread-cols .bar { padding-right: 56px; }
-.thread-cols:has(> .git-panel:not([hidden])) .bar { padding-right: 18px; }
+.thread-cols:has(> .git-panel:not(.closed)) .bar { padding-right: 18px; }
 /* a dot on the toggle: the PR's state, or its checks' when they failed or are running */
 .git-badge { position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); pointer-events: none; }
 .git-badge[data-state="draft"], .git-badge[data-state="closed"] { background: var(--faint); }
@@ -727,12 +734,21 @@ dialog p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
 .git-badge[data-checks="failed"] { background: var(--warn); }
 .git-badge[data-checks="running"] { animation: breathe 1.6s ease-in-out infinite; }
 
+/*
+ * Closing, its column narrows to nothing while the content, kept at full width and pinned to the right, is cut off
+ * from the left: the mirror of the left sidebar. The content fades on the same clock as the left sidebar's.
+ */
 .git-panel {
   position: relative; flex: none; width: var(--git-w, 380px); min-width: 0; min-height: 0; display: flex; flex-direction: column;
-  border-left: 1px solid var(--line); background: var(--bg); animation: git-in .22s var(--ease) both;
+  align-items: flex-end; align-items: unsafe flex-end; overflow: hidden;
+  border-left: 1px solid var(--line); background: var(--bg);
+  transition: width var(--side-move), visibility var(--side-move);
 }
-@keyframes git-in { from { opacity: 0; translate: 12px 0; } }
-.git-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 5; touch-action: none; }
+.git-panel > :not(.git-resize) { width: calc(var(--git-w, 380px) - 1px); transition: opacity var(--fade-in); }
+.git-panel.closed { width: 0; border-left-width: 0; visibility: hidden; }
+.git-panel.closed > :not(.git-resize) { opacity: 0; transition: opacity var(--fade-out); }
+body.resizing .git-panel { transition: none; }
+.git-resize { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; cursor: col-resize; z-index: 5; touch-action: none; }
 .git-resize:focus-visible { outline: none; background: var(--accent-line); }
 /* the header's right end is the toggle's spot (it's fixed there, above the panel); everything else centres on its line */
 .git-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 54px; padding: 0 56px 0 16px; border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
@@ -851,7 +867,12 @@ a.ck-name:hover { color: var(--accent-text); }
 .check { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 13px; }
 /* not much room beside the thread: the panel lies over it instead */
 @media (max-width: 1100px) {
-  .git-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 18; width: min(var(--git-w, 380px), 92vw); box-shadow: -18px 0 40px -24px #00000066; }
+  .git-panel, .git-panel.closed {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 18; width: min(var(--git-w, 380px), 92vw); border-left-width: 1px;
+    box-shadow: -18px 0 40px -24px #00000066; transition: transform var(--side-move), visibility var(--side-move);
+  }
+  .git-panel.closed { transform: translateX(100%); }
+  .git-panel > :not(.git-resize) { width: auto; align-self: stretch; }
   .git-resize { display: none; }
 }
 /* narrow: the toggles sit lower (as the header does), so the panel's header matches the thread's */
@@ -862,8 +883,9 @@ a.ck-name:hover { color: var(--accent-text); }
   .shell, .shell.side-hidden { grid-template-columns: minmax(0, 1fr); }
   .shell.side-hidden .side { visibility: visible; }
   .main, .shell.side-hidden .main { margin: 0; border: 0; border-radius: 0; }
-  .side { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); z-index: 20; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow); }
+  .side { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); z-index: 20; transform: translateX(-102%); transition: transform var(--side-move); box-shadow: var(--shadow); }
   .side.open { transform: none; }
+  .side:not(.open) > :not(.side-resize) { opacity: 0; transition: opacity var(--fade-out); }
   .side-resize { display: none; }
   .scrim { position: fixed; inset: 0; background: #0b0c1059; z-index: 15; }
   /* the fixed toggle sits over the panel here too: the header clears it and centres on it */
