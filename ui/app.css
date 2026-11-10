@@ -159,6 +159,14 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 .thread-pin[aria-pressed="true"] { color: var(--accent-text); }
 .pin-mark { display: inline-flex; flex: none; width: 12px; height: 12px; color: var(--faint); }
 .pin-mark svg { width: 12px; height: 12px; }
+/* Drafts: unsent words, in the accent and in italics so they read apart from real threads */
+.drafts .proj-head { color: var(--muted); }
+.drafts .proj-head:hover { background: none; }
+.draft-link { padding-left: 10px; color: var(--accent-text); font-style: italic; }
+.draft-link:hover, .draft-link.active { color: var(--accent-text); background: var(--accent-soft); }
+.draft-row:hover .draft-link, .draft-row:focus-within .draft-link { padding-right: 34px; }
+.draft-mark { display: inline-flex; flex: none; width: 13px; height: 13px; opacity: .8; }
+.draft-mark svg { width: 13px; height: 13px; }
 .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: breathe 1.6s ease-in-out infinite; flex: none; }
 .ask-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); flex: none; }
 .threads .none { padding: 4px 8px 6px 22px; color: var(--faint); font-size: 12.5px; }
@@ -446,6 +454,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
 .mem-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .mem-head::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .mem.checked .mem-head::before, .mem.none .mem-head::before { background: var(--faint); }
+.mem.followup .mem-head::before { background: var(--muted); }
 .mem-text {
   margin: 6px 0 2px 14px; padding: 10px 12px; max-height: 320px; overflow: auto; border-left: 2px solid var(--line-strong); border-radius: 0 8px 8px 0; background: var(--sunk);
   font: 400 11.5px/1.65 var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--muted);
@@ -658,11 +667,33 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
   box-shadow: 0 6px 18px -8px #00000066;
 }
 
+/* Quote: floats just above words selected in a reply (app.js places it) */
+.quote-pop {
+  position: fixed; inset: auto; margin: 0; z-index: 55; padding: 5px 10px 5px 8px; border: 0; border-radius: 8px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px; background: var(--ink); color: var(--bg); font: 500 12.5px/1 var(--body);
+  box-shadow: 0 6px 18px -8px #00000066; animation: quote-in .14s ease both;
+}
+@keyframes quote-in { from { opacity: 0; } }
+.quote-pop:not(:popover-open) { display: none; }
+.quote-pop span { display: grid; width: 14px; height: 14px; }
+.quote-pop svg { width: 14px; height: 14px; }
+.quote-pop:hover { opacity: .88; }
+.quote-pop:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+
 /* toasts, dialog. Toasts are a popover too, so a toast shows above an open modal. */
 .toasts { position: fixed; inset: auto 16px 16px auto; margin: 0; padding: 0; border: 0; background: none; overflow: visible; display: grid; gap: 8px; z-index: 30; }
 .toasts:not(:popover-open) { display: none; }
 .toast { padding: 10px 14px; border-radius: 11px; background: var(--ink); color: var(--bg); font-size: 13.5px; box-shadow: var(--shadow); max-width: 380px; animation: toast-in .2s ease both; }
 .toast.error { background: var(--warn); color: var(--bg); }
+/* a toast about a thread: its words, then a button that opens the thread */
+.toast.has-cta { display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 14px; }
+.toast-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.toast-cta {
+  flex: none; border: 0; border-radius: 8px; padding: 6px 11px; cursor: pointer; white-space: nowrap;
+  background: var(--accent); color: var(--on-accent); font: 600 12.5px/1 var(--body);
+}
+.toast-cta:hover { filter: brightness(1.1); }
+.toast-cta:focus-visible { outline: 2px solid var(--bg); outline-offset: 2px; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 dialog { border: 1px solid var(--line); border-radius: 16px; padding: 22px; width: min(460px, calc(100vw - 32px)); background: var(--surface); color: var(--ink); box-shadow: 0 30px 80px -20px #00000066; }
 dialog::backdrop { background: #0b0c1059; backdrop-filter: blur(2px); }

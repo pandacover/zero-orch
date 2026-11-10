@@ -13,8 +13,8 @@ import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
 import { type Access, isCompact } from "../Model.ts"
-import type { Provider, TurnEvent, TurnInput } from "./Provider.ts"
-import { keepOutput, short } from "./Provider.ts"
+import type { Provider, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
+import { keepOutput, notRun, short } from "./Provider.ts"
 
 export const CLAUDE_MODELS = [...MODELS]
 
@@ -57,10 +57,14 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
     const verdict = now()
     if (verdict === "allow") return { behavior: "allow", updatedInput: toolInput }
     if (verdict === "deny") return { behavior: "deny", message: "This thread is read-only. Say what you'd change instead." }
-    const ok = await input.ask(tool, detailOf(tool, toolInput), now)
-    return ok
-      ? { behavior: "allow", updatedInput: toolInput }
-      : { behavior: "deny", message: "The person declined this. Ask them how to proceed, or take another way." }
+    // The agent hears why a call didn't run: only the person's Deny reads as a no.
+    let answer: Verdict
+    try {
+      answer = await input.ask(tool, detailOf(tool, toolInput), now)
+    } catch (e) {
+      return { behavior: "deny", message: notRun({ failure: e instanceof Error ? e.message : String(e) }) }
+    }
+    return answer === "allowed" ? { behavior: "allow", updatedInput: toolInput } : { behavior: "deny", message: notRun(answer) }
   }
   // The message goes in as a stream held open until the turn's result, so the session can
   // still be asked how full its context is (a plain string prompt closes it at the result).

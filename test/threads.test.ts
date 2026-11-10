@@ -10,9 +10,36 @@ import { cleanTitle, gate, summaryOf } from "../src/app/providers/Claude.ts"
 import type { Provider, TurnInput } from "../src/app/providers/Provider.ts"
 import * as StoreModule from "../src/app/Store.ts"
 import { Store } from "../src/app/Store.ts"
-import { lineBuffer, makeThreads, PROVIDERS, recalledTitle, turnCost, withEffort } from "../src/app/Threads.ts"
+import { lineBuffer, makeThreads, PROVIDERS, recalledTitle, stalledOn, TOOL_FAILURE_NOTE, turnCost, withEffort } from "../src/app/Threads.ts"
+import { notRun } from "../src/app/providers/Provider.ts"
 import { MemoryError } from "../src/Errors.ts"
 import * as Singularity from "../src/Singularity.ts"
+
+describe("tool failures", () => {
+  const tool = (status: "done" | "failed", output = ""): Item => ({ kind: "tool", id: "t1", at: "", name: "Edit", detail: "a.ts", status, output })
+  const said = (text: string): Item => ({ kind: "assistant", id: "a1", at: "", text })
+
+  it("tells an agent a broken approval from a refusal", () => {
+    expect(notRun("declined")).toMatch(/^The person declined/)
+    const broken = notRun({ failure: "AbortError: Stream closed" })
+    expect(broken).toContain("AbortError: Stream closed")
+    expect(broken).toContain("did not decline")
+    expect(broken).toContain("Retry the same call once")
+    expect(notRun("refused")).not.toContain("declined")
+    expect(notRun("stopped")).toContain("stopped this turn")
+  })
+
+  it("finds a turn that stopped on a failed call without a report", () => {
+    expect(stalledOn([tool("failed"), said("No response requested.")], false)?.name).toBe("Edit")
+    expect(stalledOn([tool("failed")], false)).toBeDefined()
+    // Not when the last call worked, the person declined, or the agent said what broke.
+    expect(stalledOn([tool("failed"), tool("done"), said("ok")], false)).toBeUndefined()
+    expect(stalledOn([tool("failed"), said("ok")], true)).toBeUndefined()
+    expect(stalledOn([tool("failed"), { kind: "permission", id: "p", at: "", tool: "Edit", detail: "a.ts", state: "denied" }], false)).toBeUndefined()
+    expect(stalledOn([tool("failed"), said("x".repeat(250))], false)).toBeUndefined()
+    expect(stalledOn([said("all done")], false)).toBeUndefined()
+  })
+})
 
 describe("thread turns", () => {
   it("charges a resumed session's turn only what it added", () => {
@@ -258,21 +285,21 @@ describe("a running turn", () => {
   }
 
   it("answers a waiting approval when the access changes to one that settles it", async () => {
-    let allowed: boolean | undefined
+    let allowed: string | undefined
     let accessAfter: string | undefined
     const { t } = await run(async function*(input) {
       const file = join(input.cwd, "a.txt")
       allowed = await input.ask("Edit", file, () => gate(input.access(), input.cwd, "Edit", { file_path: file }))
       accessAfter = input.access()
     }, (threads, t) => threads.update(t as never, { access: "auto-edit" }))
-    expect(allowed).toBe(true)
+    expect(allowed).toBe("allowed")
     expect(accessAfter).toBe("auto-edit")
     const ask = t.items.find((i): i is Item & { kind: "permission" } => i.kind === "permission")
     expect(ask?.state).toBe("allowed")
   })
 
   it("runs a waiting command when the thread switches to full access", async () => {
-    let allowed: boolean | undefined
+    let allowed: string | undefined
     await run(async function*(input) {
       allowed = await input.ask("Bash", "npm test", () => gate(input.access(), input.cwd, "Bash", { command: "npm test" }))
     }, (threads, t) => {
@@ -280,16 +307,29 @@ describe("a running turn", () => {
       threads.update(t as never, { access: "auto-edit" })
       threads.update(t as never, { access: "full-access" })
     })
-    expect(allowed).toBe(true)
+    expect(allowed).toBe("allowed")
   })
 
   it("denies a waiting approval when the thread turns read-only", async () => {
-    let allowed: boolean | undefined
+    let allowed: string | undefined
     await run(async function*(input) {
       const file = join(input.cwd, "a.txt")
       allowed = await input.ask("Edit", file, () => gate(input.access(), input.cwd, "Edit", { file_path: file }))
     }, (threads, t) => threads.update(t as never, { access: "read-only" }))
-    expect(allowed).toBe(false)
+    // The access refused it, not the person: the agent is told which.
+    expect(allowed).toBe("refused")
+  })
+
+  it("tells the agent the person declined only when they pressed Deny", async () => {
+    let verdict: string | undefined
+    const { t } = await run(async function*(input) {
+      verdict = await input.ask("Bash", "rm -rf build", () => "ask")
+      yield { type: "tool", key: "x", name: "Bash", detail: "rm -rf build", status: "failed", output: notRun("declined") } as never
+      yield { type: "text", key: "m:0", delta: "OK." } as never
+    }, (threads, t) => threads.answer(t.id, threads_pending(t), false))
+    expect(verdict).toBe("declined")
+    // Stopping after a Deny is doing as told: zero doesn't send the agent on.
+    expect(t.items.some((i) => i.kind === "followup")).toBe(false)
   })
 
   it("streams text to the page line by line and keeps all of it", async () => {
@@ -390,6 +430,74 @@ describe("titles and compaction", () => {
       between: (t) => { t.title = "My own name"; answer("Add fetch retries") }
     })
     expect(t.title).toBe("My own name")
+  })
+
+  it("pins and unpins a thread without making it newer, so it goes back where it was", async () => {
+    const home = mkdtempSync(join(tmpdir(), "zero-home-"))
+    const proj = mkdtempSync(join(tmpdir(), "zero-proj-"))
+    dirs.push(home, proj)
+    const sent: Array<{ event: string; data: any }> = []
+    const layer = Layer.mergeAll(Singularity.empty, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
+    const { at, pinned, unpinned, renamed } = await Effect.gen(function*() {
+      const store = yield* Store
+      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: (event, data) => sent.push({ event, data: structuredClone(data) }) }, nameThread: async () => "" })
+      const project = yield* store.addProject(proj)
+      const t = threads.create(project, {})
+      t.updatedAt = "2026-01-01T00:00:00.000Z"
+      const at = t.updatedAt
+      threads.update(t, { pinned: true })
+      const pinned = { ...store.thread(t.id)! }
+      threads.update(t, { pinned: false })
+      const unpinned = { ...store.thread(t.id)! }
+      threads.update(t, { title: "Renamed" })
+      return { at, pinned, unpinned, renamed: store.thread(t.id)! }
+    }).pipe(Effect.provide(layer), Effect.runPromise)
+    expect(pinned.pinned).toBe(true)
+    expect(pinned.updatedAt).toBe(at)
+    expect(unpinned.pinned).toBeUndefined()
+    expect(unpinned.updatedAt).toBe(at)
+    // The page still hears about each pin, so its row repaints.
+    expect(sent.filter((s) => s.event === "thread").map((s) => s.data.pinned)).toEqual([undefined, true, undefined, undefined])
+    // Anything else still counts as activity.
+    expect(renamed.updatedAt > at).toBe(true)
+  })
+
+  it("sends an agent on, once, when it stops on a failed call without saying where things stand", async () => {
+    const failed = { type: "tool", key: "e1", name: "Edit", detail: "ui/app.js", status: "failed", output: "Tool permission request failed: AbortError: Stream closed" }
+    const { t, given } = await thread({
+      messages: ["add a drafts section"],
+      script: async function*(input) {
+        if (input.prompt.includes("From zero")) {
+          yield { type: "text", key: "m:1", delta: "The edit didn't land; I retried it and it's in now." }
+          return
+        }
+        yield { ...failed, status: "running", output: undefined }
+        yield failed
+        yield { type: "text", key: "m:0", delta: "No response requested." }
+      }
+    })
+    expect(given).toHaveLength(2)
+    expect(given[0]!.instructions).toContain(TOOL_FAILURE_NOTE)
+    expect(given[1]!.prompt).toContain("not from the person")
+    expect(given[1]!.prompt).toContain("Edit ui/app.js -> Tool permission request failed: AbortError: Stream closed")
+    // The person sees zero's follow-up in the thread, between the stall and what came of it, and one turn end.
+    const kinds = t.items.map((i) => i.kind)
+    expect(kinds.indexOf("followup")).toBeGreaterThan(kinds.indexOf("tool"))
+    expect(t.items.find((i) => i.kind === "followup")).toMatchObject({ reason: "Edit ui/app.js" })
+    expect(t.items.at(-2)).toMatchObject({ kind: "assistant", text: expect.stringContaining("retried") })
+    expect(kinds.filter((k) => k === "turn")).toHaveLength(1)
+  })
+
+  it("sends an agent on only once, and not when it reported the failure", async () => {
+    const failed = { type: "tool", key: "e1", name: "Bash", detail: "npm test", status: "failed", output: "timed out" }
+    // Stalls again after the follow-up: no second follow-up.
+    const twice = await thread({ messages: ["run the tests"], script: async function*() { yield failed; yield { type: "text", key: "m", delta: "Done." } } })
+    expect(twice.given).toHaveLength(2)
+    expect(twice.t.items.filter((i) => i.kind === "followup")).toHaveLength(1)
+    // Said what broke: that's a report, not a stall.
+    const report = "npm test timed out after 120s twice. The parser change is in src/parse.ts and type-checks; the tests haven't run, so I can't say it works. Run `npm test -- parse` locally, or tell me to raise the timeout."
+    const reported = await thread({ messages: ["run the tests"], script: async function*() { yield failed; yield { type: "text", key: "m", delta: report } } })
+    expect(reported.given).toHaveLength(1)
   })
 
   it("cleans a model's answer into a title", () => {

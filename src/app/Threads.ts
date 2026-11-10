@@ -15,7 +15,7 @@ import { git, head } from "../Git.ts"
 import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "../Singularity.ts"
 import type { Access, Item, Project, ProviderId, Settings, Thread } from "./Model.ts"
 import { isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
-import { type Provider, turnStream } from "./providers/Provider.ts"
+import { type Provider, turnStream, type Verdict } from "./providers/Provider.ts"
 import { claude, nameThread } from "./providers/Claude.ts"
 import { codex } from "./providers/Codex.ts"
 import { ollama } from "./providers/Ollama.ts"
@@ -28,7 +28,7 @@ export interface Hub {
 }
 
 interface Pending {
-  readonly done: (allow: boolean) => void
+  readonly done: (verdict: Verdict) => void
   /** What the thread's access makes of the call now. */
   readonly recheck?: (() => "allow" | "deny" | "ask") | undefined
 }
@@ -36,6 +36,8 @@ interface Pending {
 interface Live {
   readonly abort: AbortController
   readonly asks: Map<string, Pending>
+  /** The person pressed Deny in this turn: an agent stopping after that is doing as told. */
+  declined?: boolean
 }
 
 const now = () => new Date().toISOString()
@@ -87,6 +89,52 @@ const CARD_HEADER = "# Check scripts earlier sessions here ran"
 
 /** The session singularity keeps a thread's hand-overs under, whichever provider runs it. */
 export const memorySession = (t: { readonly id: string }): string => `zero-${t.id}`
+
+/**
+ * Told to every agent, every turn, whichever provider: an error from a tool is not the person
+ * saying no. (An agent that took a dropped approval for a refusal ended its turn mid-edit,
+ * silent, with the project left broken.)
+ */
+export const TOOL_FAILURE_NOTE = [
+  "# When a tool call fails",
+  "",
+  "A tool call that errors (a timeout, a dropped connection, a crash, an approval that couldn't be asked) is not",
+  "the person saying no. Only a result that says the person declined is a no. When a call errors, check whether it",
+  "took effect, retry it once if it didn't, and carry on. If it still fails, don't end your turn silently: say what",
+  "is done, what isn't, and anything you left broken."
+].join("\n")
+
+/** What an agent wrote after its last failed tool call before it may end the turn, at least. */
+const REPORT_MIN = 200
+
+/**
+ * The failed tool call a turn stopped on, if it did: the turn's last tool call failed, the
+ * person didn't decline anything, and the agent said next to nothing after it. `items` are
+ * the turn's own, in order. (A short "No response requested." after a failed edit is a stall;
+ * a paragraph saying what broke is a report.)
+ */
+export const stalledOn = (items: ReadonlyArray<Item>, declined: boolean): (Item & { kind: "tool" }) | undefined => {
+  if (declined) return undefined
+  let last = -1
+  for (let i = items.length - 1; i >= 0; i--) if (items[i]!.kind === "tool") { last = i; break }
+  const tool = items[last]
+  if (!tool || tool.kind !== "tool" || tool.status !== "failed") return undefined
+  const after = items.slice(last + 1)
+  if (after.some((i) => i.kind === "permission" && i.state === "denied")) return undefined
+  const said = after.reduce((n, i) => n + (i.kind === "assistant" ? i.text.trim().length : 0), 0)
+  return said < REPORT_MIN ? tool : undefined
+}
+
+/** zero's follow-up to an agent that stopped on a failed call: from zero, not the person. */
+export const followUp = (tool: Item & { kind: "tool" }): string => {
+  const why = tool.output.trim().replace(/\s+/g, " ").slice(0, 400) || "no output"
+  return [
+    "(From zero, which runs this thread, not from the person.)",
+    `Your turn ended right after a tool call failed: ${tool.name} ${tool.detail} -> ${why}`,
+    "That error came from the tool, not from the person. Check whether the call took effect, retry it once if it",
+    "didn't, and carry on with the task. If you can't finish, say plainly what is done, what isn't, and anything left broken."
+  ].join("\n")
+}
 
 export const recalledTitle = (text: string): string => /committed as \w+: "([^"]+)"/.exec(text)?.[1] ?? "a past change"
 
@@ -168,30 +216,34 @@ export const makeThreads = (options: {
         // now if the new access settles it (auto-edit allows an edit, read-only denies it).
         for (const p of [...(live.get(t.id)?.asks.values() ?? [])]) {
           const verdict = p.recheck?.()
-          if (verdict === "allow") p.done(true)
-          else if (verdict === "deny") p.done(false)
+          if (verdict === "allow") p.done("allowed")
+          else if (verdict === "deny") p.done("refused")
         }
       }
       if (patch.title?.trim()) t.title = patch.title.trim().slice(0, 120)
       if (patch.pinned === true) t.pinned = true
       else if (patch.pinned === false) delete t.pinned
-      touch(t)
+      // Pinning isn't activity: the thread keeps its age, so unpinning puts it back where it was.
+      const onlyPin = Object.keys(patch).every((k) => k === "pinned")
+      if (onlyPin) hub.send("thread", metaOf(t))
+      else touch(t)
       store.saveThread(t)
     }
 
-    const ask = (t: Thread, l: Live) => (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask"): Promise<boolean> =>
+    const ask = (t: Thread, l: Live) => (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask"): Promise<Verdict> =>
       new Promise((resolve) => {
         const item: Item = { kind: "permission", id: newId("ask"), at: now(), tool, detail, state: "pending" }
         put(t, item, false)
-        const done = (allow: boolean) => {
+        const done = (verdict: Verdict) => {
           if (!l.asks.has(item.id)) return
           l.asks.delete(item.id)
-          item.state = allow ? "allowed" : "denied"
+          item.state = verdict === "allowed" ? "allowed" : "denied"
+          if (verdict === "declined") l.declined = true
           put(t, item, false)
-          resolve(allow)
+          resolve(verdict)
         }
         l.asks.set(item.id, { done, recheck })
-        l.abort.signal.addEventListener("abort", () => l.asks.has(item.id) && done(false), { once: true })
+        l.abort.signal.addEventListener("abort", () => l.asks.has(item.id) && done("stopped"), { once: true })
       })
 
     /**
@@ -403,11 +455,21 @@ export const makeThreads = (options: {
           ? yield* loadGenome(options.zeroRoot).pipe(Effect.map(solverPrompt), Effect.orElseSucceed(() => ""))
           : ""
         // Every turn in a repo with memory is told what singularity is and how to recall mid-task.
-        const instructions = [genome, remembers ? MEMORY_NOTE : ""].filter((s) => s !== "").join("\n\n")
+        const instructions = [genome, remembers ? MEMORY_NOTE : "", compact ? "" : TOOL_FAILURE_NOTE].filter((s) => s !== "").join("\n\n")
 
         if (compact && !l.abort.signal.aborted) startCompaction()
+        const start = t.items.length
         // Stopped while the message was queued: it's on the thread, but doesn't run.
-        const outcome = l.abort.signal.aborted ? { outcome: "stopped" as const, error: "" } : yield* run(prompt, instructions, remembers)
+        let outcome = l.abort.signal.aborted ? { outcome: "stopped" as const, error: "" } : yield* run(prompt, instructions, remembers)
+        // An agent that stopped on a failed call, without a word on where things stand, is sent on once,
+        // by zero and saying so: not after a Stop, a Deny, or in a read-only thread, where stopping is right.
+        const stuck = outcome.outcome === "done" && !compact && !l.abort.signal.aborted && t.access !== "read-only"
+          ? stalledOn(t.items.slice(start), l.declined === true)
+          : undefined
+        if (stuck) {
+          put(t, { kind: "followup", id: newId("f"), at: now(), reason: `${stuck.name} ${stuck.detail}`.trim() })
+          outcome = yield* run(followUp(stuck), instructions, remembers)
+        }
         const result = l.abort.signal.aborted && outcome.outcome === "done" ? { outcome: "stopped" as const, error: "" } : outcome
         // Tool calls (and a compaction) a stopped turn left running didn't finish.
         for (const i of t.items) if (i.kind === "tool" && i.status === "running" && result.outcome !== "done") put(t, { ...i, status: "failed" })
@@ -465,7 +527,7 @@ export const makeThreads = (options: {
       answer: (id: string, askId: string, allow: boolean) => {
         const pending = live.get(id)?.asks.get(askId)
         if (!pending) return false
-        pending.done(allow)
+        pending.done(allow ? "allowed" : "declined")
         return true
       },
       stopAll: () => {
