@@ -65,6 +65,8 @@ export interface TurnInput {
    */
   readonly ask: (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask") => Promise<boolean>
   readonly signal: AbortSignal
+  /** What memory adds after a tool call, given Claude Code's PostToolUse input; providers without hooks skip it. */
+  readonly afterTool?: ((input: Readonly<Record<string, unknown>>) => Promise<string | undefined>) | undefined
 }
 
 export interface ProviderStatus {

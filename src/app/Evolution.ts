@@ -11,7 +11,7 @@ import { BENCH_WORK_DIR, loadTasks } from "../Bench.ts"
 import { GENOME_DIR, GENOME_FILES, loadGenome } from "../Genome.ts"
 import { changes, revert } from "../Git.ts"
 import { attempts, readLedger, totalCost } from "../Ledger.ts"
-import { cleanEnv } from "../Proc.ts"
+import { envFor } from "../Proc.ts"
 import { Memory, type StoredChange } from "../Singularity.ts"
 import type { Hub } from "./Threads.ts"
 
@@ -62,8 +62,14 @@ export const parseJobRequest = (body: unknown, knownTasks: ReadonlyArray<string>
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
 
-export const makeEvolution = (options: { readonly root: string; readonly cli: string; readonly hub: Hub }) => {
-  const { root, cli, hub } = options
+export const makeEvolution = (options: {
+  readonly root: string
+  readonly cli: string
+  readonly hub: Hub
+  /** Why runs can't start yet (the installed app's clone of zero isn't ready), or undefined. */
+  readonly blocked?: (() => string | undefined) | undefined
+}) => {
+  const { root, cli, hub, blocked } = options
   let job: Job | undefined
   let child: ChildProcess | undefined
   let nextId = 1
@@ -85,7 +91,7 @@ export const makeEvolution = (options: { readonly root: string; readonly cli: st
     job = { id, request, startedAt: new Date().toISOString(), state: "running", exitCode: null, endedAt: null }
     log.length = 0
     pushLine(`$ zero ${jobArgs(request).join(" ")}`)
-    child = spawn(process.execPath, [cli, ...jobArgs(request)], { cwd: root, env: cleanEnv(), windowsHide: true })
+    child = spawn(process.execPath, [cli, ...jobArgs(request)], { cwd: root, env: envFor(process.execPath), windowsHide: true })
     for (const stream of [child.stdout, child.stderr]) {
       let pending = ""
       stream?.setEncoding("utf8")
@@ -160,6 +166,8 @@ export const makeEvolution = (options: { readonly root: string; readonly cli: st
   const request = (body: unknown) =>
     Effect.gen(function*() {
       if (running()) return { status: 409, body: { error: "a run is already going; stop it first" } }
+      const why = blocked?.()
+      if (why) return { status: 409, body: { error: why } }
       const tasks = (yield* loadTasks(join(root, "bench")).pipe(Effect.orElseSucceed(() => []))).map((t) => t.id)
       const parsed = parseJobRequest(body, tasks)
       if (typeof parsed === "string") return { status: 400, body: { error: parsed } }

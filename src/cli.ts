@@ -7,7 +7,8 @@
  *     node src/cli.ts evolve [--generations N] [--budget-usd X] [--reps N] generations in a row, each in a fresh process
  *     node src/cli.ts solve TASK... [--cwd DIR]                  the evolved solver on a real repo, with memory
  *     node src/cli.ts lineage                                    what was tried, what won, what singularity stored
- *     node src/cli.ts ui [--port 4747]                           the control plane in a browser
+ *
+ * The control plane is a desktop app: `npm run app` (src/desktop/main.ts).
  */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime"
 import * as NodeServices from "@effect/platform-node/NodeServices"
@@ -23,7 +24,6 @@ import { runProcess } from "./Proc.ts"
 import * as Singularity from "./Singularity.ts"
 import { Memory } from "./Singularity.ts"
 import { solve } from "./Solve.ts"
-import { startServer } from "./app/Server.ts"
 
 /** zero's own repo: the folder above src/. */
 const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "")
@@ -156,12 +156,6 @@ const lineage = Command.make(
   })
 ).pipe(Command.withDescription("every attempt, kept or not, and what singularity stored"))
 
-const ui = Command.make(
-  "ui",
-  { port: Flag.Int("port").pipe(Flag.withDefault(4747), Flag.withDescription("the local port to serve on")) },
-  (args) => startServer({ root: ROOT, cli: CLI, port: args.port })
-).pipe(Command.withDescription("open the control plane: chat with Claude, Codex or Ollama in your projects, and run zero"))
-
 /** Expected failures get one line and exit code 2, not a stack trace. */
 const reportError = (e: { readonly message: string }) =>
   Console.error(`error: ${e.message}`).pipe(Effect.andThen(Effect.sync(() => (process.exitCode = 2))))
@@ -170,7 +164,7 @@ const services = Layer.mergeAll(Claude.layer, Singularity.layer).pipe(Layer.prov
 
 Command.make("zero").pipe(
   Command.withDescription("a recursive self-improving agent built on singularity's memory"),
-  Command.withSubcommands([bench, generation, evolve, solveCommand, lineage, ui]),
+  Command.withSubcommands([bench, generation, evolve, solveCommand, lineage]),
   Command.run({ version: "0.1.0" }),
   Effect.catchTags({
     AgentError: reportError,

@@ -61,6 +61,13 @@ export const cleanEnv = (extra: Readonly<Record<string, string | undefined>> = {
   return env
 }
 
+/**
+ * `cleanEnv` for a child that runs `command`. In the desktop app `process.execPath` is
+ * Electron, and ELECTRON_RUN_AS_NODE makes it act as Node; any other child is left alone.
+ */
+export const envFor = (command: string, extra: Readonly<Record<string, string | undefined>> = {}): Record<string, string> =>
+  cleanEnv(command === process.execPath && process.versions.electron ? { ...extra, ELECTRON_RUN_AS_NODE: "1" } : extra)
+
 /** Run `command` with `args`, no shell. */
 export const runProcess = Effect.fn("Proc.run")(function*(
   command: string,
@@ -80,7 +87,7 @@ export const runProcess = Effect.fn("Proc.run")(function*(
     Effect.gen(function*() {
       const handle = yield* spawner.spawn(ChildProcess.make(command, args, {
         cwd: options.cwd,
-        env: cleanEnv(options.env),
+        env: envFor(command, options.env),
         extendEnv: false,
         stdin: options.input === undefined ? "ignore" : Stream.make(new TextEncoder().encode(options.input))
       }))
@@ -121,8 +128,22 @@ export const tail = (text: string, n = 2000): string => (text.length <= n ? text
 export const singularityCommand = (): readonly [string, ReadonlyArray<string>] => {
   const named = process.env["ZERO_SINGULARITY"]
   if (named !== undefined && named !== "") return [named, []]
-  const home = process.env["SINGULARITY_HOME"] ?? join(homedir(), ".singularity")
-  const cli = join(home, "app", "apps", "cli", "src", "singularity.ts")
+  const cli = join(singularityApp(), "singularity.ts")
   if (existsSync(cli)) return [process.execPath, [cli]]
   return ["singularity", []]
+}
+
+/** Where an install keeps singularity's CLI sources (apps/cli/src). */
+const singularityApp = () => join(process.env["SINGULARITY_HOME"] ?? join(homedir(), ".singularity"), "app", "apps", "cli", "src")
+
+/**
+ * singularity's hook script, the one its setup gives Claude Code: the hand-over at a task's start
+ * and the notes on `git show`. `ZERO_SINGULARITY_HOOK` names it; otherwise an install's; otherwise
+ * none, and zero falls back to `recall`.
+ */
+export const singularityHook = (): string | undefined => {
+  const named = process.env["ZERO_SINGULARITY_HOOK"]
+  if (named !== undefined && named !== "") return named
+  const script = join(singularityApp(), "workflows", "hook.ts")
+  return existsSync(script) ? script : undefined
 }

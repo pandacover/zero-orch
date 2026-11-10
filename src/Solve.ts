@@ -12,11 +12,11 @@ import { Agent } from "./Claude.ts"
 import { type Genome, solverPrompt } from "./Genome.ts"
 import { head } from "./Git.ts"
 import { repoPolicy } from "./Policy.ts"
-import { Memory, MEMORY_NOTE, type Recall } from "./Singularity.ts"
+import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "./Singularity.ts"
 
 export const SOLVE_BUDGET_USD = 10
 
-export const solvePrompt = (task: string, recall: Option.Option<Recall>): string =>
+export const solvePrompt = (task: string, recall: Option.Option<{ readonly text: string }>): string =>
   [
     task.trim(),
     "",
@@ -35,8 +35,16 @@ export const solve = Effect.fn("Solve.run")(function*(input: {
   const agent = yield* Agent
   const memory = yield* Memory
   const before = yield* head(input.cwd)
-  const recall = yield* memory.recall(input.task, input.cwd).pipe(Effect.orElseSucceed(() => Option.none<Recall>()))
-  input.log(Option.isSome(recall) ? `singularity handed over ${recall.value.commit.slice(0, 10)}` : "singularity: no past change like this here")
+  // One session for the hand-over and the notes on `git show`, so neither repeats the other.
+  const session = `zero-solve-${Date.now().toString(36)}`
+  const recall = yield* memory.handOver({ session, prompt: input.task, cwd: input.cwd, startsTask: true }).pipe(Effect.orElseSucceed(() => Option.none<HandOver>()))
+  input.log(
+    Option.isNone(recall)
+      ? "singularity: no past change like this here"
+      : recall.value.commit !== null
+      ? `singularity handed over ${recall.value.commit.slice(0, 10)}`
+      : "singularity handed over check scripts"
+  )
   const run = yield* agent.run({
     prompt: solvePrompt(input.task, recall),
     cwd: input.cwd,
@@ -48,7 +56,8 @@ export const solve = Effect.fn("Solve.run")(function*(input: {
     systemAppend: `${solverPrompt(input.genome)}\n\n${MEMORY_NOTE}`,
     policy: repoPolicy(input.cwd),
     persist: true,
-    onEvent: input.log
+    onEvent: input.log,
+    afterTool: toolNotes(memory, session)
   })
   const after = yield* head(input.cwd)
   if (after !== before) {

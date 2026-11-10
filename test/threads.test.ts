@@ -107,7 +107,14 @@ describe("memory at each task start", () => {
       }
     }
     let given: TurnInput | undefined
-    PROVIDERS.claude = { ...real, turn: (async function*(input: TurnInput) { given = input }) as Provider["turn"] }
+    // A message that says "and commit" commits, as an agent would: the next request starts a new task.
+    PROVIDERS.claude = {
+      ...real,
+      turn: (async function*(input: TurnInput) {
+        given = input
+        if (input.prompt.includes("and commit")) execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "done"], { cwd: input.cwd })
+      }) as Provider["turn"]
+    }
     const layer = Layer.mergeAll(memory, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
     const t = await Effect.gen(function*() {
       const store = yield* Store
@@ -117,11 +124,23 @@ describe("memory at each task start", () => {
       for (const message of options.messages ?? ["add a retry to the fetch helper"]) yield* threads.turn(t, project, message)
       return store.thread(t.id)!
     }).pipe(Effect.provide(layer), Effect.runPromise)
-    return { t, given: given!, memories: t.items.filter((i): i is Item & { kind: "memory" } => i.kind === "memory") }
+    const memories = t.items.filter((i): i is Item & { kind: "memory" } => i.kind === "memory")
+    // What the task starts were handed (a commit's "stored" or "not stored" row aside).
+    return { t, given: given!, memories: memories.filter((m) => m.action === "recalled" || m.action === "checked") }
   }
 
-  const memoryWith = (recall: Singularity.Memory["Service"]["recall"]) =>
-    Layer.succeed(Singularity.Memory, Singularity.Memory.of({ recall, store: () => Effect.void, changes: () => Effect.succeed([]) }))
+  /** Memory that answers like `recall` does without singularity's hook script: only where zero says a task starts. */
+  const memoryWith = (recall: Singularity.Memory["Service"]["recall"], seen: Array<{ prompt: string; startsTask: boolean; session: string }> = []) =>
+    Layer.succeed(Singularity.Memory, Singularity.Memory.of({
+      recall,
+      handOver: ({ prompt, cwd, startsTask, session }) => {
+        seen.push({ prompt, startsTask, session })
+        return startsTask ? recall(prompt, cwd).pipe(Effect.map(Option.map((r) => ({ text: r.text, commit: r.commit })))) : Effect.succeedNone
+      },
+      afterTool: () => Effect.succeedNone,
+      store: () => Effect.void,
+      changes: () => Effect.succeed([])
+    }))
 
   it("hands the agent the recalled change and tells it about singularity", async () => {
     const text = '# A past change in this repository like your task\n\ncommitted as abc1234567: "Retry the upload helper"'
@@ -143,7 +162,34 @@ describe("memory at each task start", () => {
     expect(memories).toMatchObject([{ action: "checked", title: "singularity didn't answer: singularity recall: not found" }])
   })
 
-  it("asks again at each message, and doesn't hand over the same change twice", async () => {
+  it("hands over only where a task starts: the first request, and the first after a commit", async () => {
+    const seen: Array<{ prompt: string; startsTask: boolean; session: string }> = []
+    const text = '# A past change in this repository like your task\n\ncommitted as abc1234567: "Retry the upload helper"'
+    const recall = () => Effect.succeed(Option.some({ commit: "abc1234567ff", text, score: 0.8 }))
+    const { t, memories } = await firstTurn(memoryWith(recall, seen), { messages: ["add a retry", "make it three tries and commit", "now fix the bench flags"] })
+    expect(seen.map((s) => s.startsTask)).toEqual([true, false, true])
+    expect(new Set(seen.map((s) => s.session))).toEqual(new Set([`zero-${t.id}`]))
+    // The follow-up got nothing, not even a "checked" row; the new task after the commit was checked again.
+    expect(memories.map((m) => m.action)).toEqual(["recalled", "checked"])
+    expect(memories[1]!.title).toBe("the same past change as earlier in this thread: Retry the upload helper")
+  })
+
+  it("shows check scripts singularity handed over without a past change", async () => {
+    const card = "# Check scripts earlier sessions here ran\n\n- scripts/e2e.mjs"
+    const memory = Layer.succeed(Singularity.Memory, Singularity.Memory.of({
+      recall: () => Effect.succeedNone,
+      handOver: () => Effect.succeedSome({ text: card, commit: null }),
+      afterTool: () => Effect.succeedNone,
+      store: () => Effect.void,
+      changes: () => Effect.succeed([])
+    }))
+    const { given, memories } = await firstTurn(memory)
+    expect(given.prompt).toContain(card)
+    expect(given.afterTool).toBeTypeOf("function")
+    expect(memories).toMatchObject([{ action: "recalled", commit: "", title: "check scripts earlier sessions here ran" }])
+  })
+
+  it("doesn't hand over the same change twice in a thread", async () => {
     const text = (subject: string) => `# A past change in this repository like your task
 
 committed as abc1234567: "${subject}"`
@@ -154,8 +200,9 @@ committed as abc1234567: "${subject}"`
       const commit = task.startsWith("add") ? "aaaaaaaaaa11" : "bbbbbbbbbb22"
       return Effect.succeed(Option.some({ commit, text: text(task.startsWith("add") ? "Retry the upload helper" : "Fix the bench flags"), score: 0.8 }))
     }
-    const { given, memories } = await firstTurn(memoryWith(recall), { messages: ["add a retry", "rename the helper", "add a retry with backoff", "fix the bench flags"] })
-    expect(asked).toEqual(["add a retry", "rename the helper", "add a retry with backoff", "fix the bench flags"])
+    const messages = ["add a retry and commit", "rename the helper and commit", "add a retry with backoff and commit", "fix the bench flags"]
+    const { given, memories } = await firstTurn(memoryWith(recall), { messages })
+    expect(asked).toEqual(messages)
     expect(memories.map((m) => [m.action, m.commit])).toEqual([
       ["recalled", "aaaaaaaaaa11"],
       ["checked", ""],
