@@ -1069,8 +1069,20 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
     if (nodes.length) { insert(nodes); sync() }
   }
 
+  /** The send button: Stop while the thread works, Send otherwise. */
   const submit = async () => {
     if (busy) return onStop?.()
+    return sendNow()
+  }
+  /**
+   * Enter never stops a turn: someone typing their next message while the agent works hits Enter
+   * out of habit, and that used to stop the turn mid-call (the call then showed as failed).
+   */
+  const enter = () => {
+    if (!busy) return sendNow()
+    toast("Still working. Your message stays here until the turn ends; the square button or Esc stops it.")
+  }
+  const sendNow = async () => {
     if (disabled || uploading() || empty()) return
     const text = serialize(input).trim()
     send.disabled = true
@@ -1103,7 +1115,7 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
   input.addEventListener("input", () => { if (!recalling) recalled = -1; sync() })
   input.addEventListener("keydown", (e) => {
     // Shift+Enter is left to the browser: it breaks the line.
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); return }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); enter(); return }
     const plain = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.isComposing
     if (plain && (e.key === "ArrowUp" || e.key === "ArrowDown") && (recalled >= 0 || empty())) {
       if (recall(e.key === "ArrowUp" ? 1 : -1)) e.preventDefault()
@@ -2690,6 +2702,13 @@ document.addEventListener("keydown", (e) => {
   if (e.altKey && (e.key === "g" || e.key === "G") && gitPanel) {
     e.preventDefault()
     setGitOpen(!gitOpenNow())
+    return
+  }
+  // Escape with words selected (the Quote button up) puts the selection away; it doesn't stop the turn.
+  if (e.key === "Escape" && (quoteShown() || !(getSelection()?.isCollapsed ?? true)) && !typing) {
+    e.preventDefault()
+    hideQuote()
+    getSelection()?.removeAllRanges()
     return
   }
   if (e.key === "Escape" && S.open?.status === "running") {

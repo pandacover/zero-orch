@@ -10,7 +10,7 @@ import { cleanTitle, gate, summaryOf } from "../src/app/providers/Claude.ts"
 import type { Provider, TurnInput } from "../src/app/providers/Provider.ts"
 import * as StoreModule from "../src/app/Store.ts"
 import { Store } from "../src/app/Store.ts"
-import { lineBuffer, makeThreads, PROVIDERS, recalledTitle, stalledOn, TOOL_FAILURE_NOTE, turnCost, withEffort } from "../src/app/Threads.ts"
+import { cutShort, lineBuffer, makeThreads, PROVIDERS, recalledTitle, stalledOn, STOPPED_NOTE, TOOL_FAILURE_NOTE, turnCost, withEffort } from "../src/app/Threads.ts"
 import { notRun } from "../src/app/providers/Provider.ts"
 import { MemoryError } from "../src/Errors.ts"
 import * as Singularity from "../src/Singularity.ts"
@@ -38,6 +38,57 @@ describe("tool failures", () => {
     expect(stalledOn([tool("failed"), { kind: "permission", id: "p", at: "", tool: "Edit", detail: "a.ts", state: "denied" }], false)).toBeUndefined()
     expect(stalledOn([tool("failed"), said("x".repeat(250))], false)).toBeUndefined()
     expect(stalledOn([said("all done")], false)).toBeUndefined()
+  })
+
+  it("marks calls a Stop cut short as cut short by it, and doesn't send the agent on", async () => {
+    const home = mkdtempSync(join(tmpdir(), "zero-home-"))
+    const proj = mkdtempSync(join(tmpdir(), "zero-proj-"))
+    const real = PROVIDERS.claude
+    let stop = () => {}
+    let turns = 0
+    // As Claude does on a Stop: the call waiting on an approval fails with "Stream closed",
+    // and the one running is never heard from again.
+    PROVIDERS.claude = {
+      ...real,
+      turn: (async function*(input: TurnInput) {
+        turns++
+        yield { type: "tool", key: "e1", name: "Edit", detail: "a.ts", status: "running" }
+        yield { type: "tool", key: "b1", name: "Bash", detail: "sleep 60", status: "running" }
+        stop()
+        await new Promise((resolve) => input.signal.aborted ? resolve(null) : input.signal.addEventListener("abort", resolve))
+        yield { type: "tool", key: "e1", name: "Edit", detail: "a.ts", status: "failed", output: "Tool permission request failed: AbortError: Stream closed" }
+      }) as Provider["turn"]
+    }
+    try {
+      const memory = Layer.succeed(Singularity.Memory, Singularity.Memory.of({
+        recall: () => Effect.succeedNone,
+        handOver: () => Effect.succeedNone,
+        afterTool: () => Effect.succeedNone,
+        store: () => Effect.void,
+        changes: () => Effect.succeed([])
+      }))
+      const layer = Layer.mergeAll(memory, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
+      const t = await Effect.gen(function*() {
+        const store = yield* Store
+        const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: () => {} }, nameThread: async () => "" })
+        const project = yield* store.addProject(proj)
+        const t = threads.create(project, { access: "full-access" })
+        stop = () => threads.stop(t.id)
+        yield* threads.turn(t, project, "edit a.ts")
+        return store.thread(t.id)!
+      }).pipe(Effect.provide(layer), Effect.runPromise)
+      const tools = t.items.filter((i): i is Item & { kind: "tool" } => i.kind === "tool")
+      expect(tools.map((i) => [i.name, i.status])).toEqual([["Edit", "failed"], ["Bash", "failed"]])
+      for (const i of tools) expect(i.output).toContain(STOPPED_NOTE)
+      expect(tools[0]!.output).toContain("Stream closed")
+      expect(t.items.at(-1)).toMatchObject({ kind: "turn", outcome: "stopped" })
+      expect(t.items.some((i) => i.kind === "followup")).toBe(false)
+      expect(turns).toBe(1)
+      expect(cutShort(cutShort("x"))).toBe(cutShort("x"))
+    } finally {
+      PROVIDERS.claude = real
+      for (const d of [home, proj]) rmSync(d, { recursive: true, force: true })
+    }
   })
 })
 

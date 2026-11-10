@@ -104,6 +104,10 @@ export const TOOL_FAILURE_NOTE = [
   "is done, what isn't, and anything you left broken."
 ].join("\n")
 
+/** What a tool card says when the turn was stopped while it ran: the stop ended it, it didn't end the turn. */
+export const STOPPED_NOTE = "(The turn was stopped while this call ran: the stop ended the call, not the other way round.)"
+export const cutShort = (output: string): string => (output.includes(STOPPED_NOTE) ? output : [output.trim(), STOPPED_NOTE].filter(Boolean).join("\n"))
+
 /** What an agent wrote after its last failed tool call before it may end the turn, at least. */
 const REPORT_MIN = 200
 
@@ -356,7 +360,10 @@ export const makeThreads = (options: {
                   put(t, compaction, false)
                 } else if (e.type === "tool") {
                   flushText()
-                  put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output: e.output ?? "" })
+                  // A call that fails once the turn is stopped failed because of the stop (Claude's "Stream closed"),
+                  // not the other way round: its card says so.
+                  const output = e.status === "failed" && l.abort.signal.aborted ? cutShort(e.output ?? "") : e.output ?? ""
+                  put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output })
                 } else if (e.type === "context") {
                   t.context = { used: e.used, limit: e.limit }
                   hub.send("thread", metaOf(t))
@@ -472,7 +479,10 @@ export const makeThreads = (options: {
         }
         const result = l.abort.signal.aborted && outcome.outcome === "done" ? { outcome: "stopped" as const, error: "" } : outcome
         // Tool calls (and a compaction) a stopped turn left running didn't finish.
-        for (const i of t.items) if (i.kind === "tool" && i.status === "running" && result.outcome !== "done") put(t, { ...i, status: "failed" })
+        for (const i of t.items) {
+          if (i.kind !== "tool" || i.status !== "running" || result.outcome === "done") continue
+          put(t, { ...i, status: "failed", output: result.outcome === "stopped" ? cutShort(i.output) : i.output })
+        }
         if (compaction?.state === "running") put(t, { ...compaction, state: result.outcome === "done" ? "done" : "failed" })
 
         // A commit this turn made: let singularity keep it.
