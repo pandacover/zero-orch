@@ -9,6 +9,8 @@
  * person's clicks, each one `gh` or `git` command.
  */
 import { execFile } from "node:child_process"
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 
 export interface Exec {
   readonly ok: boolean
@@ -323,12 +325,50 @@ export const gitView = async (cwd: string, branch: string | undefined, exec: Run
   }
 }
 
+/** Most of a diff a page shows, or a model reads to write a commit message. */
+const MAX_DIFF = 200_000
+
+/**
+ * One changed file's diff against HEAD, staged and not; a new file shows as all additions. Only a path
+ * `git status` lists right now, so a page can't read any other file this way. Undefined when it isn't one.
+ */
+export const fileDiff = async (cwd: string, path: string, exec: Run = run): Promise<string | undefined> => {
+  const status = await text(exec, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], true)
+  const change = status === null ? undefined : parseStatus(status).find((c) => c.path === path)
+  if (!change) return undefined
+  if (change.status === "??") {
+    const body = await readFile(join(cwd, path), "utf8").catch(() => "")
+    if (body.includes("\0")) return `new binary file ${path}`
+    const lines = body.split("\n")
+    if (lines.at(-1) === "") lines.pop()
+    return `new file ${path}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => `+${l}`).join("\n")}`.slice(0, MAX_DIFF)
+  }
+  const head = await text(exec, cwd, ["rev-parse", "--verify", "--quiet", "HEAD"])
+  const diff = await text(exec, cwd, head ? ["diff", "--no-color", "--no-ext-diff", "HEAD", "--", path] : ["diff", "--no-color", "--no-ext-diff", "--cached", "--", path], true)
+  return (diff ?? "").slice(0, MAX_DIFF)
+}
+
+/** Everything uncommitted, for a model to describe: the stat, then the diff, cut to `limit` characters, and new files' names. */
+export const pendingChange = async (cwd: string, limit = 12_000, exec: Run = run): Promise<string> => {
+  const status = await text(exec, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], true)
+  const changes = status === null ? [] : parseStatus(status)
+  const head = await text(exec, cwd, ["rev-parse", "--verify", "--quiet", "HEAD"])
+  const base = head ? ["HEAD"] : ["--cached"]
+  const stat = (await text(exec, cwd, ["diff", "--no-color", "--stat", ...base])) ?? ""
+  const diff = (await text(exec, cwd, ["diff", "--no-color", "--no-ext-diff", ...base], true)) ?? ""
+  const added = changes.filter((c) => c.status === "??").map((c) => c.path)
+  return [stat, added.length ? `New files: ${added.join(", ")}` : "", diff.length > limit ? `${diff.slice(0, limit)}\n… (diff cut)` : diff]
+    .filter((s) => s.trim() !== "").join("\n\n")
+}
+
 export type GitAction =
   | { readonly kind: "comment"; readonly number: number; readonly body: string }
   | { readonly kind: "ready"; readonly number: number; readonly draft: boolean }
   | { readonly kind: "rerun"; readonly runId: string }
   | { readonly kind: "merge"; readonly number: number; readonly method: "squash" | "merge" | "rebase"; readonly deleteBranch: boolean }
   | { readonly kind: "push"; readonly branch: string }
+  /** Everything in the working tree, committed with `message`. */
+  | { readonly kind: "commit"; readonly message: string }
   | { readonly kind: "create"; readonly branch: string; readonly base: string; readonly title: string; readonly body: string; readonly draft: boolean }
 
 const isPrNumber = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x > 0
@@ -356,6 +396,10 @@ export const parseAction = (kind: string, body: Record<string, unknown>): GitAct
     }
     case "push":
       return isRefName(str(body["branch"])) ? { kind, branch: str(body["branch"]) } : "which branch?"
+    case "commit": {
+      const message = str(body["message"]).trim()
+      return message ? { kind, message: message.slice(0, 10_000) } : "write a commit message first"
+    }
     case "create": {
       const branch = str(body["branch"])
       const base = str(body["base"])
@@ -383,6 +427,8 @@ export const commandsFor = (a: GitAction): Array<{ cmd: "git" | "gh"; args: Arra
       return [{ cmd: "gh", args: ["pr", "merge", String(a.number), `--${a.method}`, ...(a.deleteBranch ? ["--delete-branch"] : [])] }]
     case "push":
       return [{ cmd: "git", args: ["push", "--set-upstream", "origin", `refs/heads/${a.branch}:refs/heads/${a.branch}`] }]
+    case "commit":
+      return [{ cmd: "git", args: ["add", "--all"] }, { cmd: "git", args: ["commit", "--file", "-"], input: a.message }]
     case "create":
       return [
         { cmd: "git", args: ["push", "--set-upstream", "origin", `refs/heads/${a.branch}:refs/heads/${a.branch}`] },

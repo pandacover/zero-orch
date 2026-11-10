@@ -9,7 +9,8 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
-import { gitView, parseAction, runAction } from "./GitInfo.ts"
+import { fileDiff, gitView, parseAction, pendingChange, runAction } from "./GitInfo.ts"
+import { commitMessage } from "./providers/Claude.ts"
 import { type Access, ACCESSES, compactionOffered, metaOf, type ProviderId } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
@@ -122,7 +123,11 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
       if (m === "GET" && parts.length === 2) return reply(200, thread)
       if (m === "PATCH" && parts.length === 2) {
         if (threads.isRunning(thread.id) && (body["provider"] || body["model"])) return error(409, "wait for the turn to end before switching models")
-        threads.update(thread, { ...(typeof body["title"] === "string" ? { title: body["title"] } : {}), ...choices(body) })
+        threads.update(thread, {
+          ...(typeof body["title"] === "string" ? { title: body["title"] } : {}),
+          ...(typeof body["pinned"] === "boolean" ? { pinned: body["pinned"] } : {}),
+          ...choices(body)
+        })
         return reply(200, metaOf(thread))
       }
       if (m === "DELETE" && parts.length === 2) {
@@ -157,6 +162,20 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
         const project = store.project(thread.projectId)
         if (!project) return error(409, "this thread's project was removed")
         if (m === "GET" && parts.length === 3) return reply(200, await gitView(project.path, thread.branch))
+        // One changed file's diff, for the panel's file list.
+        if (m === "GET" && parts[3] === "diff" && parts[4] && parts.length === 5) {
+          const diff = await fileDiff(project.path, decodeURIComponent(parts[4]))
+          return diff === undefined ? error(404, "that file has no uncommitted change") : reply(200, { diff })
+        }
+        // A commit message for what's uncommitted, from the small model that names threads.
+        if (m === "POST" && parts[3] === "message" && parts.length === 4) {
+          const s = store.settings()
+          if (!s.claude.enabled) return error(409, "a commit message needs Claude, which is turned off in settings")
+          const change = await pendingChange(project.path)
+          if (!change) return error(409, "there's nothing to commit")
+          const message = await commitMessage(change, s.titles.model)
+          return message ? reply(200, { message }) : error(502, "the model didn't answer; write the message yourself")
+        }
         if (m === "POST" && parts[3] && parts.length === 4) {
           const action = parseAction(parts[3], body)
           if (typeof action === "string") return error(400, action)

@@ -214,16 +214,34 @@ const contextOf = async (q: Query): Promise<{ used: number; limit: number } | un
 
 const TITLE_PROMPT = `You name conversations with a coding agent. Reply with a title for the conversation that starts with the person's message: 3 to 7 words, sentence case, no quotes, no trailing period, nothing else. Name the task, not the person ("Fix flaky login test", "Add dark mode toggle").`
 
+const COMMIT_PROMPT = `You write git commit messages. Reply with the message only: a subject line in the imperative mood, at most 72 characters, saying what the change does ("Retry failed uploads three times"). Add a blank line and at most three short lines on why only when the subject can't carry it. No code fences, quotes, labels or prefixes like "feat:".`
+
 /** A title for a thread from its first message, by a small model (no tools, no session kept); "" when it can't. */
-export const nameThread = async (message: string, model: string): Promise<string> => {
+export const nameThread = async (message: string, model: string): Promise<string> =>
+  cleanTitle(await answer(`<message>\n${message.slice(0, 4000)}\n</message>`, TITLE_PROMPT, model))
+
+/** A commit message for the uncommitted change (GitInfo `pendingChange`), by a small model; "" when it can't. */
+export const commitMessage = async (change: string, model: string): Promise<string> =>
+  cleanMessage(await answer(`<change>\n${change}\n</change>`, COMMIT_PROMPT, model))
+
+/** A model's answer as a commit message: no code fence, subject first, at most 72 characters on it. */
+export const cleanMessage = (raw: string): string => {
+  const lines = raw.replace(/^```\w*\n?|\n?```\s*$/g, "").trim().split("\n").map((l) => l.trimEnd())
+  const subject = (lines[0] ?? "").replace(/^(subject|commit message)\s*:\s*/i, "").replace(/^["'`]+|["'`]+$/g, "").trim()
+  if (!subject) return ""
+  return [subject.length > 72 ? subject.slice(0, 72).trimEnd() : subject, ...lines.slice(1)].join("\n").trim()
+}
+
+/** A small model's one answer, with no tools and no session kept; "" when it can't answer in 30 seconds. */
+const answer = async (prompt: string, system: string, model: string): Promise<string> => {
   const abort = new AbortController()
   const timer = setTimeout(() => abort.abort(), 30_000)
   try {
     const messages = query({
-      prompt: `<message>\n${message.slice(0, 4000)}\n</message>`,
+      prompt,
       options: {
         model,
-        systemPrompt: TITLE_PROMPT,
+        systemPrompt: system,
         tools: [],
         maxTurns: 1,
         settingSources: [],
@@ -233,7 +251,7 @@ export const nameThread = async (message: string, model: string): Promise<string
       }
     })
     for await (const m of messages as AsyncIterable<SDKMessage>) {
-      if (m.type === "result") return m.subtype === "success" ? cleanTitle(m.result) : ""
+      if (m.type === "result") return m.subtype === "success" ? m.result : ""
     }
     return ""
   } catch {

@@ -177,6 +177,8 @@ function renderSide() {
   const q = S.query.trim().toLowerCase()
   const byProject = new Map(S.projects.map((p) => [p.id, []]))
   for (const t of S.threads) byProject.get(t.projectId)?.push(t)
+  // Pinned threads first, each group newest first as S.threads is.
+  for (const list of byProject.values()) list.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
   const shown = S.projects.flatMap((p) => {
     const all = byProject.get(p.id) ?? []
     if (!q || p.name.toLowerCase().includes(q)) return [[p, all]]
@@ -196,16 +198,19 @@ function renderSide() {
       el("ul", { class: "threads", inert: closed },
         threads.length === 0
           ? el("li", { class: "none", text: "No threads yet" })
-          : threads.map((t) => el("li", { class: "thread-row" },
+          : threads.map((t) => el("li", { class: `thread-row${t.pinned ? " pinned" : ""}` },
             el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null },
               t.status === "running" ? el("span", { class: S.asking.has(t.id) ? "ask-dot" : "run-dot", title: S.asking.has(t.id) ? "Waiting for your approval" : "Working" }) : null,
+              t.pinned ? el("span", { class: "pin-mark", title: "Pinned", html: PIN_ICON }) : null,
               el("span", { class: "t", text: t.title }),
               el("span", { class: "age", text: ago(t.updatedAt) })),
-            // Deleting lives here, on the row's hover, rather than in the thread's header.
+            // Pinning and deleting live here, on the row's hover, rather than in the thread's header.
+            el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail) }),
             el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })))))
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
 }
+const PIN_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/></svg>'
 const TRASH_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/></svg>'
 async function deleteThread(t) {
   if (!(await dialog({ title: "Delete this thread?", text: "Its messages are deleted from zero. Changes it made to the project stay.", ok: "Delete thread" }))) return
@@ -749,6 +754,14 @@ async function upload(file) {
   return data
 }
 
+/** Keep a sent prompt for Up-arrow recall: its words only (files don't come back), newest first, 50 at most. */
+function remember(text) {
+  const words = text.replace(ATT, "").trim()
+  if (!words) return
+  const past = load("prompts", []).filter((p) => p !== words)
+  save("prompts", [words, ...past].slice(0, 50))
+}
+
 /** The editor's content as text: line breaks as "\n", each file chip as its marker. */
 function serialize(root) {
   let out = ""
@@ -878,14 +891,36 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
       await onSend(text)
       input.replaceChildren()
       range = null
+      remember(text)
     } catch (e) { fail(e) }
     sync()
   }
 
-  input.addEventListener("input", sync)
+  // Up in an empty box brings back what was sent before, newest first; Down goes forward again.
+  // Typing into a recalled prompt makes it a draft: the arrows move the caret again.
+  let recalled = -1
+  let recalling = false
+  const recall = (step) => {
+    const past = load("prompts", [])
+    const next = recalled + step
+    if (next < -1 || next >= past.length) return false
+    recalled = next
+    recalling = true
+    input.replaceChildren()
+    input.focus()
+    if (next >= 0) document.execCommand("insertText", false, past[next])
+    recalling = false
+    sync()
+    return true
+  }
+  input.addEventListener("input", () => { if (!recalling) recalled = -1; sync() })
   input.addEventListener("keydown", (e) => {
     // Shift+Enter is left to the browser: it breaks the line.
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit() }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); return }
+    const plain = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.isComposing
+    if (plain && (e.key === "ArrowUp" || e.key === "ArrowDown") && (recalled >= 0 || empty())) {
+      if (recall(e.key === "ArrowUp" ? 1 : -1)) e.preventDefault()
+    }
   })
   input.addEventListener("paste", (e) => {
     const files = [...(e.clipboardData?.files ?? [])]
@@ -1505,6 +1540,8 @@ async function loadGit() {
     if (gitPanel !== g) return
     g.data = data
     g.error = ""
+    // The tree may have changed: open diffs are read again as they're painted.
+    g.diffs = new Map()
   } catch (e) {
     if (gitPanel !== g) return
     g.error = e.message
@@ -1565,9 +1602,7 @@ function paintGit() {
         el("span", { class: "git-when", text: ago(c.at), title: `${c.author} · ${new Date(c.at).toLocaleString()}` }))))
       : el("p", { class: "git-none", text: "No commits yet." })),
     gitSec("changes", d.current && d.current !== d.branch ? `Uncommitted on ${d.current}` : "Uncommitted changes", d.changes.length, d.changes.length
-      ? el("ul", { class: "git-list" }, d.changes.map((c) => el("li", { class: "git-file" },
-        el("span", { class: `git-chg chg-${changeWord(c.status)}`, text: changeWord(c.status), title: `git status: ${c.status}` }),
-        el("span", { class: "git-path", text: c.path, title: c.path }))))
+      ? el("div", {}, el("ul", { class: "git-list" }, d.changes.map((c) => changeRow(g, c))), commitBox(g))
       : el("p", { class: "git-none", text: "The working tree is clean." }), d.changes.length > 0 && d.changes.length <= 30)
   ]
   g.body.replaceChildren(...kids.filter(Boolean))
@@ -1579,6 +1614,61 @@ function paintGit() {
   const ta = g.body.querySelector(".git-comment textarea")
   if (ta && g.draft) ta.value = g.draft
   g.body.scrollTop = top
+}
+
+/** A changed file: its row opens its diff below it, read on demand and kept until the panel loads again. */
+function changeRow(g, c) {
+  g.openDiffs ??= new Set()
+  g.diffs ??= new Map()
+  const open = g.openDiffs.has(c.path)
+  const row = el("li", { class: `git-file${open ? " open" : ""}` },
+    el("button", { class: "git-file-btn", type: "button", "aria-expanded": String(open), title: `Show the diff of ${c.path}`, onclick: () => {
+      open ? g.openDiffs.delete(c.path) : g.openDiffs.add(c.path)
+      paintGit()
+    } },
+    el("span", { class: `git-chg chg-${changeWord(c.status)}`, text: changeWord(c.status), title: `git status: ${c.status}` }),
+    el("span", { class: "git-path", text: c.path, title: c.path })))
+  if (!open) return row
+  const diff = g.diffs.get(c.path)
+  if (diff === undefined) {
+    g.diffs.set(c.path, null)
+    api("GET", `threads/${g.threadId}/git/diff/${encodeURIComponent(c.path)}`).then(
+      (r) => { g.diffs.set(c.path, r.diff); if (gitPanel === g) paintGit() },
+      (e) => { g.diffs.set(c.path, `couldn't read the diff: ${e.message}`); if (gitPanel === g) paintGit() })
+  }
+  row.append(diff ? diffView(diff) : el("p", { class: "git-none", text: "Reading the diff…" }))
+  return row
+}
+
+/** A unified diff, its lines marked as added, removed or a hunk's header. */
+function diffView(text) {
+  const lines = text.split("\n")
+  if (lines.at(-1) === "") lines.pop()
+  const cut = lines.length > 2000
+  return el("pre", { class: "git-diff" }, ...(cut ? lines.slice(0, 2000) : lines).map((l) => el("span", {
+    class: l.startsWith("@@") ? "d-hunk" : l.startsWith("+") && !l.startsWith("+++") ? "d-add" : l.startsWith("-") && !l.startsWith("---") ? "d-del" : /^(diff |index |--- |\+\+\+ |new file|deleted file)/.test(l) ? "d-meta" : "",
+    text: `${l}\n`
+  })), cut ? el("span", { class: "d-meta", text: "… more lines than shown here" }) : null)
+}
+
+/** Commit everything uncommitted: the person's message, or one the small model writes from the diff. */
+function commitBox(g) {
+  const ta = el("textarea", { rows: 2, placeholder: "Commit message", "aria-label": "Commit message" })
+  ta.value = g.commitDraft ?? ""
+  const commit = el("button", { class: "btn btn-primary btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, async () => {
+    if (!ta.value.trim()) return toast("Write a commit message first, or let Claude write one.", true)
+    if (await gitAction("commit", { message: ta.value }, "Committed.")) g.commitDraft = ""
+  }) }, "Commit all")
+  const write = el("button", { class: "btn btn-quiet btn-xs", type: "button", title: "Claude's small model reads the diff and writes the message (about a tenth of a cent)", onclick: (e) => withBusy(e.currentTarget, async () => {
+    try {
+      const r = await api("POST", `threads/${g.threadId}/git/message`, {})
+      ta.value = g.commitDraft = r.message
+      ta.focus()
+    } catch (err) { fail(err) }
+  }) }, "Write message")
+  ta.addEventListener("input", () => { g.commitDraft = ta.value })
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit.click() } })
+  return el("div", { class: "git-comment git-commit-box" }, ta, el("div", { class: "git-comment-foot" }, el("span", { class: "hint", text: "Ctrl+Enter commits" }), write, commit))
 }
 
 /** A section that folds: a title, a count, then its content. */
@@ -2189,13 +2279,60 @@ function connect() {
     evoRefresh()
   }
   on["zero-state"] = evoRefresh
+  // A desktop notification clicked: its thread.
+  on["open"] = ({ threadId }) => { if (S.threads.some((t) => t.id === threadId)) go(`#/t/${threadId}`) }
   // The backend runs in this app, so the stream never drops: no reconnecting.
   zero.on((event, data) => on[event]?.(data))
 }
 
+// ---------- command palette ----------
+/** Ctrl+K (Cmd+K): every thread, project and place, filtered as you type; Enter goes, arrows choose. */
+function openPalette() {
+  const d = $("palette")
+  if (d.open) return
+  const entries = [
+    ...S.threads.map((t) => ({ label: t.title, hint: S.projects.find((p) => p.id === t.projectId)?.name ?? "", run: () => go(`#/t/${t.id}`) })),
+    ...S.projects.map((p) => ({ label: `New thread in ${p.name}`, hint: p.path, run: () => go(`#/new/${p.id}`) })),
+    { label: "Evolution", hint: "zero's lineage and runs", run: () => go("#/evolution") },
+    { label: "Settings", hint: "models, access, memory", run: () => openSettings() },
+    ...(gitPanel ? [{ label: gitOpenNow() ? "Hide the Git panel" : "Show the Git panel", hint: "Alt+G", run: () => setGitOpen(!gitOpenNow()) }] : []),
+    { label: "Add a project", hint: "a folder on this machine", run: () => addProject() }
+  ]
+  const input = el("input", { type: "search", placeholder: "Go to a thread, project or place…", "aria-label": "Search", autocomplete: "off", spellcheck: "false" })
+  const list = el("ul", { class: "palette-list", role: "listbox" })
+  let shown = []
+  let at = 0
+  const paint = () => {
+    const words = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    shown = entries.filter((x) => words.every((w) => `${x.label} ${x.hint}`.toLowerCase().includes(w))).slice(0, 50)
+    at = Math.min(at, Math.max(0, shown.length - 1))
+    list.replaceChildren(...(shown.length ? shown.map((x, i) => el("li", { class: `palette-item${i === at ? " on" : ""}`, role: "option", "aria-selected": String(i === at), onmousedown: (e) => { e.preventDefault(); choose(i) } },
+      el("span", { class: "palette-label", text: x.label }), el("span", { class: "palette-hint", text: x.hint }))) : [el("li", { class: "palette-none", text: "Nothing matches." })]))
+    list.children[at]?.scrollIntoView({ block: "nearest" })
+  }
+  const choose = (i) => { const x = shown[i]; d.close(); if (x) x.run() }
+  input.addEventListener("input", () => { at = 0; paint() })
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); at = (at + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % Math.max(1, shown.length); paint() }
+    else if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); choose(at) }
+  })
+  d.replaceChildren(input, list)
+  d.addEventListener("close", () => d.replaceChildren(), { once: true })
+  d.addEventListener("click", (e) => { if (e.target === d) d.close() })
+  paint()
+  d.showModal()
+  input.focus()
+}
+
 // ---------- keys ----------
 document.addEventListener("keydown", (e) => {
-  if ($("dialog").open) return
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "k" || e.key === "K")) {
+    e.preventDefault()
+    if ($("palette").open) $("palette").close()
+    else if (!$("dialog").open && !$("settings").open) openPalette()
+    return
+  }
+  if ($("dialog").open || $("palette").open) return
   const typing = e.target.isContentEditable || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
   if (e.altKey && (e.key === "n" || e.key === "N")) {
     e.preventDefault()

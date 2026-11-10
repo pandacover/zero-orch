@@ -172,6 +172,8 @@ export interface ThreadMeta {
   context?: { used: number; limit: number } | undefined
   /** A message waiting while the session compacts first (its words), shown as queued. */
   queued?: string | undefined
+  /** Kept at the top of its project in the sidebar. */
+  pinned?: boolean | undefined
   /** HEAD when the thread's current task started: a message after HEAD moves (a commit) starts a new one. */
   taskHead?: string | undefined
   /** The git branch the project was on when the thread's last turn ended: what its Git panel is about. */

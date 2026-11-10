@@ -11,6 +11,7 @@ import { enableCompileCache } from "node:module"
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { isInlineImage } from "../app/Attachments.ts"
+import { notifier } from "./Notify.ts"
 import { openWorkspace, useLoginPath } from "./Workspace.ts"
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url)).replace(/[\\/]$/, "")
@@ -102,8 +103,12 @@ else {
       e.preventDefault()
       void open(url)
     })
+    const notify = notifier(() => win)
     api.then((a) => {
-      const off = a.subscribe((event, data) => win?.webContents.send("event", event, data))
+      const off = a.subscribe((event, data) => {
+        win?.webContents.send("event", event, data)
+        notify(event, data)
+      })
       win?.once("closed", off)
     })
     win.once("closed", () => (win = null))

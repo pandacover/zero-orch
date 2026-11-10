@@ -117,7 +117,16 @@ A desktop chat app, instead of the CLI:
 - **Settings:** Claude's model and effort, the default access, memory, and the
   genome toggle. Saved as you change them.
 
-Keys: `Alt+N` new thread, `Enter` send (`Shift+Enter` new line), `Esc` stop.
+- **Git panel:** click a changed file to see its diff. **Commit all** commits
+  everything; **Write message** has the small model that names threads write the
+  message from the diff (about a tenth of a cent).
+- **Pinned threads** stay at the top of their project (the pin on a row's hover).
+- **Notifications:** when zero isn't the window in front, a finished turn, an
+  error or a wait for approval shows a desktop notification; click it to go there.
+
+Keys: `Ctrl+K` (`Cmd+K`) go to any thread, project or place, `Alt+N` new thread,
+`Alt+G` Git panel, `Enter` send (`Shift+Enter` new line), `↑`/`↓` in an empty box
+bring back earlier prompts, `Esc` stop.
 
 Threads, projects and settings live in `~/.zero` (`ZERO_HOME` to move them).
 The backend (`src/app/Api.ts`) runs in Electron's main process. The page

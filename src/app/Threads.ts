@@ -148,7 +148,7 @@ export const makeThreads = (options: {
 
     /** Change a thread's provider, model, access or effort. A new provider starts a new session. */
     /** `effort: ""` goes back to following the settings. */
-    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string }) => {
+    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean }) => {
       if (patch.provider && patch.provider !== t.provider) {
         t.provider = patch.provider
         t.resume = null
@@ -173,6 +173,8 @@ export const makeThreads = (options: {
         }
       }
       if (patch.title?.trim()) t.title = patch.title.trim().slice(0, 120)
+      if (patch.pinned === true) t.pinned = true
+      else if (patch.pinned === false) delete t.pinned
       touch(t)
       store.saveThread(t)
     }

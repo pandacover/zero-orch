@@ -63,3 +63,19 @@ describe("child environments", () => {
     expect(envFor("git")["ELECTRON_RUN_AS_NODE"]).toBeUndefined()
   })
 })
+
+describe("desktop notifications", async () => {
+  const { notice } = await import("../src/desktop/Notify.ts")
+  const titles = new Map([["thr_1", "Fix the upload retry"]])
+  it("tells of a finished turn, an error and a wait for approval, under the thread's title", () => {
+    expect(notice("item", { threadId: "thr_1", item: { kind: "turn", outcome: "done" } }, titles)).toEqual({ threadId: "thr_1", title: "Fix the upload retry", body: "Done. Your turn." })
+    expect(notice("item", { threadId: "thr_1", item: { kind: "turn", outcome: "failed", error: "rate limited" } }, titles)?.body).toBe("Stopped on an error: rate limited")
+    expect(notice("item", { threadId: "thr_1", item: { kind: "permission", state: "pending", tool: "Bash", detail: "npm test" } }, titles)?.body).toBe("Waiting for your approval: Bash npm test")
+  })
+  it("stays quiet about everything else, a turn the person stopped included", () => {
+    expect(notice("item", { threadId: "thr_1", item: { kind: "turn", outcome: "stopped" } }, titles)).toBeUndefined()
+    expect(notice("item", { threadId: "thr_1", item: { kind: "permission", state: "allowed" } }, titles)).toBeUndefined()
+    expect(notice("item", { threadId: "thr_1", item: { kind: "tool" } }, titles)).toBeUndefined()
+    expect(notice("thread", { id: "thr_1", title: "x" }, titles)).toBeUndefined()
+  })
+})
