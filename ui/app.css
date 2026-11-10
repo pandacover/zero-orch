@@ -165,6 +165,8 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 .draft-link { padding-left: 10px; color: var(--accent-text); font-style: italic; }
 .draft-link:hover, .draft-link.active { color: var(--accent-text); background: var(--accent-soft); }
 .draft-row:hover .draft-link, .draft-row:focus-within .draft-link { padding-right: 34px; }
+/* a thread moved up into Drafts keeps two buttons: discard its words, delete the thread */
+.draft-thread:hover .draft-link, .draft-thread:focus-within .draft-link { padding-right: 60px; }
 .draft-mark { display: inline-flex; flex: none; width: 13px; height: 13px; opacity: .8; }
 .draft-mark svg { width: 13px; height: 13px; }
 .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: breathe 1.6s ease-in-out infinite; flex: none; }
