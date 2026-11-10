@@ -652,6 +652,23 @@ function msgActions(text, ...extra) {
   })
   return el("div", { class: "msg-actions" }, copy, extra)
 }
+/** Quote a reply in the composer: the words selected in it, or all of it, as a `>` block to answer below. */
+function quoteButton(item) {
+  return el("button", { class: "icon-btn msg-quote", type: "button", title: "Quote in your reply (the selection, or all of it)", "aria-label": "Quote message", html: QUOTE_ICON,
+    // Keep the selection: pressing the button mustn't clear it before the click reads it.
+    onmousedown: (e) => e.preventDefault(),
+    onclick: (e) => {
+      e.stopPropagation()
+      const message = e.currentTarget.closest(".msg")
+      const sel = getSelection()
+      const picked = sel && !sel.isCollapsed && message?.contains(sel.anchorNode) && message.contains(sel.focusNode) ? sel.toString() : ""
+      const words = (picked || item.text).trim()
+      const cut = words.length > 1500 ? `${words.slice(0, 1500).trimEnd()}…` : words
+      feed?.composer.quote(cut.split("\n").map((l) => `> ${l}`.trimEnd()).join("\n"))
+    } })
+}
+const QUOTE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 4.5h10M3 8h7M3 11.5h10M1.5 3v10"/></svg>'
+
 /** A sent message as words, each attached file by its name. */
 function plainText(item) {
   const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
@@ -975,6 +992,16 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
       canAttach = can
       attach.title = can ? "Attach files. You can paste or drop them too." : why
       paint()
+    },
+    /** Add a quoted block at the end of what's written, and put the caret below it. */
+    quote: (block) => {
+      input.focus()
+      const r = document.createRange()
+      r.selectNodeContents(input)
+      r.collapse(false)
+      caretTo(r)
+      document.execCommand("insertText", false, `${empty() ? "" : "\n\n"}${block}\n\n`)
+      sync()
     },
     fill: (text) => {
       input.textContent = text
@@ -1301,7 +1328,7 @@ function rel(text) {
 function renderItem(item) {
   switch (item.kind) {
     case "user": return userMessage(item)
-    case "assistant": return el("div", { class: "msg msg-a" }, el("div", { class: "msg-ai" }, el("div", { class: "prose" }, mdNodes(item.text))), msgActions(() => item.text, el("span", { class: "msg-meta" })))
+    case "assistant": return el("div", { class: "msg msg-a" }, el("div", { class: "msg-ai" }, el("div", { class: "prose" }, mdNodes(item.text))), msgActions(() => item.text, quoteButton(item), el("span", { class: "msg-meta" })))
     case "tool": {
       if (memoryRead(item)) return memoryCard(item)
       const open = S.expanded.has(item.id)

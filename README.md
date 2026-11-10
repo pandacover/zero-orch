@@ -121,6 +121,8 @@ A desktop chat app, instead of the CLI:
   everything; **Write message** has the small model that names threads write the
   message from the diff (about a tenth of a cent).
 - **Pinned threads** stay at the top of their project (the pin on a row's hover).
+- **Quote** on a reply puts it (or the part you selected) in the composer as a
+  `>` block, to answer it point by point.
 - **Notifications:** when zero isn't the window in front, a finished turn, an
   error or a wait for approval shows a desktop notification; click it to go there.
 
