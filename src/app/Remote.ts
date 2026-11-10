@@ -12,8 +12,13 @@
  *
  * The page is the same ui/ the desktop window shows: ui/web.js gives it the
  * `window.zero` that src/desktop/preload.cjs gives the window.
+ *
+ * Once Tailscale serves the port, Settings shows a QR code of the pairing
+ * link: a phone's camera opens zero on it, paired, in one step. Settings can
+ * run `tailscale serve` itself (POST remote/serve), and hears a
+ * `remote-paired` event when a device pairs.
  */
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { randomInt, timingSafeEqual } from "node:crypto"
 import { createReadStream, readFileSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
@@ -22,6 +27,7 @@ import { extname, join } from "node:path"
 import type { Api, Reply } from "./Api.ts"
 import { isInlineImage, MAX_ATTACHMENT_BYTES } from "./Attachments.ts"
 import type { Settings } from "./Model.ts"
+import { qrSvg } from "./Qr.ts"
 
 export interface RemoteOptions {
   /** The page's files: zero's ui/ folder. */
@@ -30,6 +36,18 @@ export interface RemoteOptions {
   readonly home: string
   /** What Tailscale says of this machine; a stand-in in tests. */
   readonly tailnet?: (port: number) => Promise<Tailnet>
+  /** Runs `tailscale serve --bg <port>`; a stand-in in tests. */
+  readonly serve?: (port: number) => Promise<ServeResult>
+}
+
+/** What `tailscale serve --bg <port>` said. */
+export interface ServeResult {
+  /** It finished, serving the port. */
+  readonly ok: boolean
+  /** Its own words, for when it didn't. */
+  readonly output: string
+  /** Where to turn HTTPS on for the tailnet, when Tailscale asks for that first; serve finishes by itself once it's on. */
+  readonly enableUrl?: string
 }
 
 export interface Tailnet {
@@ -41,6 +59,8 @@ export interface Tailnet {
   readonly host?: string
   /** Where `tailscale serve` already offers our port, e.g. https://desk.tail1234.ts.net/. */
   readonly url?: string
+  /** `tailscale serve` already offers something else at https://<host>/, which serving zero would replace. */
+  readonly busy?: boolean
 }
 
 /** What Settings shows of remote access. */
@@ -56,6 +76,13 @@ export interface RemoteStatus {
   /** What makes it reachable from the tailnet. */
   readonly command: string
   readonly tailnet: Tailnet
+  /** Once Tailscale serves it: the link that opens zero on a device and pairs it, and that link as a QR code (SVG). */
+  readonly pairUrl?: string
+  readonly qr?: string
+  /** The last device that paired since zero started, and when. */
+  readonly paired?: { readonly device: string; readonly at: string }
+  /** What `tailscale serve` said (POST remote/serve only). */
+  readonly serve?: ServeResult
 }
 
 /** No 0/o, 1/l/i: a code read off one screen and typed into another. 31^12, about 60 bits. */
@@ -67,12 +94,16 @@ export const normalizeCode = (typed: string): string => typed.toLowerCase().repl
 export const showCode = (code: string): string => code.match(/.{1,4}/g)?.join("-") ?? code
 
 const COOKIE = "zero_remote"
+/** The files that put zero on a home screen: served before pairing (browsers often ask without the cookie), as they hold nothing private. */
+const PUBLIC = /^\/(manifest\.webmanifest|icon-[\w-]+\.png)$/
 /** Wrong codes allowed a minute, from everyone together: guessing 60 bits at this rate never ends. */
 const TRIES_PER_MINUTE = 10
 const MAX_JSON_BYTES = 4 * 1024 * 1024
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
+  ".webmanifest": "application/manifest+json",
+  ".png": "image/png",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".woff2": "font/woff2",
@@ -115,7 +146,65 @@ export const askTailscale = async (port: number): Promise<Tailnet> => {
   } catch {}
   const serve = running ? await tailscale(["serve", "status", "--json"]) : undefined
   const url = serve === undefined ? undefined : servedUrl(serve, port)
-  return { found: true, running, ...(host ? { host } : {}), ...(url ? { url } : {}) }
+  const busy = !url && serve !== undefined && servesOther(serve, port)
+  return { found: true, running, ...(host ? { host } : {}), ...(url ? { url } : {}), ...(busy ? { busy } : {}) }
+}
+
+/** Whether `tailscale serve status --json` sends https://<host>/ (port 443, path /) somewhere other than our port. */
+export const servesOther = (serveJson: string, port: number): boolean => {
+  let config: unknown
+  try { config = JSON.parse(serveJson) } catch { return false }
+  const ours = new RegExp(`^https?://(127\\.0\\.0\\.1|localhost|\\[::1\\]):${port}/?$`)
+  const web = (config as { Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }> })?.Web ?? {}
+  return Object.entries(web).some(([hostPort, site]) => {
+    const root = site.Handlers?.["/"]
+    return /:443$/.test(hostPort) && root !== undefined && !ours.test(root.Proxy ?? "")
+  })
+}
+
+/** The link in Tailscale's words that turns something on, e.g. https://login.tailscale.com/f/serve?node=…. */
+export const enableLink = (output: string): string | undefined => /https:\/\/login\.tailscale\.com\/\S+/.exec(output)?.[0]
+
+/**
+ * `tailscale serve --bg <port>`. Done in a moment when the tailnet has HTTPS on. When it hasn't,
+ * Tailscale prints a link to turn it on and waits: the link comes back at once, and the command
+ * keeps waiting (up to ten minutes), so it finishes by itself once HTTPS is on.
+ */
+export const runServe = (port: number) =>
+  new Promise<ServeResult>((resolve) => {
+    let output = ""
+    let settled = false
+    const done = (r: ServeResult) => {
+      if (settled) return
+      settled = true
+      resolve(r)
+    }
+    const child = spawn("tailscale", ["serve", "--bg", String(port)], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] })
+    const kill = setTimeout(() => child.kill(), 10 * 60_000)
+    const hear = (chunk: Buffer) => {
+      output += chunk.toString("utf8")
+      const enableUrl = enableLink(output)
+      if (enableUrl) done({ ok: false, output: output.trim(), enableUrl })
+    }
+    child.stdout.on("data", hear)
+    child.stderr.on("data", hear)
+    child.on("error", (e) => {
+      clearTimeout(kill)
+      done({ ok: false, output: e.message })
+    })
+    child.on("close", (exit) => {
+      clearTimeout(kill)
+      done({ ok: exit === 0, output: output.trim() })
+    })
+  })
+
+/** A device as a person names it, from its browser's user agent: "Safari on iPhone". */
+export const deviceName = (ua: string): string => {
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /CrOS/.test(ua) ? "Chromebook"
+    : /Macintosh|Mac OS X/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : ""
+  const browser = /EdgA?\/|EdgiOS/.test(ua) ? "Edge" : /SamsungBrowser/.test(ua) ? "Samsung Internet" : /OPR\/|OPiOS/.test(ua) ? "Opera"
+    : /FxiOS|Firefox\//.test(ua) ? "Firefox" : /CriOS|Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : ""
+  return browser && os ? `${browser} on ${os}` : browser || os || "A device"
 }
 
 const cookieOf = (req: IncomingMessage): string => {
@@ -155,7 +244,9 @@ const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt
 
 /** The one page an unpaired device gets: a field for the code. Plain HTML, no script. */
 const pairPage = (message?: string) => `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="/icon-180.png">
 <title>Pair with zero</title>
 <style>
   :root { color-scheme: light dark; --bg: #fff; --ink: #16171d; --muted: #6b6f7b; --line: #d9dbe1; --accent: #2156e0; }
@@ -170,7 +261,7 @@ const pairPage = (message?: string) => `<!doctype html>
 </style></head>
 <body><main>
   <h1>Pair with zero</h1>
-  <p>Type the code from zero on your computer: Settings, then Remote access. You pair once; this browser stays paired.</p>
+  <p>On your computer, open zero's Settings, then Remote access. Scan its QR code with this device's camera, or type the code it shows here. You pair once; this browser stays paired.</p>
   ${message ? `<p class="err" role="alert">${escapeHtml(message)}</p>` : ""}
   <form method="post" action="/pair">
     <input name="code" aria-label="Pairing code" placeholder="xxxx-xxxx-xxxx" autocomplete="one-time-code" autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
@@ -183,7 +274,7 @@ const pairPage = (message?: string) => `<!doctype html>
  * (a RemoteStatus) and `POST remote/code` (a new code, every device signed
  * out), and its `close` stops the server too.
  */
-export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }: RemoteOptions): Promise<Api> => {
+export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale, serve = runServe }: RemoteOptions): Promise<Api> => {
   const file = join(home, "remote.json")
   const loadCode = () => {
     try {
@@ -201,6 +292,19 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
   let error: string | undefined
   const streams = new Set<ServerResponse>()
   const failures: Array<number> = []
+  let paired: RemoteStatus["paired"]
+  // Remote access's own events (a device paired) go to the same listeners as the backend's.
+  type Listener = Parameters<Api["subscribe"]>[0]
+  const own = new Set<Listener>()
+  const subscribe = (listener: Listener) => {
+    own.add(listener)
+    const off = api.subscribe(listener)
+    return () => {
+      own.delete(listener)
+      off()
+    }
+  }
+  const emit = (event: string, data: unknown) => { for (const l of own) l(event, data) }
 
   const pair = async (req: IncomingMessage, res: ServerResponse, url: URL) => {
     let typed = url.searchParams.get("code") ?? ""
@@ -221,6 +325,8 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
       failures.push(now)
       return page(401, "That code isn't the one zero shows. Check it and try again.")
     }
+    paired = { device: deviceName(String(req.headers["user-agent"] ?? "")), at: new Date().toISOString() }
+    emit("remote-paired", paired)
     const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : ""
     // A year; Lax so a link to zero from another app still arrives signed in.
     res.writeHead(303, { ...BASE, location: "/", "cache-control": "no-store", "set-cookie": `${COOKIE}=${code}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${secure}` })
@@ -231,7 +337,7 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
     res.writeHead(200, { ...BASE, "content-type": "text/event-stream", "cache-control": "no-store", "x-accel-buffering": "no" })
     res.write(": connected\n\n")
     streams.add(res)
-    const off = api.subscribe((event, data) => res.write(`data: ${JSON.stringify({ event, data })}\n\n`))
+    const off = subscribe((event, data) => res.write(`data: ${JSON.stringify({ event, data })}\n\n`))
     // Proxies and phones drop a quiet connection.
     const ping = setInterval(() => res.write(": ping\n\n"), 20_000)
     res.on("close", () => {
@@ -246,6 +352,7 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
     const path = url.pathname
     const m = req.method ?? "GET"
     if (path === "/pair") return pair(req, res, url)
+    if (m === "GET" && PUBLIC.test(path)) return sendFile(res, path.slice(1))
     if (!same(cookieOf(req), code)) {
       if (path.startsWith("/api/")) return json(res, 401, { error: "this device isn't paired with zero; reload to pair it" })
       if (path !== "/" && path !== "/index.html") return json(res, 404, { error: "not found" })
@@ -292,9 +399,13 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
     // The page's own files, as the desktop window gets them.
     const name = path === "/" ? "index.html" : path.slice(1)
     if (m !== "GET" || !/^(fonts\/)?[\w.-]+$/.test(name)) return json(res, 404, { error: "not found" })
+    return sendFile(res, name)
+  }
+  const sendFile = async (res: ServerResponse, name: string) => {
     const bytes = await readFile(join(ui, name)).catch(() => undefined)
     if (!bytes) return json(res, 404, { error: "not found" })
-    res.writeHead(200, { ...BASE, "content-type": MIME[extname(name)] ?? "application/octet-stream", "cache-control": name.startsWith("fonts/") ? "max-age=604800" : "no-store" })
+    const cached = name.startsWith("fonts/") || name.endsWith(".png")
+    res.writeHead(200, { ...BASE, "content-type": MIME[extname(name)] ?? "application/octet-stream", "cache-control": cached ? "max-age=604800" : "no-store" })
     res.end(bytes)
   }
 
@@ -347,6 +458,9 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
 
   const status = async (): Promise<RemoteStatus> => {
     await queue
+    const t = await tailnet(on.port)
+    // The link a phone's camera opens: zero, paired. Only once Tailscale serves it, so that it works when scanned.
+    const pairUrl = on.enabled && t.url ? `${t.url}pair?code=${code}` : undefined
     return {
       enabled: on.enabled,
       port: on.port,
@@ -355,7 +469,9 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
       code: showCode(code),
       local: `http://127.0.0.1:${on.port}/`,
       command: `tailscale serve --bg ${on.port}`,
-      tailnet: await tailnet(on.port)
+      tailnet: t,
+      ...(pairUrl ? { pairUrl, qr: qrSvg(pairUrl) } : {}),
+      ...(paired ? { paired } : {})
     }
   }
 
@@ -367,6 +483,7 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
 
   const remote: Api = {
     ...api,
+    subscribe,
     call: async (method, path, body): Promise<Reply> => {
       const parts = path.split("/").filter(Boolean)
       if (parts[0] !== "remote") return api.call(method, path, body)
@@ -374,10 +491,17 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale }:
         if (method === "GET" && parts.length === 1) return { status: 200, body: await status() }
         if (method === "POST" && parts[1] === "code" && parts.length === 2) {
           code = newCode()
+          paired = undefined
           await saveCode(code)
           // Paired devices hold the old code: their streams end, and their next call asks them to pair again.
           signOutStreams()
           return { status: 200, body: await status() }
+        }
+        if (method === "POST" && parts[1] === "serve" && parts.length === 2) {
+          await queue
+          if (!on.enabled) return { status: 409, body: { error: "turn remote access on first" } }
+          const result = await serve(on.port)
+          return { status: 200, body: { ...(await status()), serve: result } }
         }
         return { status: 404, body: { error: "not found" } }
       } catch (e) {

@@ -27,6 +27,14 @@ const ago = (iso) => {
   return `${Math.floor(s / 86400)}d`
 }
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
+/**
+ * A phone or tablet (remote access): a finger for a pointer, and no hover. There Enter makes a new
+ * line (Send sends), nothing opens the keyboard unasked, and a long press opens a row's actions.
+ */
+const touchFirst = matchMedia("(hover: none) and (pointer: coarse)")
+/** What last pressed: "mouse", "pen" or "touch". */
+let lastPointer = "mouse"
+addEventListener("pointerdown", (e) => { lastPointer = e.pointerType || "mouse" }, true)
 
 // ---------- state ----------
 const S = {
@@ -127,6 +135,8 @@ function showTip(n) {
   tip.style.top = `${below + h > innerHeight - 8 ? r.top - h - 6 : below}px`
 }
 document.addEventListener("pointerover", (e) => {
+  // A finger has no hover: a tap would leave a tip standing over what it opened.
+  if (e.pointerType === "touch") return
   const n = e.target.closest?.("[title], [data-tip]")
   if (!n) return hideTip()
   if (n.hasAttribute("title")) adoptTitle(n)
@@ -155,6 +165,48 @@ function dialog({ title, text = "", ok, body = null }) {
   d.showModal()
   body?.querySelector("input")?.focus()
   return new Promise((resolve) => d.addEventListener("close", () => resolve(d.returnValue === "ok"), { once: true }))
+}
+
+/**
+ * A short list of things to do with something, `title`: a sheet up from the bottom on a phone, a small
+ * box elsewhere. Each action is { label, run, danger }. A tap outside, Cancel or Escape puts it away.
+ */
+function actionSheet(title, actions) {
+  const d = el("dialog", { class: "sheet", "aria-label": title })
+  const close = () => d.close()
+  d.append(el("div", { class: "sheet-box" },
+    el("div", { class: "sheet-title", text: title }),
+    actions.map((a) => el("button", { class: `sheet-item${a.danger ? " danger" : ""}`, type: "button", onclick: () => { close(); a.run() } }, a.label))),
+    el("button", { class: "sheet-item sheet-cancel", type: "button", onclick: close }, "Cancel"))
+  d.addEventListener("click", (e) => { if (e.target === d) close() })
+  d.addEventListener("close", () => d.remove())
+  document.body.append(d)
+  d.showModal()
+}
+/**
+ * `open` on a long press of `node` by a finger, or a right-click. The press doesn't also follow the
+ * link under it, and the phone's own link menu stays away (app.css: -webkit-touch-callout).
+ */
+function onHold(node, open) {
+  let timer = 0
+  let start = null
+  let held = false
+  const cancel = () => { clearTimeout(timer); timer = 0 }
+  node.addEventListener("pointerdown", (e) => {
+    held = false
+    if (e.pointerType === "mouse") return
+    start = { x: e.clientX, y: e.clientY }
+    timer = setTimeout(() => { timer = 0; held = true; navigator.vibrate?.(8); open() }, 450)
+  })
+  // Moving the finger (a scroll) isn't a press.
+  node.addEventListener("pointermove", (e) => { if (timer && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8) cancel() })
+  for (const type of ["pointerup", "pointercancel", "pointerleave"]) node.addEventListener(type, cancel)
+  node.addEventListener("click", (e) => { if (held) { e.preventDefault(); e.stopPropagation(); held = false } }, true)
+  node.addEventListener("contextmenu", (e) => {
+    e.preventDefault()
+    if (held || timer) { cancel(); if (!held) { held = true; open() } return }
+    open()
+  })
 }
 
 // ---------- routing ----------
@@ -228,17 +280,27 @@ function renderSide() {
         threads.length === 0
           // Every thread of it is up in Drafts: it still has threads, just none to list here.
           ? (hasThreads.has(p.id) ? [] : el("li", { class: "none", text: "No threads yet" }))
-          : threads.map((t) => el("li", { class: `thread-row${t.pinned ? " pinned" : ""}` },
+          : threads.map((t) => held(el("li", { class: `thread-row${t.pinned ? " pinned" : ""}` },
             el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null },
               ...threadMarks(t),
               el("span", { class: "t", text: t.title }),
               el("span", { class: "age", text: ago(t.updatedAt) })),
-            // Pinning and deleting live here, on the row's hover, rather than in the thread's header.
-            el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail) }),
-            el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })))))
+            // Pinning and deleting live here, on the row's hover, rather than in the thread's header (a long press, by touch).
+            el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => pinThread(t) }),
+            el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })),
+          () => threadSheet(t)))))
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
 }
+/** `node`, with `open` on a long press or right-click. */
+const held = (node, open) => { onHold(node, open); return node }
+const pinThread = (t) => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail)
+/** What a long press on a thread offers: what its row's hover buttons do. */
+const threadSheet = (t, draftKey = "") => actionSheet(t.title, [
+  ...(draftKey ? [{ label: "Discard draft", run: () => discardDraft(draftKey) }] : []),
+  { label: t.pinned ? "Unpin" : "Pin to the top", run: () => pinThread(t) },
+  { label: "Delete thread", danger: true, run: () => deleteThread(t) }
+])
 /** A thread's working or waiting dot and its pin, ahead of its title. */
 const threadMarks = (t) => [
   t.status === "running" ? el("span", { class: S.asking.has(t.id) ? "ask-dot" : "run-dot", title: S.asking.has(t.id) ? "Waiting for your approval" : "Working" }) : null,
@@ -277,20 +339,22 @@ function draftsSection() {
     el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: "Drafts" })),
     el("ul", { class: "threads" }, rows.map(({ key, d, where, thread, href }) => {
       const active = thread ? S.open?.id === thread.id : location.hash === href
-      if (thread) return el("li", { class: `thread-row draft-row draft-thread${thread.pinned ? " pinned" : ""}` },
+      if (thread) return held(el("li", { class: `thread-row draft-row draft-thread${thread.pinned ? " pinned" : ""}` },
         el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: `Unsent: ${d.title}`, "aria-current": active ? "page" : null },
           el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
           ...threadMarks(thread),
           el("span", { class: "t", text: thread.title }),
           el("span", { class: "age", text: ago(d.at) })),
         el("button", { class: "icon-btn thread-pin", type: "button", title: "Discard draft", "aria-label": `Discard draft in ${thread.title}`, html: DISCARD_ICON, onclick: () => discardDraft(key) }),
-        el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${thread.title}`, html: TRASH_ICON, onclick: () => deleteThread(thread) }))
-      return el("li", { class: "thread-row draft-row" },
+        el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${thread.title}`, html: TRASH_ICON, onclick: () => deleteThread(thread) })),
+      () => threadSheet(thread, key))
+      return held(el("li", { class: "thread-row draft-row" },
         el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: where, "aria-current": active ? "page" : null },
           el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
           el("span", { class: "t", text: d.title }),
           el("span", { class: "age", text: ago(d.at) })),
-        el("button", { class: "icon-btn thread-del", type: "button", title: "Discard draft", "aria-label": `Discard draft: ${d.title}`, html: TRASH_ICON, onclick: () => discardDraft(key) }))
+        el("button", { class: "icon-btn thread-del", type: "button", title: "Discard draft", "aria-label": `Discard draft: ${d.title}`, html: TRASH_ICON, onclick: () => discardDraft(key) })),
+      () => actionSheet(d.title, [{ label: "Discard draft", danger: true, run: () => discardDraft(key) }]))
     })))
 }
 /** Repaint only the Drafts section: typing changes nothing else in the sidebar. */
@@ -386,6 +450,75 @@ narrow.addEventListener("change", paintToggle)
 paintToggle()
 $("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide() })
 $("search").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; S.query = ""; renderSide() } })
+
+// ---------- touch: the app fits what's visible above the keyboard ----------
+// Chrome shrinks the page for the keyboard (index.html's viewport asks it to); Safari lays the keyboard
+// over the page and scrolls it instead, which would push the header away. There the page takes the
+// visible height, so the composer sits just above the keyboard and the header stays put.
+if (window.visualViewport) {
+  const vv = visualViewport
+  const fit = () => {
+    const root = document.documentElement
+    if (!touchFirst.matches || vv.scale > 1.01) { root.classList.remove("keyboard"); return root.style.removeProperty("--app-h") }
+    root.style.setProperty("--app-h", `${Math.round(vv.height)}px`)
+    // Safari's keyboard leaves the window's height alone and shrinks only what's visible.
+    root.classList.toggle("keyboard", innerHeight - vv.height > 120)
+    if (scrollY !== 0) scrollTo(0, 0)
+  }
+  vv.addEventListener("resize", fit)
+  vv.addEventListener("scroll", fit)
+  touchFirst.addEventListener("change", fit)
+  fit()
+}
+
+// ---------- touch, narrow: the sidebar follows a finger, out from the left edge and back ----------
+{
+  const side = $("side")
+  const scrim = $("scrim")
+  let drag = null // { x, y, from: "edge" | "side", axis: "" | "x" | "y", dx }
+  const width = () => side.getBoundingClientRect().width
+  const settle = (open) => {
+    side.classList.remove("dragging")
+    side.style.transform = ""
+    scrim.style.opacity = ""
+    open ? openSide() : closeSide()
+  }
+  addEventListener("touchstart", (e) => {
+    drag = null
+    if (!narrow.matches || e.touches.length !== 1 || document.querySelector("dialog[open]")) return
+    const t = e.touches[0]
+    const open = side.classList.contains("open")
+    if (!open && t.clientX <= 22) drag = { x: t.clientX, y: t.clientY, from: "edge", axis: "", dx: 0 }
+    else if (open && (side.contains(e.target) || e.target === scrim)) drag = { x: t.clientX, y: t.clientY, from: "side", axis: "", dx: 0 }
+  }, { passive: true })
+  addEventListener("touchmove", (e) => {
+    if (!drag) return
+    const t = e.touches[0]
+    const dx = t.clientX - drag.x, dy = t.clientY - drag.y
+    if (!drag.axis) {
+      if (Math.hypot(dx, dy) < 10) return
+      drag.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y"
+      // Up and down is the list scrolling; a swipe the wrong way is nothing.
+      if (drag.axis === "y" || (drag.from === "side" ? dx > 0 : dx < 0)) { drag = null; return }
+      side.classList.add("dragging")
+      scrim.hidden = false
+    }
+    e.preventDefault()
+    drag.dx = dx
+    const w = width()
+    const off = drag.from === "edge" ? Math.min(0, dx - w) : Math.min(0, dx)
+    side.style.transform = `translateX(${off}px)`
+    scrim.style.opacity = String(Math.max(0, 1 + off / w))
+  }, { passive: false })
+  const end = () => {
+    if (!drag || drag.axis !== "x") { drag = null; return }
+    const { from, dx } = drag
+    drag = null
+    settle(from === "edge" ? dx > width() * 0.3 : dx > -width() * 0.3)
+  }
+  addEventListener("touchend", end)
+  addEventListener("touchcancel", end)
+}
 
 // ---------- sidebar width: drag the edge, arrow keys on it, double-click resets ----------
 const SIDE = { min: 200, max: 480, base: 272 }
@@ -777,25 +910,39 @@ function placeQuote() {
   const q = quotable()
   if (!q) return hideQuote()
   // The first line's box: the button sits over where the selection starts, not the middle of a long one.
+  // By touch, the phone's own Copy menu takes that spot: the button goes below the last line, clear of the handles.
   const rects = [...q.range.getClientRects()].filter((r) => r.width > 0)
-  const r = rects[0] ?? q.range.getBoundingClientRect()
+  const touch = lastPointer === "touch"
+  const r = (touch ? rects.at(-1) : rects[0]) ?? q.range.getBoundingClientRect()
   quoteText = q.text
   if (!quoteShown()) quoteBtn.showPopover()
   const w = quoteBtn.offsetWidth, h = quoteBtn.offsetHeight
   const x = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, innerWidth - w - 8))
   const above = r.top - h - 6
   quoteBtn.style.left = `${x}px`
-  quoteBtn.style.top = `${above < 8 ? r.bottom + 6 : above}px`
+  quoteBtn.style.top = `${touch ? Math.min(r.bottom + 30, innerHeight - h - 8) : above < 8 ? r.bottom + 6 : above}px`
 }
-// Shown once the selection settles (mouse up, or Shift+arrows), gone as soon as it collapses or leaves a reply.
+// Shown once the selection settles (mouse up, Shift+arrows, or a finger letting go of the handles),
+// gone as soon as it collapses or leaves a reply.
 document.addEventListener("mouseup", () => setTimeout(placeQuote))
 document.addEventListener("keyup", (e) => { if (e.shiftKey || e.key === "Shift") placeQuote() })
-document.addEventListener("selectionchange", () => { if (quoteShown() && !quotable()) hideQuote() })
+let quoteSettle = 0
+let pressingQuote = false
+document.addEventListener("selectionchange", () => {
+  if (quoteShown() && !pressingQuote && !quotable()) hideQuote()
+  if (lastPointer !== "touch") return
+  clearTimeout(quoteSettle)
+  quoteSettle = setTimeout(placeQuote, 350)
+})
 addEventListener("scroll", () => quoteShown() && placeQuote(), true)
 addEventListener("resize", () => quoteShown() && placeQuote())
-// Pressing it mustn't clear the selection before the click reads it.
+// Pressing it mustn't clear the selection before the click reads it (a tap can clear it on a phone).
 quoteBtn.addEventListener("mousedown", (e) => e.preventDefault())
+quoteBtn.addEventListener("pointerdown", () => { pressingQuote = true })
+quoteBtn.addEventListener("pointerup", () => setTimeout(() => { pressingQuote = false }, 400))
+quoteBtn.addEventListener("pointercancel", () => { pressingQuote = false })
 quoteBtn.addEventListener("click", () => {
+  pressingQuote = false
   const words = quoteText
   hideQuote()
   if (!words || !feed) return
@@ -864,7 +1011,7 @@ function editMessage(item, wrap, bubble) {
   const cancel = el("button", { class: "btn btn-quiet btn-sm", type: "button", text: "Cancel" })
   const send = el("button", { class: "btn btn-primary btn-sm", type: "button", text: "Send" })
   const editor = el("div", { class: "msg-edit" }, input,
-    el("div", { class: "msg-edit-foot" }, el("span", { class: "hint", text: "Sends as a new message · Esc cancels" }), cancel, send))
+    el("div", { class: "msg-edit-foot" }, el("span", { class: "hint", text: touchFirst.matches ? "Sends as a new message" : "Sends as a new message · Esc cancels" }), cancel, send))
   const close = () => {
     editor.replaceWith(bubble)
     wrap.classList.remove("editing")
@@ -882,7 +1029,7 @@ function editMessage(item, wrap, bubble) {
   input.addEventListener("input", () => { send.disabled = serialize(input).trim() === "" })
   input.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close() }
-    else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit() }
+    else if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst.matches) { e.preventDefault(); submit() }
   })
   input.addEventListener("paste", (e) => {
     e.preventDefault()
@@ -981,7 +1128,7 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
       : '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>'
     send.disabled = !busy && (disabled || empty() || uploading())
     attach.disabled = disabled || !canAttach
-    hint.textContent = busy ? "Working. Esc stops it." : ""
+    hint.textContent = busy ? (touchFirst.matches ? "Working. The square stops it." : "Working. Esc stops it.") : ""
     hint.hidden = !busy
   }
   /** After any change: an empty box is truly empty (so its placeholder shows). */
@@ -1114,8 +1261,9 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
   }
   input.addEventListener("input", () => { if (!recalling) recalled = -1; sync() })
   input.addEventListener("keydown", (e) => {
-    // Shift+Enter is left to the browser: it breaks the line.
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); enter(); return }
+    // Shift+Enter is left to the browser: it breaks the line. So is Enter on a phone's keyboard,
+    // where a message often runs to more than a line and Send is a thumb away.
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst.matches) { e.preventDefault(); enter(); return }
     const plain = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.isComposing
     if (plain && (e.key === "ArrowUp" || e.key === "ArrowDown") && (recalled >= 0 || empty())) {
       if (recall(e.key === "ArrowUp" ? 1 : -1)) e.preventDefault()
@@ -1159,7 +1307,8 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
   node.append(input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach), hint, el("div", { class: "composer-end" }, controls, send)), picker)
   sync()
   queueMicrotask(() => {
-    if (disabled) return
+    // On a phone, focus would put the keyboard over the thread just opened: a tap on the box asks for it.
+    if (disabled || touchFirst.matches) return
     input.focus()
     // Back to a draft: the caret goes at its end, where you left off.
     if (kept) { const r = document.createRange(); r.selectNodeContents(input); r.collapse(false); caretTo(r) }
@@ -2307,6 +2456,20 @@ function openSettings() {
 $("open-settings").addEventListener("click", openSettings)
 // A click on the backdrop (outside the box) closes it, as Escape does.
 $("settings").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close() })
+/**
+ * While Remote access is on screen and Tailscale doesn't serve zero yet (HTTPS being turned on, or the
+ * command run by hand), look again every few seconds; paint the section afresh once that changes.
+ */
+let remoteWatch = 0
+function watchRemote() {
+  clearTimeout(remoteWatch)
+  remoteWatch = setTimeout(async () => {
+    if (!$("settings").open || settingsTab !== "remote") return
+    const r = await api("GET", "remote").catch(() => null)
+    if (r && (r.pairUrl || !r.enabled || !r.tailnet.running)) paintSettings()
+    else watchRemote()
+  }, 4000)
+}
 
 /** Paint the modal: the section list, and the chosen section's settings. Saved as they change. */
 function paintSettings() {
@@ -2353,26 +2516,51 @@ function paintSettings() {
       e.currentTarget.textContent = "Copied"
     } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
   } })
+  /** The command to run by hand, with a Copy button: what Share on my tailnet runs. */
+  const manual = (r, help) => Object.assign(row("Or run it yourself", help,
+    el("span", { class: "row-end" }, el("code", { class: "cmd", text: r.command }), copyBtn("Copy", r.command))), { className: "row row-stack" })
+  /** Run `tailscale serve` here, then paint what it said. */
+  const shareOnTailnet = async (r, live, button) => {
+    if (r.tailnet.busy && !(await dialog({ title: "Replace what Tailscale serves?", text: `Tailscale Serve already serves something else at https://${r.tailnet.host ?? "this machine"}/. Sharing zero there replaces it.`, ok: "Share zero" }))) return
+    button.disabled = true
+    button.textContent = "Sharing…"
+    try { live.replaceChildren(...remoteGroups(await api("POST", "remote/serve", {}), live)) } catch (e) { fail(e); button.disabled = false; button.textContent = "Share on my tailnet" }
+  }
   /** Remote access as the backend sees it (src/app/Remote.ts): listening or not, Tailscale, pairing. */
-  const remoteGroups = (r) => {
+  const remoteGroups = (r, live) => {
     const t = r.tailnet
-    const link = t.url ? `${t.url}pair?code=${encodeURIComponent(r.code)}` : ""
+    const said = r.serve
+    // Not reachable yet but on the way: look again every few seconds, and paint the QR code once it's there.
+    if (r.enabled && t.running && !r.pairUrl) watchRemote()
     const reach = !r.enabled ? null
       : !t.found ? group("Tailscale", "Tailscale isn't installed here, or the tailscale command isn't on the PATH. Install it on this machine and your phone, sign both in to one tailnet, then look again.")
       : !t.running ? group("Tailscale", "Tailscale is installed but not connected. Sign in on this machine, then look again.")
-      : t.url ? group("Tailscale", "Tailscale Serve carries zero to your tailnet.",
-        row("Open on your phone", t.url, el("span", { class: "row-end" }, copyBtn("Copy address", t.url))),
-        row("Or pair in one step", "This link carries the pairing code: send it only to your own devices.", copyBtn("Copy pairing link", link)))
-      : group("Tailscale", "One step left: share the port on your tailnet. Run this once on this machine; Tailscale keeps serving it after restarts.",
-        Object.assign(row("Run on this machine", t.host ? `Then open https://${t.host}/ on your phone, and look again here.` : "Then look again here.",
-          el("span", { class: "row-end" }, el("code", { class: "cmd", text: r.command }), copyBtn("Copy", r.command))), { className: "row row-stack" }))
+      : r.pairUrl ? group("Pair your phone", null,
+        el("div", { class: "qr-pair" },
+          el("img", { class: "qr", src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(r.qr)}`, alt: "QR code: the pairing link", width: 184, height: 184 }),
+          el("div", { class: "qr-steps" },
+            el("ol", {},
+              el("li", { text: "Turn Tailscale on on your phone, signed in to the same tailnet as this computer." }),
+              el("li", { text: "Point the phone's camera at this code and open the link." })),
+            el("p", { class: "hint", text: "zero opens there, paired. To keep it a tap away, add it to the home screen from the browser's menu." }),
+            r.paired ? el("p", { class: "qr-paired" }, el("i"), `${r.paired.device} paired ${ago(r.paired.at) === "now" ? "just now" : `${ago(r.paired.at)} ago`}.`) : null,
+            el("div", { class: "row-end" }, copyBtn("Copy pairing link", r.pairUrl), copyBtn("Copy address", t.url)))),
+        el("p", { class: "hint", text: "The link carries the pairing code: send it only to your own devices." }))
+      : said?.enableUrl ? group("Share zero on your tailnet", "Tailscale asks for one thing first: HTTPS on for your tailnet. Turn it on in Tailscale's admin page; zero finishes on its own, and the QR code shows here.",
+        row("Turn on HTTPS", "Once, for the whole tailnet.", el("a", { class: "btn btn-primary btn-xs", href: said.enableUrl, target: "_blank", rel: "noopener noreferrer", text: "Open Tailscale" })),
+        manual(r, "If it doesn't finish, run this once HTTPS is on."))
+      : group("Share zero on your tailnet", "One step left: Tailscale Serve carries zero to your devices over HTTPS, on your tailnet only. Tailscale keeps serving it after restarts.",
+        said && !said.ok ? el("pre", { class: "cmd serve-said", text: said.output || "tailscale serve didn't say why it failed." }) : null,
+        row(t.busy ? "Set it up here, replacing what's served now" : "Set it up here", `zero runs tailscale serve on this machine${t.host ? `, for https://${t.host}/` : ""}.`,
+          el("button", { class: "btn btn-primary btn-xs", type: "button", text: "Share on my tailnet", onclick: (e) => shareOnTailnet(r, live, e.currentTarget) })),
+        manual(r, "Runs on this machine; then the QR code shows here."))
     return [
       group(null, null,
         row("Status", r.listening ? `Listening at ${r.local}` : r.enabled ? (r.error ?? "Starting…") : "Off. Paired devices can't reach zero.",
           el("span", { class: "row-end" }, pill(r.listening, "Listening", r.enabled ? "Not listening" : "Off"),
             el("button", { class: "btn btn-quiet btn-xs", type: "button", text: "Look again", onclick: () => paintSettings() })))),
       reach,
-      group("Pairing", "A new device asks for this code once, then stays paired.",
+      group("Pairing", r.pairUrl ? "No camera handy? Open the address on the device and type this code. It asks once, then stays paired." : "A new device asks for this code once, then stays paired.",
         row("Pairing code", null, el("span", { class: "pair-code", text: r.code })),
         row("Sign out every device", "Makes a new code. Devices paired with this one have to pair again.",
           el("button", { class: "btn btn-quiet btn-xs", type: "button", text: "New code", onclick: async () => {
@@ -2418,7 +2606,7 @@ function paintSettings() {
       })
       // What's listening and what Tailscale says come from the backend: painted when they arrive.
       const live = el("div", { class: "set-live" }, el("p", { class: "hint", text: "Looking…" }))
-      api("GET", "remote").then((r) => live.replaceChildren(...remoteGroups(r)), (e) => live.replaceChildren(el("p", { class: "hint", text: e.message })))
+      api("GET", "remote").then((r) => live.replaceChildren(...remoteGroups(r, live)), (e) => live.replaceChildren(el("p", { class: "hint", text: e.message })))
       return [
         group(null, "Use zero from your phone or another computer on your tailnet: start threads and carry on old ones, as here. It works while this app is open.",
           row("Serve zero to your other devices", "On this machine only (127.0.0.1); Tailscale Serve carries it to your devices over HTTPS.", sw(() => s.remote.enabled, (v) => (s.remote.enabled = v), "Remote access")),
@@ -2673,6 +2861,11 @@ function connect() {
     if (S.route.name === "home" || S.route.name === "new") renderMain()
   }
   on["settings"] = (data) => { S.settings = data }
+  // A phone scanned the QR code (or typed the code): say so, and show it in Settings if that's open.
+  on["remote-paired"] = ({ device }) => {
+    toast(`${device} paired with zero.`)
+    if ($("settings").open && settingsTab === "remote") paintSettings()
+  }
   on["zero-log"] = (entry) => {
     if (!S.evo) return
     S.evo.log.push(entry)

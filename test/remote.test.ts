@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { type Api, makeApi } from "../src/app/Api.ts"
-import { normalizeCode, type RemoteStatus, servedUrl, showCode, withRemote } from "../src/app/Remote.ts"
+import { deviceName, enableLink, normalizeCode, type RemoteStatus, servedUrl, servesOther, showCode, type Tailnet, withRemote } from "../src/app/Remote.ts"
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
 
@@ -31,6 +31,37 @@ describe("tailscale serve's config", () => {
   })
 })
 
+describe("tailscale serve's config, when it serves something else", () => {
+  it("knows https://<host>/ is taken by another service, and not by us", () => {
+    const other = JSON.stringify({ Web: { "desk.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:3000" } } } } })
+    const ours = JSON.stringify({ Web: { "desk.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:8137" } } } } })
+    const elsewhere = JSON.stringify({ Web: { "desk.ts.net:8443": { Handlers: { "/": { Proxy: "http://127.0.0.1:3000" } } } } })
+    expect(servesOther(other, 8137)).toBe(true)
+    expect(servesOther(ours, 8137)).toBe(false)
+    expect(servesOther(elsewhere, 8137)).toBe(false)
+    expect(servesOther("{}", 8137)).toBe(false)
+    expect(servesOther("junk", 8137)).toBe(false)
+  })
+  it("finds the link Tailscale gives to turn HTTPS on", () => {
+    const said = "Serve is not enabled on your tailnet.\nTo enable, visit:\n\n         https://login.tailscale.com/f/serve?node=nXyz123\n"
+    expect(enableLink(said)).toBe("https://login.tailscale.com/f/serve?node=nXyz123")
+    expect(enableLink("error: something else")).toBeUndefined()
+  })
+})
+
+describe("a paired device's name", () => {
+  it("is its browser and its kind of device", () => {
+    expect(deviceName("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1")).toBe("Safari on iPhone")
+    expect(deviceName("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/131.0 Mobile/15E148 Safari/604.1")).toBe("Chrome on iPhone")
+    expect(deviceName("Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36")).toBe("Chrome on Android")
+    expect(deviceName("Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0 Mobile Safari/537.36")).toBe("Samsung Internet on Android")
+    expect(deviceName("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 Edg/131.0")).toBe("Edge on Windows")
+    expect(deviceName("Mozilla/5.0 (Macintosh; Intel Mac OS X 14.6; rv:132.0) Gecko/20100101 Firefox/132.0")).toBe("Firefox on Mac")
+    expect(deviceName("curl/8.0")).toBe("A device")
+    expect(deviceName("")).toBe("A device")
+  })
+})
+
 describe("pairing codes", () => {
   it("read the same however they're typed", () => {
     expect(showCode("abcd2345wxyz")).toBe("abcd-2345-wxyz")
@@ -44,6 +75,9 @@ describe("remote access over HTTP", () => {
   let port = 0
   let base = ""
   let cookie = ""
+  let tail: Tailnet = { found: true, running: true, host: "desk.tail1234.ts.net" }
+  const served: Array<number> = []
+  const heard: Array<[string, unknown]> = []
   const before = process.env["ZERO_HOME"]
   const status = async () => (await api.call("GET", "remote")).body as RemoteStatus
   const setRemote = async (remote: { enabled: boolean; port: number }) => {
@@ -59,8 +93,14 @@ describe("remote access over HTTP", () => {
     api = await withRemote(await makeApi({ root: ROOT, cli: join(ROOT, "src", "cli.ts") }), {
       ui: join(ROOT, "ui"),
       home,
-      tailnet: async () => ({ found: true, running: true, host: "desk.tail1234.ts.net" })
+      tailnet: async () => tail,
+      serve: async (p) => {
+        served.push(p)
+        tail = { ...tail, url: "https://desk.tail1234.ts.net/" }
+        return { ok: true, output: "Available within your tailnet: https://desk.tail1234.ts.net/" }
+      }
     })
+    api.subscribe((event, data) => heard.push([event, data]))
     port = await freePort()
     base = `http://127.0.0.1:${port}`
   })
@@ -87,6 +127,19 @@ describe("remote access over HTTP", () => {
     expect((await call("/api/bootstrap", { headers: { "x-zero": "1" } })).status).toBe(401)
     expect((await call("/app.js")).status).toBe(404)
     expect((await call("/api/events")).status).toBe(401)
+  })
+
+  it("serves what puts it on a home screen before pairing, and nothing else", async () => {
+    const manifest = await call("/manifest.webmanifest")
+    expect(manifest.status).toBe(200)
+    expect(manifest.headers.get("content-type")).toBe("application/manifest+json")
+    expect(await manifest.json()).toMatchObject({ name: "zero", display: "standalone", start_url: "/" })
+    const icon = await call("/icon-192.png")
+    expect(icon.status).toBe(200)
+    expect(icon.headers.get("content-type")).toBe("image/png")
+    expect((await call("/icon-180.png")).status).toBe(200)
+    expect(await (await call("/index.html")).text()).toContain("Pair with zero") // the pairing page, not the app
+    expect((await call("/web.js")).status).toBe(404)
   })
 
   it("pairs a device that types the code, however it's typed, and not one that guesses", async () => {
@@ -152,11 +205,52 @@ describe("remote access over HTTP", () => {
     expect(await got.text()).toBe("<script>alert(1)</script>")
   })
 
+  it("shares itself on the tailnet, then shows a QR code that pairs a phone in one step", async () => {
+    // Tailscale doesn't serve the port yet: no link, nothing to scan.
+    const before = await status()
+    expect(before.pairUrl).toBeUndefined()
+    expect(before.qr).toBeUndefined()
+    const r = await api.call("POST", "remote/serve", {})
+    expect(r.status).toBe(200)
+    expect(served).toEqual([port])
+    const s = r.body as RemoteStatus
+    expect(s.serve).toMatchObject({ ok: true })
+    const raw = normalizeCode(s.code)
+    expect(s.pairUrl).toBe(`https://desk.tail1234.ts.net/pair?code=${raw}`)
+    expect(s.qr).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 41 41"/) // version 4, and its quiet zone
+    // The phone's camera opens the link: paired, and on to zero.
+    heard.length = 0
+    const scanned = await fetch(`${base}/pair?code=${raw}`, {
+      redirect: "manual",
+      headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1", "x-forwarded-proto": "https" }
+    })
+    expect(scanned.status).toBe(303)
+    expect(scanned.headers.get("location")).toBe("/")
+    expect(scanned.headers.get("set-cookie")).toMatch(/; Secure$/)
+    const phone = scanned.headers.get("set-cookie")!.split(";")[0]!
+    expect((await fetch(`${base}/api/bootstrap`, { headers: { cookie: phone, "x-zero": "1" } })).status).toBe(200)
+    // The desktop hears of it, and Settings says who.
+    expect(heard).toContainEqual(["remote-paired", expect.objectContaining({ device: "Safari on iPhone" })])
+    expect((await status()).paired).toMatchObject({ device: "Safari on iPhone" })
+  })
+
+  it("tells paired browsers of a new pairing through their event stream too", async () => {
+    const events = await call("/api/events")
+    const reader = events.body!.getReader()
+    await reader.read() // ": connected"
+    expect((await call(`/pair?code=${normalizeCode((await status()).code)}`)).status).toBe(303)
+    let text = ""
+    while (!text.includes("remote-paired")) text += new TextDecoder().decode((await reader.read()).value)
+    await reader.cancel()
+  })
+
   it("signs every device out with a new code", async () => {
     const old = (await status()).code
     const r = await api.call("POST", "remote/code", {})
     expect(r.status).toBe(200)
     expect((r.body as RemoteStatus).code).not.toBe(old)
+    expect((r.body as RemoteStatus).paired).toBeUndefined()
+    expect((r.body as RemoteStatus).pairUrl).toContain(normalizeCode((r.body as RemoteStatus).code))
     expect((await call("/api/bootstrap", { headers: { "x-zero": "1" } })).status).toBe(401)
     expect((await call("/api/ping")).status).toBe(401)
   })
@@ -190,5 +284,12 @@ describe("remote access over HTTP", () => {
     expect(await status()).toMatchObject({ enabled: true, listening: false, error: `port ${taken} is taken; pick another` })
     blocker.close()
     await setRemote({ enabled: false, port: taken })
+  })
+
+  it("won't run tailscale serve while it's off", async () => {
+    const r = await api.call("POST", "remote/serve", {})
+    expect(r.status).toBe(409)
+    expect(served).toHaveLength(1)
+    expect((await status()).pairUrl).toBeUndefined()
   })
 })

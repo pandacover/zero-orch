@@ -134,18 +134,29 @@ A desktop chat app, instead of the CLI:
 
 1. In zero: **Settings → Remote access**, turn on **Serve zero to your other
    devices**. It listens on `127.0.0.1:8137` only (the port is a setting).
-2. On this machine, once: `tailscale serve --bg 8137`. Tailscale Serve
-   forwards `https://<this machine>.<tailnet>.ts.net/` to that port, over HTTPS,
-   to devices on your tailnet only, and keeps doing so after restarts. (The
-   first time, Tailscale may ask you to enable HTTPS for the tailnet.)
-3. On the phone, with Tailscale connected, open that address and type the
-   pairing code Settings shows, or open the **pairing link** Settings copies.
-   The browser stays paired. **New code** signs every paired device out.
+2. Once, on this machine: **Set it up here** runs `tailscale serve --bg 8137`
+   for you (or run it yourself). Tailscale Serve forwards
+   `https://<this machine>.<tailnet>.ts.net/` to that port, over HTTPS, to
+   devices on your tailnet only, and keeps doing so after restarts. The first
+   time, Tailscale may ask you to turn HTTPS on for the tailnet: Settings links
+   to the page, and shows the QR code once it's on.
+3. With Tailscale on on the phone, **scan the QR code** Settings shows. It opens
+   zero there, paired, in one step; the desktop says which device paired. No
+   camera? Open the address and type the pairing code, or send yourself the
+   **pairing link**. The browser stays paired. **New code** signs every paired
+   device out.
 
 An unpaired browser gets only the pairing page; wrong codes are limited to ten a
 minute. API calls also need a header that no other site's page can send, so a
 page elsewhere can't drive zero through a paired browser. When the phone sleeps
 and wakes, the page fetches what it missed.
+
+On a phone or tablet the page is made for fingers: add it to the home screen
+and it opens full screen with zero's icon. Swipe from the left edge for the
+sidebar (and back to close it), long-press a thread to pin or delete it, and
+select words in a reply to quote them. Enter starts a new line (the arrow
+sends), the keyboard never covers the composer, and the model picker opens as
+a sheet.
 
 Keys: `Ctrl+K` (`Cmd+K`) go to any thread, project or place, `Alt+N` new thread,
 `Alt+G` Git panel, `Enter` send (`Shift+Enter` new line), `↑`/`↓` in an empty box
