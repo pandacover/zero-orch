@@ -48,10 +48,15 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          # Secrets that aren't set arrive as empty strings, which electron-builder would read as paths.
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!v}" ]]; then unset "$v"; fi
+          done
           publish=never
-          [[ "$GITHUB_REF" == refs/tags/v* ]] && publish=always
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then publish=always; fi
           # Without a Developer ID the Mac app is signed ad hoc: Apple silicon won't run it unsigned.
-          [[ "$RUNNER_OS" == macOS && -z "$CSC_LINK" ]] && adhoc=(-c.mac.identity=-)
+          adhoc=()
+          if [[ "$RUNNER_OS" == macOS && -z "${CSC_LINK:-}" ]]; then adhoc=(-c.mac.identity=-); fi
           npx electron-builder --publish "$publish" "${adhoc[@]}"
         env:
           GH_TOKEN: ${{ github.token }}
