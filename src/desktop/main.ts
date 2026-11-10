@@ -3,8 +3,9 @@
  *
  * The backend (src/app/Api.ts) runs in this process. The page reaches it over
  * IPC through preload.cjs, and gets its files and attachments from the
- * `zero://app/` scheme. Nothing listens on a port, so there's no token to mint
- * and no Host header to check.
+ * `zero://app/` scheme. Nothing listens on a port for this window. Remote
+ * access (src/app/Remote.ts), when Settings turns it on, serves the same page
+ * and backend over HTTP on 127.0.0.1 for other devices, with its own pairing.
  */
 import { app, BrowserWindow, dialog, type IpcMainInvokeEvent, ipcMain, nativeTheme, net, protocol, shell } from "electron"
 import { enableCompileCache } from "node:module"
@@ -35,8 +36,9 @@ else {
   enableCompileCache()
   const packaged = app.isPackaged
   const workspace = (packaged ? useLoginPath() : Promise.resolve()).then(() => openWorkspace({ packaged, bundled: ROOT }))
-  const api = Promise.all([import("../app/Api.ts"), workspace]).then(([{ makeApi }, { root, blocked }]) =>
-    makeApi({ root, cli: join(root, "src", "cli.ts"), blocked }))
+  const api = Promise.all([import("../app/Api.ts"), import("../app/Remote.ts"), import("../app/Store.ts"), workspace]).then(
+    async ([{ makeApi }, { withRemote }, { appHome }, { root, blocked }]) =>
+      withRemote(await makeApi({ root, cli: join(root, "src", "cli.ts"), blocked }), { ui: join(ROOT, "ui"), home: appHome() }))
   api.catch(fail)
   let win: BrowserWindow | null = null
 

@@ -2294,6 +2294,7 @@ const SETTINGS_SECTIONS = [
   ["threads", "New threads", '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/>'],
   ["memory", "Memory", '<path d="M8 2.5a5.5 5.5 0 1 0 5.5 5.5"/><path d="M8 5v3l2 1.5"/><path d="M11 1.8 13.8 2l.2 2.8"/>'],
   ["genome", "Genome", '<path d="M5 1.5c0 4 6 5 6 9.5M11 1.5c0 4-6 5-6 9.5M5 14.5v-3.5M11 14.5v-3.5M6 4h4M6.3 11h3.4"/>'],
+  ["remote", "Remote access", '<rect x="4.5" y="1.5" width="7" height="13" rx="1.6"/><path d="M7.2 12.2h1.6"/>'],
   ["storage", "Storage", '<ellipse cx="8" cy="4" rx="5.5" ry="2"/><path d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2"/>']
 ]
 let settingsTab = load("settingsTab", "providers")
@@ -2346,6 +2347,40 @@ function paintSettings() {
       el("span", { class: "row-end" }, s[p].enabled ? pill(ps?.available, "Ready", "Unavailable") : null,
         sw(() => s[p].enabled, (v) => (s[p].enabled = v), `${providerLabel(p)} on`)))
   }
+  const copyBtn = (label, text) => el("button", { class: "btn btn-quiet btn-xs", type: "button", text: label, onclick: async (e) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      e.currentTarget.textContent = "Copied"
+    } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
+  } })
+  /** Remote access as the backend sees it (src/app/Remote.ts): listening or not, Tailscale, pairing. */
+  const remoteGroups = (r) => {
+    const t = r.tailnet
+    const link = t.url ? `${t.url}pair?code=${encodeURIComponent(r.code)}` : ""
+    const reach = !r.enabled ? null
+      : !t.found ? group("Tailscale", "Tailscale isn't installed here, or the tailscale command isn't on the PATH. Install it on this machine and your phone, sign both in to one tailnet, then look again.")
+      : !t.running ? group("Tailscale", "Tailscale is installed but not connected. Sign in on this machine, then look again.")
+      : t.url ? group("Tailscale", "Tailscale Serve carries zero to your tailnet.",
+        row("Open on your phone", t.url, el("span", { class: "row-end" }, copyBtn("Copy address", t.url))),
+        row("Or pair in one step", "This link carries the pairing code: send it only to your own devices.", copyBtn("Copy pairing link", link)))
+      : group("Tailscale", "One step left: share the port on your tailnet. Run this once on this machine; Tailscale keeps serving it after restarts.",
+        Object.assign(row("Run on this machine", t.host ? `Then open https://${t.host}/ on your phone, and look again here.` : "Then look again here.",
+          el("span", { class: "row-end" }, el("code", { class: "cmd", text: r.command }), copyBtn("Copy", r.command))), { className: "row row-stack" }))
+    return [
+      group(null, null,
+        row("Status", r.listening ? `Listening at ${r.local}` : r.enabled ? (r.error ?? "Starting…") : "Off. Paired devices can't reach zero.",
+          el("span", { class: "row-end" }, pill(r.listening, "Listening", r.enabled ? "Not listening" : "Off"),
+            el("button", { class: "btn btn-quiet btn-xs", type: "button", text: "Look again", onclick: () => paintSettings() })))),
+      reach,
+      group("Pairing", "A new device asks for this code once, then stays paired.",
+        row("Pairing code", null, el("span", { class: "pair-code", text: r.code })),
+        row("Sign out every device", "Makes a new code. Devices paired with this one have to pair again.",
+          el("button", { class: "btn btn-quiet btn-xs", type: "button", text: "New code", onclick: async () => {
+            if (!(await dialog({ title: "Sign out every device?", text: "zero makes a new pairing code. Each phone or computer you paired has to pair again with it.", ok: "New code" }))) return
+            try { await api("POST", "remote/code", {}); toast("New pairing code. Every device is signed out."); paintSettings() } catch (e) { fail(e) }
+          } })))
+    ].filter(Boolean)
+  }
   const sections = {
     providers: () => [
       group(el("span", { class: "set-title-row" }, "Claude", pill(st?.available, "Ready", "Off")),
@@ -2373,6 +2408,24 @@ function paintSettings() {
       group(null, "zero's solver instructions and lessons, which Evolution improves.",
         row("Use zero's evolved instructions", "Add them to every thread.", sw(() => s.useGenome, (v) => (s.useGenome = v), "Use genome")))
     ],
+    remote: () => {
+      const port = el("input", { class: "port-input", type: "number", min: 1024, max: 65535, step: 1, value: s.remote.port, "aria-label": "Port" })
+      port.addEventListener("change", () => {
+        const n = Number(port.value)
+        if (!Number.isInteger(n) || n < 1024 || n > 65535) { port.value = s.remote.port; return toast("A port is a whole number from 1024 to 65535.", true) }
+        s.remote.port = n
+        commit()
+      })
+      // What's listening and what Tailscale says come from the backend: painted when they arrive.
+      const live = el("div", { class: "set-live" }, el("p", { class: "hint", text: "Looking…" }))
+      api("GET", "remote").then((r) => live.replaceChildren(...remoteGroups(r)), (e) => live.replaceChildren(el("p", { class: "hint", text: e.message })))
+      return [
+        group(null, "Use zero from your phone or another computer on your tailnet: start threads and carry on old ones, as here. It works while this app is open.",
+          row("Serve zero to your other devices", "On this machine only (127.0.0.1); Tailscale Serve carries it to your devices over HTTPS.", sw(() => s.remote.enabled, (v) => (s.remote.enabled = v), "Remote access")),
+          row("Port", "The local port Tailscale forwards to.", port)),
+        live
+      ]
+    },
     storage: () => [
       group(null, null,
         row("Threads, projects and settings", null, el("span", { class: "path", text: S.home })),
@@ -2640,7 +2693,20 @@ function connect() {
   on["zero-state"] = evoRefresh
   // A desktop notification clicked: its thread.
   on["open"] = ({ threadId }) => { if (S.threads.some((t) => t.id === threadId)) go(`#/t/${threadId}`) }
-  // The backend runs in this app, so the stream never drops: no reconnecting.
+  // In a browser (remote access, ui/web.js) the stream can drop, a phone's whenever it sleeps: back,
+  // the page fetches what it missed and paints the view again. Drafts are kept; the desktop never drops.
+  let resyncTimer = 0
+  on["resync"] = () => {
+    clearTimeout(resyncTimer)
+    resyncTimer = setTimeout(async () => {
+      try {
+        const b = await api("GET", "bootstrap")
+        Object.assign(S, { settings: b.settings, projects: b.projects, threads: b.threads, providers: b.providers })
+      } catch { return }
+      for (const id of S.asking) if (!S.threads.some((t) => t.id === id && t.status === "running")) S.asking.delete(id)
+      route()
+    }, 300)
+  }
   zero.on((event, data) => on[event]?.(data))
 }
 
