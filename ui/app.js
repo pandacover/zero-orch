@@ -200,7 +200,11 @@ function renderSide() {
   // Searching shows only the threads whose title matches (or every thread of a project whose name does), all expanded.
   const q = S.query.trim().toLowerCase()
   const byProject = new Map(S.projects.map((p) => [p.id, []]))
-  for (const t of S.threads) byProject.get(t.projectId)?.push(t)
+  // A thread with unsent words in its reply box moves up to Drafts, so it isn't listed twice.
+  const drafted = draftedThreadIds()
+  for (const t of S.threads) if (!drafted.has(t.id)) byProject.get(t.projectId)?.push(t)
+  shownDrafted = [...drafted].sort().join(" ")
+  const hasThreads = new Set(S.threads.map((t) => t.projectId))
   // Pinned threads first, each group newest first as S.threads is.
   for (const list of byProject.values()) list.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
   const shown = S.projects.flatMap((p) => {
@@ -222,11 +226,11 @@ function renderSide() {
           el("button", { class: "icon-btn", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, onclick: () => removeProject(p) }, "×"))),
       el("ul", { class: "threads", inert: closed },
         threads.length === 0
-          ? el("li", { class: "none", text: "No threads yet" })
+          // Every thread of it is up in Drafts: it still has threads, just none to list here.
+          ? (hasThreads.has(p.id) ? [] : el("li", { class: "none", text: "No threads yet" }))
           : threads.map((t) => el("li", { class: `thread-row${t.pinned ? " pinned" : ""}` },
             el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null },
-              t.status === "running" ? el("span", { class: S.asking.has(t.id) ? "ask-dot" : "run-dot", title: S.asking.has(t.id) ? "Waiting for your approval" : "Working" }) : null,
-              t.pinned ? el("span", { class: "pin-mark", title: "Pinned", html: PIN_ICON }) : null,
+              ...threadMarks(t),
               el("span", { class: "t", text: t.title }),
               el("span", { class: "age", text: ago(t.updatedAt) })),
             // Pinning and deleting live here, on the row's hover, rather than in the thread's header.
@@ -235,9 +239,23 @@ function renderSide() {
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
 }
+/** A thread's working or waiting dot and its pin, ahead of its title. */
+const threadMarks = (t) => [
+  t.status === "running" ? el("span", { class: S.asking.has(t.id) ? "ask-dot" : "run-dot", title: S.asking.has(t.id) ? "Waiting for your approval" : "Working" }) : null,
+  t.pinned ? el("span", { class: "pin-mark", title: "Pinned", html: PIN_ICON }) : null
+]
+/** The threads with words waiting in their reply box: listed under Drafts, not under their project. */
+function draftedThreadIds() {
+  const ids = new Set()
+  for (const key of drafts.keys()) if (key.startsWith("t:") && S.threads.some((t) => t.id === key.slice(2))) ids.add(key.slice(2))
+  return ids
+}
+/** The drafted threads the sidebar last left out of their projects, to know when to redraw it whole. */
+let shownDrafted = ""
 /**
  * Drafts: every box with words not yet sent, newest first, above the projects. A new thread's
- * draft goes back to its project's start page, a reply's to its thread. Its words are its title.
+ * draft goes back to its project's start page, titled by its words. A reply's draft is its thread
+ * itself, moved up out of its project (its title, its words on hover) until it's sent or emptied.
  */
 function draftsSection() {
   const q = S.query.trim().toLowerCase()
@@ -250,15 +268,23 @@ function draftsSection() {
     // A draft whose thread or project was removed goes with it.
     if (!project || (kind === "t" && !thread)) { drafts.delete(key); continue }
     const where = thread ? `Reply in “${thread.title}”` : `New thread in ${project.name}`
-    if (q && !`${d.title} ${where}`.toLowerCase().includes(q)) continue
-    rows.push({ key, d, where, href: thread ? `#/t/${thread.id}` : `#/new/${project.id}` })
+    if (q && !`${d.title} ${where} ${project.name}`.toLowerCase().includes(q)) continue
+    rows.push({ key, d, where, thread, href: thread ? `#/t/${thread.id}` : `#/new/${project.id}` })
   }
   if (!rows.length) return null
   rows.sort((a, b) => b.d.at.localeCompare(a.d.at))
   return el("section", { class: "proj drafts" },
     el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: "Drafts" })),
-    el("ul", { class: "threads" }, rows.map(({ key, d, where, href }) => {
-      const active = location.hash === href
+    el("ul", { class: "threads" }, rows.map(({ key, d, where, thread, href }) => {
+      const active = thread ? S.open?.id === thread.id : location.hash === href
+      if (thread) return el("li", { class: `thread-row draft-row draft-thread${thread.pinned ? " pinned" : ""}` },
+        el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: `Unsent: ${d.title}`, "aria-current": active ? "page" : null },
+          el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
+          ...threadMarks(thread),
+          el("span", { class: "t", text: thread.title }),
+          el("span", { class: "age", text: ago(d.at) })),
+        el("button", { class: "icon-btn thread-pin", type: "button", title: "Discard draft", "aria-label": `Discard draft in ${thread.title}`, html: DISCARD_ICON, onclick: () => discardDraft(key) }),
+        el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${thread.title}`, html: TRASH_ICON, onclick: () => deleteThread(thread) }))
       return el("li", { class: "thread-row draft-row" },
         el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: where, "aria-current": active ? "page" : null },
           el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
@@ -271,7 +297,8 @@ function draftsSection() {
 function paintDrafts() {
   const tree = $("tree")
   if (!tree) return
-  if (S.query.trim()) return renderSide()
+  // A thread moving into or out of Drafts changes its project's list too.
+  if (S.query.trim() || [...draftedThreadIds()].sort().join(" ") !== shownDrafted) return renderSide()
   const old = tree.querySelector(":scope > .drafts")
   const fresh = draftsSection()
   if (old && fresh) old.replaceWith(fresh)
@@ -282,6 +309,7 @@ let draftsTimer = 0
 /** One repaint for a burst of keystrokes. */
 const paintDraftsSoon = () => { if (!draftsTimer) draftsTimer = setTimeout(() => { draftsTimer = 0; paintDrafts() }, 30) }
 const DRAFT_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/><path d="M9 4l3 3"/></svg>'
+const DISCARD_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>'
 const PIN_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/></svg>'
 const TRASH_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/></svg>'
 async function deleteThread(t) {
