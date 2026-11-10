@@ -126,6 +126,26 @@ A desktop chat app, instead of the CLI:
   `>` block, to answer it point by point.
 - **Notifications:** when zero isn't the window in front, a finished turn, an
   error or a wait for approval shows a desktop notification; click it to go there.
+- **Remote access:** the same app from your phone or another computer, through
+  Tailscale. You can start threads and carry on old ones, attach files and approve tool
+  calls, all live, for as long as the desktop app is open. See below.
+
+#### From your phone, over Tailscale
+
+1. In zero: **Settings → Remote access**, turn on **Serve zero to your other
+   devices**. It listens on `127.0.0.1:8137` only (the port is a setting).
+2. On this machine, once: `tailscale serve --bg 8137`. Tailscale Serve
+   forwards `https://<this machine>.<tailnet>.ts.net/` to that port, over HTTPS,
+   to devices on your tailnet only, and keeps doing so after restarts. (The
+   first time, Tailscale may ask you to enable HTTPS for the tailnet.)
+3. On the phone, with Tailscale connected, open that address and type the
+   pairing code Settings shows, or open the **pairing link** Settings copies.
+   The browser stays paired. **New code** signs every paired device out.
+
+An unpaired browser gets only the pairing page; wrong codes are limited to ten a
+minute. API calls also need a header that no other site's page can send, so a
+page elsewhere can't drive zero through a paired browser. When the phone sleeps
+and wakes, the page fetches what it missed.
 
 Keys: `Ctrl+K` (`Cmd+K`) go to any thread, project or place, `Alt+N` new thread,
 `Alt+G` Git panel, `Enter` send (`Shift+Enter` new line), `↑`/`↓` in an empty box
@@ -134,8 +154,10 @@ bring back earlier prompts, `Esc` stop.
 Threads, projects and settings live in `~/.zero` (`ZERO_HOME` to move them).
 The backend (`src/app/Api.ts`) runs in Electron's main process. The page
 reaches it only over IPC through `src/desktop/preload.cjs`, runs sandboxed with
-no Node, and gets its files from the `zero://` scheme, so nothing listens on a
-port. Only one copy of the app runs at a time. Codex and Ollama providers exist
+no Node, and gets its files from the `zero://` scheme, so the window opens no
+port. Remote access (`src/app/Remote.ts`, off by default) serves the same page
+and backend over HTTP on 127.0.0.1; `ui/web.js` gives a browser the calls
+the preload gives the window. Only one copy of the app runs at a time. Codex and Ollama providers exist
 in `src/app/providers/` but are off: Codex's Windows sandbox asks for admin
 elevation on every command.
 
@@ -213,7 +235,7 @@ src/Bench.ts       fitness: solver sessions + hidden checks → scorecard
 src/Fitness.ts     the accept/reject rule
 src/Generation.ts  one generation
 src/Solve.ts       the evolved solver on a real repo
-src/app/           the control plane's backend: Api, threads, store, providers (ui/ is the page)
+src/app/           the control plane's backend: Api, threads, store, providers, Remote (ui/ is the page)
 src/desktop/       the Electron shell: main.ts (window, IPC, zero:// files), preload.cjs,
                    Workspace.ts (zero's repo for an installed app), Updates.ts
 src/cli.ts         effect/cli commands

@@ -64,6 +64,11 @@ export const Settings = Schema.Struct({
     auto: Schema.Boolean,
     /** The model that names threads: small, fast and cheap. */
     model: Schema.String
+  }),
+  /** The control plane over HTTP on 127.0.0.1, for other devices through `tailscale serve` (src/app/Remote.ts). */
+  remote: Schema.Struct({
+    enabled: Schema.Boolean,
+    port: Schema.Int.check(Schema.isBetween({ minimum: 1024, maximum: 65535 }))
   })
 })
 export type Settings = typeof Settings.Type
@@ -77,7 +82,8 @@ export const DEFAULT_SETTINGS: Settings = {
   ollama: { enabled: false, baseUrl: "http://127.0.0.1:11434", model: "" },
   memory: { recall: true, store: true },
   useGenome: true,
-  titles: { auto: true, model: "claude-haiku-5-5" }
+  titles: { auto: true, model: "claude-haiku-5-5" },
+  remote: { enabled: false, port: 8137 }
 }
 
 export interface Project {

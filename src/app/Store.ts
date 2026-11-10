@@ -59,7 +59,7 @@ const mergeSettings = (raw: unknown): unknown => {
   const r = (raw ?? {}) as Record<string, Record<string, unknown>>
   const d = DEFAULT_SETTINGS as unknown as Record<string, unknown>
   const out: Record<string, unknown> = { ...d, ...r }
-  for (const k of ["claude", "codex", "ollama", "memory", "titles"]) out[k] = { ...(d[k] as object), ...(r[k] ?? {}) }
+  for (const k of ["claude", "codex", "ollama", "memory", "titles", "remote"]) out[k] = { ...(d[k] as object), ...(r[k] ?? {}) }
   return out
 }
 

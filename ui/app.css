@@ -750,10 +750,22 @@ dialog h3 { margin: 0 0 6px; font: 600 17px/1.3 var(--display); }
 .set-group-title { margin: 0; font: 600 14.5px/1.3 var(--display); }
 .set-title-row { display: inline-flex; align-items: center; gap: 10px; }
 .set-group > .hint { margin-bottom: 4px; }
+/* remote access: what the backend says arrives after the section paints */
+.set-live { display: grid; gap: 22px; }
+.set-live > .set-group { border-top: 1px solid var(--line); }
+.port-input { width: 96px; height: 32px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--sunk); color: var(--ink); padding: 0 10px; font: 500 13px var(--mono); }
+.port-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.pair-code { font: 600 17px var(--mono); letter-spacing: .06em; user-select: all; }
+.row.row-stack { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.row-stack .row-end { justify-content: flex-start; flex-wrap: wrap; }
+.cmd { font: 400 12px var(--mono); padding: 5px 9px; border-radius: 7px; background: var(--sunk); border: 1px solid var(--line); user-select: all; overflow-wrap: anywhere; }
 @media (max-width: 620px) {
   .settings-dialog[open] { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .set-nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); padding: 12px; }
   .set-heading { width: 100%; margin: 0 4px 6px; }
+  .set-scroll { padding: 4px 16px 20px; }
+  .row { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+  .row-end { flex-wrap: wrap; justify-content: flex-end; }
 }
 dialog p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
 .field { display: grid; gap: 6px; margin-bottom: 14px; font-size: 13px; font-weight: 500; }

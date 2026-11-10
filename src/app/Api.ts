@@ -2,7 +2,8 @@
  * The control plane's backend, with no transport in it: `call` answers one
  * request from the page, `upload` and `attachment` handle files, and
  * `subscribe` hands out the live events. src/desktop/main.ts wires it to the
- * window over IPC; tests can call it directly.
+ * window over IPC, and src/app/Remote.ts to other devices over HTTP; tests can
+ * call it directly.
  */
 import * as NodeServices from "@effect/platform-node/NodeServices"
 import { Effect, Layer, ManagedRuntime } from "effect"
@@ -11,7 +12,7 @@ import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, remov
 import { makeEvolution } from "./Evolution.ts"
 import { fileDiff, gitView, parseAction, pendingChange, runAction } from "./GitInfo.ts"
 import { commitMessage } from "./providers/Claude.ts"
-import { type Access, ACCESSES, compactionOffered, metaOf, type ProviderId } from "./Model.ts"
+import { type Access, ACCESSES, compactionOffered, metaOf, type ProviderId, type Settings } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
 import { type Hub, makeThreads, PROVIDERS } from "./Threads.ts"
@@ -37,6 +38,8 @@ export interface Api {
   readonly call: (method: string, path: string, body?: unknown) => Promise<Reply>
   readonly upload: (name: string, mime: string, bytes: Uint8Array) => Reply
   readonly attachment: (id: string) => Attachment | undefined
+  /** The settings as saved now; a change is also sent to subscribers as a `settings` event. */
+  readonly settings: () => Settings
   readonly subscribe: (listener: Listener) => () => void
   /** Stops running turns and evolution runs, then frees the runtime. */
   readonly close: () => Promise<void>
@@ -223,6 +226,7 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
       return reply(201, saveAttachment(store.home, name, mime, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)))
     },
     attachment: (id) => findAttachment(store.home, id),
+    settings: () => store.settings(),
     subscribe: (listener) => {
       listeners.add(listener)
       return () => listeners.delete(listener)
