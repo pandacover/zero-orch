@@ -886,6 +886,8 @@ body.resizing .git-panel { transition: none; }
 .btn-xs .ico svg { display: block; width: 13px; height: 13px; }
 @media (hover: hover) { .btn-primary:not(:disabled):hover { filter: brightness(1.08); } }
 .git-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.git-card .git-auto { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+.git-card .git-auto input { accent-color: var(--accent); }
 .git-pr-top { display: flex; align-items: center; gap: 8px; }
 .git-state { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px 0 7px; border-radius: 99px; font-size: 11.5px; font-weight: 600; background: var(--accent); color: var(--on-accent); }
 .git-state .ico svg { display: block; width: 12px; height: 12px; }
@@ -1138,30 +1140,39 @@ body.resizing .git-panel { transition: none; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 
-/* ---------- branches: the composer's branch chip and its panel (switch, or a new worktree) ---------- */
+/* ---------- branches: the composer's branch chip and its panel (a list to pick from, a form for a new branch or worktree) ---------- */
 .bp-trigger .ico svg { display: block; width: 13px; height: 13px; }
 .bp-trigger.on { color: var(--accent-text); border-color: var(--accent-line); }
-.bp-panel { width: 520px; max-width: calc(100vw - 32px); }
-.bp-switch { flex: 1 1 auto; }
-.bp-new { flex: none; width: 210px; margin-left: 6px; padding: 0 4px 0 10px; border-left: 1px solid var(--line); gap: 8px; }
+.bp-panel { width: 400px; max-width: calc(100vw - 32px); max-height: min(560px, 76vh); }
+.bp-panel > .pop-col { flex: 1 1 auto; }
 .bp-filter, .bp-name, .bp-base {
   width: 100%; height: 30px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--sunk); color: var(--ink);
   padding: 0 9px; font: 400 12px var(--mono);
 }
-.bp-filter { width: auto; margin: 0 6px 6px 8px; }
+.bp-filter { flex: none; width: auto; margin: 2px 4px 6px; }
 .bp-filter:focus, .bp-name:focus, .bp-base:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .bp-base option { background: var(--surface); color: var(--ink); }
 .bp-list .pop-item { font-family: var(--mono); font-size: 12.5px; }
-.bp-list .pop-help { font-family: var(--body); }
+.bp-row { align-items: center; }
+.bp-branch { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bp-meta { flex: none; display: flex; align-items: center; gap: 5px; font: 400 10.5px var(--mono); color: var(--muted); }
+.bp-tag { padding: 1px 6px; border-radius: 99px; border: 1px solid var(--line); background: var(--sunk); }
+.bp-tag.ahead { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
+.bp-when { min-width: 24px; text-align: right; color: var(--faint); }
+.bp-cmds { flex: none; margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+.bp-cmd { align-items: center; font-weight: 500; }
+.bp-cmd .ico svg { display: block; width: 13px; height: 13px; }
+.bp-error { flex: none; margin: 0 4px 6px; padding: 6px 10px; border-radius: 8px; background: var(--warn-soft); color: var(--ink); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.bp-form { gap: 10px; padding: 4px 6px 6px; overflow: auto; }
+.bp-form .bp-error { margin: 0; }
+.bp-top { display: flex; align-items: center; gap: 8px; }
+.bp-title { font-size: 13px; font-weight: 600; }
+.bp-seg { grid-template-columns: repeat(2, 1fr); margin-bottom: 0; }
 .bp-field { display: grid; gap: 4px; font-size: 12px; font-weight: 500; color: var(--muted); }
-.bp-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.bp-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .bp-help { padding: 0; margin: 0; }
-.bp-where { margin-top: 6px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
+.bp-where { flex: none; margin-top: 6px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
 .bp-where .pop-note { padding: 0 0 6px; overflow-wrap: anywhere; }
-@media (max-width: 620px) {
-  .bp-panel { width: min(400px, calc(100vw - 32px)); flex-direction: column; overflow: auto; }
-  .bp-new { width: auto; margin: 6px 0 0; padding: 8px 6px 4px; border-left: 0; border-top: 1px solid var(--line); }
-}
 
 /* ---------- linked threads: one thread's agent started another, talks to it, waits for it ---------- */
 .link-card { margin: 6px 0; padding: 10px 14px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 13px; }

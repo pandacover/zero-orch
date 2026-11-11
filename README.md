@@ -123,12 +123,25 @@ A desktop chat app, instead of the CLI:
   everything; **Write message** has the small model that names threads write the
   message from the diff. It reads at most 12,000 characters of it; a small
   change cost $0.0006 with Haiku in testing.
-- **Branches and worktrees from the composer:** the branch chip beside Attach lists the
-  branches (remote ones too) and switches the thread's folder to one, unless a thread is working
-  there. Its **New worktree** side makes a git worktree on a new branch from the base you pick,
-  under `~/.zero/worktrees/`, and the thread works there from then on. It starts a new session
-  there, and its Git panel follows. On a new thread's page, a switch acts on the project folder at
-  once, and a worktree is made when you send.
+- **Fetch, pull and auto-pull:** the Git panel's branch card has **Fetch**, and **Pull** when the
+  branch is behind its upstream (a fast-forward only, never a merge or a rebase; refused while
+  a thread works in that folder). **Pull automatically** fetches every few minutes while a
+  thread is open and fast-forwards its branch when it is only behind and nothing is uncommitted.
+  A branch that has diverged gets **Ask the agent to rebase** instead.
+- **Pull request controls:** besides merge, ready/draft, comments and re-running checks, a pull
+  request's **More…** menu edits its title and description, requests reviewers, updates its
+  branch from the base and closes it. A closed one can be reopened, and a closed or merged one
+  offers **New pull request** for the same branch.
+- **Branches and worktrees from the composer:** the branch chip beside Attach opens a list of
+  the branches (remote ones too), each with its last commit's age, how far it is ahead of or
+  behind its upstream, and whether it is checked out in a worktree. Type to filter; Enter takes
+  the first match. Picking a branch switches the thread's folder to it, unless a thread is
+  working there; picking one that lives in another worktree moves the thread into that
+  worktree. **New branch…** and **New worktree…** open a small form (typing a name nobody has
+  yet offers to create it): a new branch from the base you pick, either in this folder or in a
+  git worktree of its own under `~/.zero/worktrees/`, where the thread works from then on with
+  a new session, and its Git panel follows. On a new thread's page, a switch or a new branch
+  acts on the project folder at once, and a worktree is made (or joined) when you send.
 - **Every model Claude Code offers:** at startup zero asks Claude Code for its model list (a
   session that sends no message, so nothing is billed), and the model menu shows each one by
   name, with only the effort levels that model takes.

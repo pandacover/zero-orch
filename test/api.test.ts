@@ -51,12 +51,19 @@ describe("the control plane's backend, without a transport", () => {
     const projectId = ((await api.call("GET", "bootstrap")).body as { projects: Array<{ id: string }> }).projects[0]!.id
     const b = await api.call("GET", `projects/${projectId}/branches`)
     expect(b.status).toBe(200)
-    expect(b.body).toMatchObject({ repo: true, linked: false })
+    expect(b.body).toMatchObject({ repo: true })
     const made = await api.call("POST", "threads", { projectId, worktree: { base: "no-such-branch-here", branch: "zero/x" } })
     expect(made).toEqual({ status: 400, body: { error: "there's no branch no-such-branch-here" } })
     const t = (await api.call("POST", "threads", { projectId })).body as { id: string }
     expect((await api.call("POST", `threads/${t.id}/branch`, { branch: "--orphan" })).status).toBe(409)
     expect((await api.call("GET", `threads/${t.id}/branches`)).body).toMatchObject({ repo: true, cwd: ROOT.replace(/[\\/]$/, "") })
+    // Refusals only: nothing here creates or switches a branch, pulls, fetches or joins a worktree.
+    expect((await api.call("POST", `threads/${t.id}/branch`, { branch: "bad name", create: true })).status).toBe(409)
+    expect(await api.call("POST", `threads/${t.id}/branch`, { branch: "", create: true })).toEqual({ status: 409, body: { error: "name the new branch" } })
+    expect(await api.call("POST", `threads/${t.id}/worktree`, { join: "no-such-branch-here" })).toEqual({ status: 400, body: { error: "there's no branch no-such-branch-here" } })
+    expect((await api.call("POST", "threads", { projectId, worktree: { join: "no-such-branch-here" } })).status).toBe(400)
+    expect((await api.call("POST", `threads/${t.id}/git/nope`, {})).status).toBe(400)
+    expect((await api.call("POST", `threads/${t.id}/git/reviewers`, { number: 1, reviewers: "" })).status).toBe(400)
   })
 
   it("keeps an uploaded file and finds it by id", () => {

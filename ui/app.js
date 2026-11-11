@@ -806,17 +806,28 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
   }
 }
 
+/** What's wrong with `name` as a new branch's name, in words; "" when it's fine or empty. `taken` is the local branches' names. */
+const branchNameProblem = (name, taken) =>
+  !name ? ""
+    : name.startsWith("-") || /[\s~^:?*[\\]|\.\.|@\{|\/\/|\.lock$|\/$|^\//.test(name) ? "That can't be a branch name: no spaces, no “..”, and none of ~ ^ : ? * [ \\"
+    : taken.includes(name) ? `${name} already exists: pick it from the list, or use another name.`
+    : ""
+
 /**
  * The branch chip, beside Attach: the branch the thread works on, or (for a new thread) the project
- * folder's. Its panel switches to another branch (a remote one makes a local branch that tracks it),
- * and makes a git worktree on a new branch from a base you pick, for the thread to work in apart.
+ * folder's. Its panel is one column with two views. The list, which opens first, has a search box, the
+ * branches with their age and how they stand against their upstream, and two commands: New branch… and
+ * New worktree…. The new view is a small form: a new branch, either in this folder or in a worktree of
+ * its own. Picking a branch switches to it; one checked out in another worktree is joined (a thread moves
+ * into that worktree). Picking closes the panel; an action that fails keeps it open and says why.
  *
- * `load()` reads the branches (src/app/Branches.ts). `onSwitch(name)` and `onWorktree({ base, branch })`
- * act and resolve once done; with `deferWorktree` (a new thread) the worktree is only chosen here, and
- * made when the thread starts: `choice()` says which. `onLeave()` takes a thread out of its worktree.
+ * `load()` reads the branches (src/app/Branches.ts). `onSwitch(name)`, `onCreate({ base, branch })`,
+ * `onWorktree({ base, branch })` and `onJoin(name)` act and resolve once done; `onLeave()` takes a thread
+ * out of its worktree. With `deferWorktree` (a new thread) a worktree is only chosen here, and made (or
+ * joined) when the thread starts: `choice()` says which, as `{ base, branch }` or `{ join }`.
  */
-function branchPicker({ load, onSwitch, onWorktree, onLeave = null, deferWorktree = false }) {
-  const state = { data: null, error: "", working: false, running: false, filter: "", base: "", name: "", pending: null }
+function branchPicker({ load, onSwitch, onCreate, onWorktree, onJoin, onLeave = null, deferWorktree = false }) {
+  const state = { data: null, error: "", problem: "", working: false, running: false, filter: "", view: "list", mode: "branch", base: "", name: "", pending: null }
   const pop = popover({ name: "Branch", panelClass: "bp-panel" })
   pop.trigger.classList.add("bp-trigger")
   pop.trigger.prepend(icon(BRANCH_PATHS))
@@ -824,11 +835,13 @@ function branchPicker({ load, onSwitch, onWorktree, onLeave = null, deferWorktre
   const paintLabel = () => {
     const d = state.data
     const p = state.pending
-    pop.label.textContent = p ? `New worktree from ${p.base}` : d?.current || (d?.repo ? "detached HEAD" : "Branch")
+    pop.label.textContent = p?.join ? p.join : p ? `New worktree from ${p.base}` : d?.current || (d?.repo ? "detached HEAD" : "Branch")
     pop.trigger.classList.toggle("on", Boolean(p) || Boolean(d?.worktree))
-    pop.trigger.title = p
-      ? `A new worktree on ${p.branch || "a new branch"} from ${p.base}, made when you send`
-      : d?.worktree ? `Works in a worktree, on ${d.current || "a detached HEAD"}\n${d.cwd}` : `On ${d?.current || "a detached HEAD"}: switch branches, or work in a new worktree`
+    pop.trigger.title = p?.join
+      ? `Starts in the worktree where ${p.join} is checked out`
+      : p
+        ? `A new worktree on ${p.branch || "a new branch"} from ${p.base}, made when you send`
+        : d?.worktree ? `Works in a worktree, on ${d.current || "a detached HEAD"}\n${d.cwd}` : `On ${d?.current || "a detached HEAD"}: switch branches, or work in a new worktree`
   }
   const refresh = async () => {
     try {
@@ -841,84 +854,205 @@ function branchPicker({ load, onSwitch, onWorktree, onLeave = null, deferWorktre
     paintLabel()
     pop.repaint()
   }
-  /** Run one of the panel's actions; the chip says it's busy, and an error is a toast. */
+  /** Run one of the panel's actions. It closes the panel when it worked; when it didn't, the panel stays and says why. */
   const act = async (fn) => {
     if (state.working) return
     state.working = true
+    state.problem = ""
     pop.repaint()
-    try { await fn() } catch (e) { fail(e) }
+    let ok = true
+    try { await fn() } catch (e) { ok = false; state.problem = e.message }
     state.working = false
     await refresh()
+    if (ok) pop.close(true)
+    else pop.panel.querySelector(state.view === "new" ? ".bp-name" : ".bp-filter")?.focus()
   }
   // Keys typed in the panel's boxes are for the boxes: not the panel's arrow keys, nor the page's.
   const own = (node) => { node.addEventListener("keydown", (e) => { if (e.key !== "Escape") e.stopPropagation() }); return node }
+  const names = () => (state.data?.local ?? []).map((b) => b.name)
+  const tag = (text, cls = "", title = null) => el("span", { class: `bp-tag ${cls}`.trim(), text, title })
+  const openNew = (mode, name = "") => {
+    const d = state.data
+    Object.assign(state, { view: "new", mode, name, problem: "", base: mode === "branch" ? d?.current || d?.base || "" : d?.base || "" })
+    pop.repaint()
+    const box = pop.panel.querySelector(".bp-name")
+    box?.focus()
+    box?.setSelectionRange(box.value.length, box.value.length)
+  }
+  const openList = () => {
+    Object.assign(state, { view: "list", problem: "" })
+    pop.repaint()
+    filter.focus()
+  }
+  // Made once, outside pop.paint, so typing in the search box never loses its caret.
+  const filter = own(el("input", { class: "bp-filter", type: "search", placeholder: "Find a branch, or type a new name", "aria-label": "Find a branch, or type a new name", "data-key": "filter", autocomplete: "off", spellcheck: "false" }))
   const listBox = el("div", { class: "pop-scroll bp-list", role: "menu", "aria-label": "Branches" })
+  const cmdBox = el("div", { class: "bp-cmds" })
+  filter.addEventListener("input", () => { state.filter = filter.value; paintList() })
+  filter.addEventListener("keydown", (e) => {
+    // Down goes into the list; Enter takes the branch named exactly, else the first match, else offers to create what was typed.
+    if (e.key === "ArrowDown") { e.preventDefault(); (listBox.querySelector(".pop-item:not(:disabled)") ?? cmdBox.querySelector("button:not(:disabled)"))?.focus() }
+    if (e.key !== "Enter" || !state.filter.trim()) return
+    e.preventDefault()
+    // The branch named exactly wins over one that merely contains what was typed; a name that is the checked branch's own just closes the panel.
+    const q = state.filter.trim()
+    const pickable = [...listBox.querySelectorAll('.pop-item:not(:disabled):not([aria-checked="true"])')]
+    const exact = pickable.find((n) => n.dataset.key === `b/${q}` || n.dataset.key === `r/${q}`)
+    const first = exact ?? pickable[0]
+    if (first) first.click()
+    else if (listBox.querySelector('.pop-item[aria-checked="true"]')) pop.close(true)
+    else cmdBox.querySelector("button:not(:disabled)")?.click()
+  })
+  /** Fill the list of branches, and the two commands under it. Runs for the list view, and on each key typed in the search box. */
   const paintList = () => {
     const d = state.data
-    const q = state.filter.trim().toLowerCase()
-    const hit = (name) => !q || name.toLowerCase().includes(q)
+    const q = state.filter.trim()
+    const hit = (name) => !q || name.toLowerCase().includes(q.toLowerCase())
     const locked = state.working || state.running
-    const local = (d?.local ?? []).filter((b) => hit(b.name))
+    const p = state.pending
+    /** The row that's checked: the branch a pending join names, else the one checked out. */
+    const isOn = (b) => (p ? p.join === b.name : b.name === d.current)
+    const local = (d?.local ?? []).filter((b) => hit(b.name)).sort((a, b) => Number(isOn(b)) - Number(isOn(a)))
     const remote = (d?.remote ?? []).filter(hit)
+    const rows = local.map((b) => {
+      const on = isOn(b)
+      const tags = [
+        b.name === (d.base ?? "").replace(/^origin\//, "") ? tag("default", "", "The repository's default branch") : null,
+        b.elsewhere ? tag("worktree", "", `Checked out in ${b.elsewhere}`) : null,
+        b.gone ? tag("gone", "", "Its upstream branch was deleted on the remote") : null,
+        b.ahead > 0 ? tag(`↑${b.ahead}`, "ahead", `${b.ahead} commit${b.ahead === 1 ? "" : "s"} not pushed`) : null,
+        b.behind > 0 ? tag(`↓${b.behind}`, "", `${b.behind} commit${b.behind === 1 ? "" : "s"} behind ${b.upstream}`) : null,
+        b.at ? el("span", { class: "bp-when", text: ago(b.at), title: new Date(b.at).toLocaleString() }) : null
+      ]
+      return el("button", { class: "pop-item bp-row", type: "button", role: "menuitemradio", "aria-checked": String(on), "data-key": `b/${b.name}`, disabled: locked && !on,
+        title: on ? `On ${b.name}` : b.elsewhere ? `Checked out in ${b.elsewhere}: ${deferWorktree ? "start the thread there" : "work there"}` : `Switch to ${b.name}`,
+        onclick: () => {
+          if (on) return
+          if (b.elsewhere && deferWorktree) { state.pending = { join: b.name }; paintLabel(); pop.close(true); return }
+          if (b.elsewhere) act(() => onJoin(b.name))
+          else act(async () => { state.pending = null; await onSwitch(b.name) })
+        } },
+        el("span", { class: "pop-check", "aria-hidden": "true", text: on ? "✓" : "" }),
+        el("span", { class: "bp-branch", text: b.name }),
+        el("span", { class: "bp-meta" }, ...tags))
+    })
+    const remoteRows = remote.map((r) => {
+      const item = popItem({ key: `r/${r}`, on: false, text: r, disabled: locked, onPick: () => act(async () => { state.pending = null; await onSwitch(r) }) })
+      item.title = `Make a local branch that tracks ${r}, and switch to it`
+      return item
+    })
     listBox.replaceChildren(...[
-      local.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Local branches" }, local.map((b) => {
-        const on = b.name === d.current && !state.pending
-        const item = popItem({
-          key: `b/${b.name}`, on, text: b.name, help: b.elsewhere ? "checked out in another worktree" : null,
-          disabled: (locked || Boolean(b.elsewhere)) && !on,
-          onPick: () => act(async () => { state.pending = null; await onSwitch(b.name) })
-        })
-        item.title = b.elsewhere ? `Checked out in ${b.elsewhere}: git won't check it out twice` : `Switch to ${b.name}`
-        return item
-      })) : null,
-      remote.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Remote branches" }, el("div", { class: "pop-head", text: "Remote" }),
-        remote.map((r) => popItem({ key: `r/${r}`, on: false, text: r, disabled: locked, onPick: () => act(async () => { state.pending = null; await onSwitch(r) }) }))) : null,
-      !local.length && !remote.length ? el("div", { class: "pop-note", text: d ? `No branch matches “${state.filter.trim()}”.` : state.error || "Reading the branches…" }) : null].filter(Boolean))
+      local.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Local branches" }, el("div", { class: "pop-head", text: "Branches" }), rows) : null,
+      remote.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Remote branches" }, el("div", { class: "pop-head", text: "Remote" }), remoteRows) : null,
+      !local.length && !remote.length ? el("div", { class: "pop-note", text: !d ? state.error || "Reading the branches…" : q ? `No branch matches “${q}”.` : "No branches yet." }) : null
+    ].filter(Boolean))
+    // The two commands. Typing a name no local branch has offers to create it.
+    const fresh = q !== "" && !names().includes(q) && !(d?.remote ?? []).includes(q)
+    const none = !(d?.local.length || d?.remote.length)
+    cmdBox.replaceChildren(
+      el("button", { class: "pop-item bp-cmd", type: "button", "data-key": "new-branch", disabled: locked || none, onclick: () => openNew("branch", fresh ? q : "") },
+        icon(PLUS_PATHS), el("span", { text: fresh ? `Create branch “${q}”…` : "New branch…" })),
+      el("button", { class: "pop-item bp-cmd", type: "button", "data-key": "new-worktree", disabled: locked || none, onclick: () => openNew("worktree", fresh ? q : "") },
+        icon(FOLDER_PATHS), el("span", { text: fresh ? `New worktree on “${q}”…` : "New worktree…" })))
   }
   pop.paint = () => {
     const d = state.data
     const locked = state.working || state.running
-    const filter = own(el("input", { class: "bp-filter", type: "search", placeholder: "Find a branch", "aria-label": "Find a branch", "data-key": "filter", autocomplete: "off", spellcheck: "false", value: state.filter }))
-    filter.addEventListener("input", () => { state.filter = filter.value; paintList() })
-    const all = [...(d?.local ?? []).map((b) => b.name), ...(d?.remote ?? [])]
-    const base = own(el("select", { class: "bp-base", "aria-label": "The branch it starts from", "data-key": "base", disabled: locked },
-      all.map((name) => el("option", { value: name, selected: name === state.base }, name))))
-    base.addEventListener("change", () => { state.base = base.value })
-    const name = own(el("input", { class: "bp-name", placeholder: "Made up if empty", "aria-label": "The new branch's name", "data-key": "name", autocomplete: "off", spellcheck: "false", value: state.name, disabled: locked }))
-    name.addEventListener("input", () => { state.name = name.value })
-    const create = el("button", { class: "btn btn-primary btn-xs", type: "button", "data-key": "create", disabled: locked || !all.length, onclick: () => {
-      const choice = { base: base.value, branch: name.value.trim() }
-      if (deferWorktree) { state.pending = choice; paintLabel(); pop.close(true); return }
-      act(async () => { await onWorktree(choice); state.name = "" })
-    } }, deferWorktree ? "Use a new worktree" : "Create worktree")
-    pop.panel.replaceChildren(
-      el("div", { class: "pop-col bp-switch" },
-        el("div", { class: "pop-head", text: "Switch branch" }),
+    if (state.view === "list") {
+      const p = state.pending
+      const cancel = () => el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "cancel", onclick: () => { state.pending = null; paintLabel(); pop.repaint() } }, "Work in the project folder")
+      // Where the thread works, when that isn't the project folder: a choice pending, or a worktree it's in.
+      const where = p?.join
+        ? el("div", { class: "bp-where" }, el("div", { class: "pop-note", text: `The thread starts in the worktree where ${p.join} is checked out.` }), cancel())
+        : p
+          ? el("div", { class: "bp-where" }, el("div", { class: "pop-note", text: `A new worktree on ${p.branch || "a new branch"} from ${p.base}, made when you send.` }), cancel())
+          : d?.worktree && onLeave
+            ? el("div", { class: "bp-where" },
+              el("div", { class: "pop-note", text: `Works in a worktree: ${d.cwd}` }),
+              el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "leave", disabled: locked, onclick: () => act(onLeave) }, "Work in the project folder"))
+            : null
+      pop.panel.replaceChildren(el("div", { class: "pop-col bp-pick" },
         filter,
         state.running ? el("div", { class: "pop-note", text: "Branches switch once this turn ends." }) : null,
+        state.working ? el("div", { class: "pop-note", text: "Working…" }) : null,
+        state.problem ? el("p", { class: "bp-error", role: "alert", text: state.problem }) : null,
         listBox,
-        d?.worktree && onLeave ? el("div", { class: "bp-where" },
-          el("div", { class: "pop-note", text: `Works in a worktree: ${d.cwd}` }),
-          el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "leave", disabled: locked, onclick: () => act(onLeave) }, "Work in the project folder")) : null),
-      el("div", { class: "pop-col bp-new" },
-        el("div", { class: "pop-head", text: "New worktree" }),
-        el("label", { class: "bp-field" }, el("span", { text: "From" }), base),
-        el("label", { class: "bp-field" }, el("span", { text: "New branch" }), name),
-        el("div", { class: "bp-actions" },
-          create,
-          state.pending ? el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "cancel", onclick: () => { state.pending = null; paintLabel(); pop.repaint() } }, "Work in the project folder") : null),
-        el("p", { class: "pop-note bp-help", text: deferWorktree
-          ? state.pending ? `Made when you send: the thread works there, on ${state.pending.branch || "a new branch"} from ${state.pending.base}.` : "Made when you send: the thread works in a folder of its own, on a new branch, apart from the project folder."
-          : "The thread moves to a folder of its own on the new branch, and starts a fresh session there. Its messages stay." })))
-    paintList()
+        cmdBox,
+        where))
+      paintList()
+      return
+    }
+    // The new view: a small form for a branch, here or in a worktree of its own.
+    const worktree = state.mode === "worktree"
+    const taken = names()
+    const all = [...taken, ...(d?.remote ?? [])]
+    const nameBox = own(el("input", { class: "bp-name", "data-key": "name", placeholder: worktree ? "Made up if empty" : "feature/login", "aria-label": "The new branch's name", autocomplete: "off", spellcheck: "false", value: state.name, disabled: locked }))
+    const baseBox = own(el("select", { class: "bp-base", "aria-label": "The branch it starts from", "data-key": "base", disabled: locked },
+      all.map((name) => el("option", { value: name, selected: name === state.base }, name))))
+    baseBox.addEventListener("change", () => { state.base = baseBox.value })
+    const error = el("p", { class: "bp-error", role: "alert", hidden: true })
+    const create = el("button", { class: "btn btn-primary btn-xs", type: "button", "data-key": "create" },
+      state.working ? "Working…" : worktree ? (deferWorktree ? "Use a new worktree" : "Create worktree") : "Create branch")
+    /** Say what's wrong with the name (or with the last try), and let Create be pressed only when nothing is. */
+    const check = () => {
+      const name = nameBox.value.trim()
+      const bad = branchNameProblem(name, taken)
+      error.textContent = bad || state.problem
+      error.hidden = !(bad || state.problem)
+      create.disabled = locked || !all.length || bad !== "" || (!worktree && !name)
+    }
+    const submit = () => {
+      const choice = { base: baseBox.value, branch: nameBox.value.trim() }
+      // A new thread's worktree is only chosen here: it's made when the thread starts.
+      if (worktree && deferWorktree) {
+        Object.assign(state, { pending: choice, view: "list", name: "", filter: "" })
+        filter.value = ""
+        paintLabel()
+        pop.close(true)
+        return
+      }
+      act(async () => {
+        if (worktree) await onWorktree(choice)
+        else { state.pending = null; await onCreate(choice) }
+        Object.assign(state, { view: "list", name: "", filter: "" })
+        filter.value = ""
+      })
+    }
+    nameBox.addEventListener("input", () => { state.name = nameBox.value; state.problem = ""; check() })
+    nameBox.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (!create.disabled) submit() } })
+    create.addEventListener("click", submit)
+    pop.panel.replaceChildren(el("div", { class: "pop-col bp-form" },
+      el("div", { class: "bp-top" },
+        el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "back", onclick: openList }, "‹ Branches"),
+        el("span", { class: "bp-title", text: worktree ? "New worktree" : "New branch" })),
+      el("div", { class: "seg bp-seg", role: "radiogroup", "aria-label": "Where the new branch is checked out" },
+        el("button", { type: "button", role: "radio", "aria-checked": String(!worktree), "data-key": "mode-branch", disabled: locked, onclick: () => { state.mode = "branch"; pop.repaint() } }, "In this folder"),
+        el("button", { type: "button", role: "radio", "aria-checked": String(worktree), "data-key": "mode-worktree", disabled: locked, onclick: () => { state.mode = "worktree"; pop.repaint() } }, "In a new worktree")),
+      el("label", { class: "bp-field" }, el("span", { text: "Branch name" }), nameBox),
+      el("label", { class: "bp-field" }, el("span", { text: "Start from" }), baseBox),
+      el("p", { class: "pop-note bp-help", text: !worktree ? "This folder switches to the new branch. Uncommitted changes come along."
+        : deferWorktree ? "Made when you send: the thread works in a folder of its own on the new branch, apart from the project folder."
+          : "The thread moves to a folder of its own on the new branch, and starts a fresh session there. Its messages stay." }),
+      error,
+      el("div", { class: "bp-actions" },
+        el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "cancel-new", onclick: openList }, "Cancel"),
+        create)))
+    check()
   }
-  // Opening it reads the branches again: the agent may have made or switched some.
-  pop.trigger.addEventListener("click", () => { if (!pop.panel.hidden) refresh() })
+  // Opening it starts at the list with an empty search, and reads the branches again: the agent may have made or switched some.
+  pop.trigger.addEventListener("click", () => {
+    if (pop.panel.hidden) return
+    Object.assign(state, { view: "list", filter: "", problem: "" })
+    filter.value = ""
+    pop.repaint()
+    if (!touchFirst.matches) filter.focus()
+    refresh()
+  })
   refresh()
   return {
     node: pop.wrap,
     refresh,
-    /** The worktree a new thread starts in, if one was chosen: { base, branch }. */
+    /** The worktree a new thread starts in, if one was chosen: { base, branch } for a new one, { join } for one that exists. */
     choice: () => state.pending,
     clear: () => { state.pending = null; paintLabel() },
     setBusy: (b) => { if (state.running !== b) { state.running = b; pop.repaint() } }
@@ -975,6 +1109,10 @@ function startView(project) {
     onSwitch: async (name) => {
       const r = await api("POST", `projects/${project.id}/branch`, { branch: name })
       toast(`${project.name} is on ${r.branch} now.`)
+    },
+    onCreate: async (choice) => {
+      const r = await api("POST", `projects/${project.id}/branch`, { ...choice, create: true })
+      toast(`${project.name} is on the new branch ${r.branch} now.`)
     },
     deferWorktree: true
   })
@@ -1574,9 +1712,14 @@ function threadView(t) {
   const branch = branchPicker({
     load: () => api("GET", `threads/${t.id}/branches`),
     onSwitch: async (name) => branched(await api("POST", `threads/${t.id}/branch`, { branch: name }), `Switched to ${name}.`),
+    onCreate: async (choice) => branched(await api("POST", `threads/${t.id}/branch`, { ...choice, create: true }), `Created ${choice.branch} and switched to it.`),
     onWorktree: async (choice) => {
       const meta = await api("POST", `threads/${t.id}/worktree`, choice)
       branched(meta, `This thread works in a new worktree now, on ${meta.branch}.`)
+    },
+    onJoin: async (name) => {
+      const meta = await api("POST", `threads/${t.id}/worktree`, { join: name })
+      branched(meta, meta.cwd ? `This thread works in the worktree of ${name} now.` : "This thread works in the project folder again.")
     },
     onLeave: async () => branched(await api("POST", `threads/${t.id}/worktree`, { leave: true }), "This thread works in the project folder again.")
   })
@@ -2042,6 +2185,8 @@ function paintLinks() { feed?.links?.paint() }
 
 // ---------- git panel: a right sidebar with the thread's branch and its pull request ----------
 const BRANCH_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="4.5" r="1.5"/><path d="M4.5 5v6M11.5 6c0 3.5-7 2.5-7 5"/>'
+const PLUS_PATHS = '<path d="M8 3.5v9M3.5 8h9"/>'
+const FOLDER_PATHS = '<path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/>'
 const PR_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7M8.5 3 7 4.5 8.5 6"/>'
 const REFRESH_PATHS = '<path d="M13.2 8A5.2 5.2 0 1 1 11.6 4.3M13.2 2.3v3.2H10"/>'
 const OUT_PATHS = '<path d="M9.5 2.5h4v4M13.5 2.5 8 8M6.5 3.5h-3v9h9v-3"/>'
@@ -2109,6 +2254,7 @@ function makeGitPanel(t) {
   // While it's open, look again: often while checks run, now and then otherwise.
   gitPanel.timer = setInterval(() => {
     const g = gitPanel
+    if (g && !document.hidden && autoPullOn() && Date.now() - (gitFetched.get(g.threadId) ?? 0) > AUTO_PULL_MS) autoSync()
     if (!g || !gitOpenNow() || document.hidden || g.loading) return
     const waiting = g.data?.pr?.checks.some((c) => c.state === "running" || c.state === "pending")
     if (Date.now() - g.at > (waiting ? 15_000 : 90_000)) loadGit()
@@ -2188,6 +2334,43 @@ function paintGitToggle() {
   g.toggle.title = [label, branch, pr ? `PR #${pr.number} · ${PR_STATE_LABEL[prState(pr)]}` : ""].filter(Boolean).join("\n")
 }
 
+/** How often auto-pull fetches for the open thread. */
+const AUTO_PULL_MS = 180_000
+/** When each thread's folder was last fetched (thread id → ms), so reopening a thread doesn't fetch again at once. */
+const gitFetched = new Map()
+const autoPullOn = () => load("gitAutoPull", false) === true
+/** Whether a pull now would only fast-forward: behind its upstream, nothing of its own, nothing uncommitted, no turn running. */
+const canAutoPull = (d) => !!d?.repo && !!d.upstream && d.behind > 0 && d.ahead === 0 && d.branch === d.current && d.changes.length === 0 && S.open?.status !== "running"
+
+/** Auto-pull's round: fetch, look again, and fast-forward the branch when that's safe. A pull that failed isn't tried again until the branch moves. */
+async function autoSync() {
+  const g = gitPanel
+  if (!g || g.syncing || (g.data && !g.data.repo)) return
+  g.syncing = true
+  gitFetched.set(g.threadId, Date.now())
+  try {
+    // Being offline is ordinary: the next round tries again.
+    await api("POST", `threads/${g.threadId}/git/fetch`, {}).catch(() => {})
+    while (gitPanel === g && g.loading) await new Promise((r) => setTimeout(r, 200))
+    if (gitPanel !== g) return
+    await loadGit()
+    const d = g.data
+    if (gitPanel !== g || !canAutoPull(d)) return
+    const key = `${d.branch}@${d.behind}`
+    if (g.pullFailed === key) return
+    try {
+      await api("POST", `threads/${g.threadId}/git/pull`, {})
+      toast(`Pulled ${d.behind} commit${d.behind === 1 ? "" : "s"} into ${d.branch}.`)
+    } catch (e) {
+      g.pullFailed = key
+      toast(`Couldn't pull ${d.branch}: ${e.message}`, true)
+    }
+    if (gitPanel === g) await loadGit()
+  } finally {
+    g.syncing = false
+  }
+}
+
 async function loadGit() {
   const g = gitPanel
   if (!g || g.loading) return
@@ -2251,7 +2434,7 @@ function paintGit() {
   const kids = [
     g.error ? el("p", { class: "git-note warn", text: g.error }) : null,
     branchCard(d),
-    d.pr ? prCard(d.pr) : noPrCard(d),
+    d.pr ? prCard(d.pr, d) : noPrCard(d),
     ...(d.pr ? prSections(d.pr) : []),
     gitSec("commits", d.pr ? "Commits on this branch" : "Commits", d.commits.length, d.commits.length
       ? el("ol", { class: "git-list" }, d.commits.map((c) => el("li", { class: "git-commit" },
@@ -2347,12 +2530,26 @@ function branchCard(d) {
     facts.push(el("span", { class: "git-fact", text: "not pushed" }))
   }
   const canPush = d.branch && (!d.upstream || d.ahead > 0)
+  const canPull = d.upstream && d.behind > 0 && d.ahead === 0 && d.branch === d.current
+  const diverged = d.upstream && d.ahead > 0 && d.behind > 0
   return el("div", { class: "git-card git-branch" },
     el("div", { class: "git-branch-line" },
       icon(BRANCH_PATHS, "git-branch-ico"),
-      el("code", { class: "git-branch-name", text: d.branch || "detached HEAD", title: d.branch }),
-      canPush ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("push", { branch: d.branch }, `Pushed ${d.branch}.`)) }, "Push") : null),
+      el("code", { class: "git-branch-name", text: d.branch || "detached HEAD", title: d.branch })),
     facts.length ? el("div", { class: "git-facts" }, facts) : null,
+    el("div", { class: "git-actions" },
+      canPull ? el("button", { class: "btn btn-primary btn-xs", type: "button", title: `Fast-forward ${d.branch} to ${d.upstream}`, onclick: (e) => withBusy(e.currentTarget, () => gitAction("pull", {}, `Pulled ${d.behind} commit${d.behind === 1 ? "" : "s"} into ${d.branch}.`)) }, `Pull ↓${d.behind}`) : null,
+      canPush ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("push", { branch: d.branch }, `Pushed ${d.branch}.`)) }, "Push") : null,
+      el("button", { class: "btn btn-quiet btn-xs", type: "button", title: "Ask the remotes what's new, and forget remote branches that were deleted", onclick: (e) => withBusy(e.currentTarget, async () => { gitFetched.set(gitPanel?.threadId, Date.now()); await gitAction("fetch", {}, "Fetched.") }) }, "Fetch")),
+    diverged ? el("p", { class: "git-note", text: `${d.branch} has ${d.ahead} commit${d.ahead === 1 ? "" : "s"} of its own and is ${d.behind} behind ${d.upstream}, so a pull can't fast-forward it.` }) : null,
+    diverged ? el("div", { class: "git-actions" },
+      el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(`Rebase ${d.branch} onto ${d.upstream}: run \`git pull --rebase\`, resolve any conflicts, run the checks, and tell me what changed. Don't push.`) }, "Ask the agent to rebase")) : null,
+    d.upstream ? el("label", { class: "check git-auto", title: "While this thread is open, zero fetches every few minutes and fast-forwards this branch when it is only behind and nothing is uncommitted. Never a merge or a rebase." },
+      el("input", { type: "checkbox", checked: autoPullOn(), onchange: (e) => {
+        save("gitAutoPull", e.currentTarget.checked)
+        if (e.currentTarget.checked && gitPanel) { gitFetched.delete(gitPanel.threadId); autoSync() }
+      } }),
+      "Pull automatically") : null,
     d.worktree ? el("p", { class: "git-note", title: d.cwd, text: `In a worktree: ${d.cwd}` }) : null,
     d.current && d.branch !== d.current
       ? el("p", { class: "git-note", text: `The project is on ${d.current} now; this thread last worked on ${d.branch}.` })
@@ -2386,7 +2583,7 @@ async function createPr(d) {
   await gitAction("create", { branch: d.branch, base: v("base").value.trim(), title: v("title").value, body: v("body").value, draft: v("draft").checked }, "Pull request created.")
 }
 
-function prCard(pr) {
+function prCard(pr, d) {
   const state = prState(pr)
   const pills = []
   if (pr.reviewDecision && REVIEW_LABEL[pr.reviewDecision]) pills.push(el("span", { class: `git-pill review-${pr.reviewDecision.toLowerCase()}`, text: REVIEW_LABEL[pr.reviewDecision] }))
@@ -2400,7 +2597,16 @@ function prCard(pr) {
       ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("ready", { number: pr.number }, "Marked ready for review.")) }, "Ready for review")
       : el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("ready", { number: pr.number, draft: true }, "Converted to a draft.")) }, "Convert to draft"))
     actions.push(el("button", { class: "btn btn-primary btn-xs", type: "button", disabled: pr.isDraft, title: pr.isDraft ? "A draft can't be merged" : null, onclick: () => mergePr(pr) }, "Merge…"))
+    if (pr.mergeState === "BEHIND") actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", title: `Bring ${pr.head} up to date with ${pr.base}, on GitHub`, onclick: (e) => withBusy(e.currentTarget, () => gitAction("update", { number: pr.number }, `Updated ${pr.head} from ${pr.base}.`)) }, "Update branch"))
+    actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", "aria-haspopup": "dialog", onclick: () => actionSheet(`#${pr.number} ${pr.title}`, [
+      { label: "Edit title and description", run: () => editPr(pr) },
+      { label: "Request reviewers", run: () => requestReviewers(pr) },
+      { label: `Update branch from ${pr.base}`, run: () => gitAction("update", { number: pr.number }, `Updated ${pr.head} from ${pr.base}.`) },
+      { label: "Close pull request", danger: true, run: () => closePr(pr) }
+    ]) }, "More…"))
   }
+  if (pr.state === "CLOSED") actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("reopen", { number: pr.number }, `Reopened #${pr.number}.`)) }, "Reopen"))
+  if (pr.state !== "OPEN" && d.gh.ok && d.branch && d.branch !== (d.base?.replace(/^origin\//, "") ?? "")) actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", title: `Open another pull request for ${d.branch}`, onclick: () => createPr(d) }, "New pull request"))
   return el("div", { class: `git-card git-pr pr-${state}` },
     el("div", { class: "git-pr-top" },
       el("span", { class: `git-state st-${state}` }, icon(PR_PATHS), PR_STATE_LABEL[state] ?? pr.state),
@@ -2427,6 +2633,36 @@ async function mergePr(pr) {
     el("label", { class: "check" }, el("input", { type: "checkbox", name: "delete" }), `Delete ${pr.head} after`))
   if (!(await dialog({ title: `Merge #${pr.number} into ${pr.base}?`, text: pr.title, ok: "Merge", body }))) return
   await gitAction("merge", { number: pr.number, method: body.querySelector("[name=method]").value, deleteBranch: body.querySelector("[name=delete]").checked }, `Merged #${pr.number}.`)
+}
+
+/** Close the pull request, with an optional comment on GitHub; its branch stays. */
+async function closePr(pr) {
+  const body = el("div", {},
+    el("label", { class: "field" }, "Comment (optional)", el("textarea", { name: "comment", rows: "3", placeholder: "Why it's being closed" })))
+  if (!(await dialog({ title: `Close #${pr.number}?`, text: `${pr.title}. It isn't merged; it can be reopened later, and the branch ${pr.head} stays.`, ok: "Close pull request", body }))) return
+  await gitAction("close", { number: pr.number, comment: body.querySelector("[name=comment]").value }, `Closed #${pr.number}.`)
+}
+
+/** Edit the pull request's title and description, on GitHub. */
+async function editPr(pr) {
+  const body = el("div", {},
+    el("label", { class: "field" }, "Title", el("input", { name: "title", value: pr.title, autocomplete: "off" })),
+    el("label", { class: "field" }, "Description", el("textarea", { name: "body", rows: "10" }, pr.body)))
+  if (!(await dialog({ title: `Edit #${pr.number}`, ok: "Save", body }))) return
+  const title = body.querySelector("[name=title]").value
+  if (!title.trim()) return toast("Give the pull request a title.", true)
+  await gitAction("edit", { number: pr.number, title, body: body.querySelector("[name=body]").value }, "Pull request updated.")
+}
+
+/** Ask GitHub for a review from people or teams, by name. */
+async function requestReviewers(pr) {
+  const body = el("div", {},
+    el("label", { class: "field" }, "Reviewers", el("input", { name: "reviewers", placeholder: "ada, bob, org/team", autocomplete: "off", spellcheck: "false" })))
+  const asked = pr.reviewers.length > 0
+  if (!(await dialog({ title: `Request a review of #${pr.number}`, text: asked ? `Already asked: ${pr.reviewers.join(", ")}.` : "GitHub usernames or teams, separated by commas.", ok: "Request review", body }))) return
+  const names = body.querySelector("[name=reviewers]").value
+  if (!names.trim()) return
+  await gitAction("reviewers", { number: pr.number, reviewers: names }, "Review requested.")
 }
 
 /** Checks in the order they matter: what failed, what's still going, then what passed or didn't run. */

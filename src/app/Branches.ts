@@ -1,7 +1,8 @@
 /**
  * A thread's branch, picked from its composer: the branches it can switch to,
- * the switch itself, and a git worktree on a new branch from a base the person
- * picks, for a thread to work in apart from the project's own folder.
+ * the switch itself, a new branch from a base the person picks, a git worktree
+ * on a new branch from such a base for a thread to work in apart from the
+ * project's own folder, and joining the worktree a branch is already in.
  *
  * Every command is `git` with no shell (GitInfo's `run`), and never prompts.
  */
@@ -13,6 +14,15 @@ export interface Branch {
   readonly name: string
   /** Where it's checked out, when that's another worktree than the one asked about: git won't switch to it here. */
   readonly elsewhere: string | null
+  /** When its last commit was made (ISO 8601); "" when git didn't say. */
+  readonly at: string
+  /** The branch it tracks, as `origin/name`; "" when it tracks none. */
+  readonly upstream: string
+  /** Commits it has that its upstream doesn't, and the other way round. */
+  readonly ahead: number
+  readonly behind: number
+  /** Its upstream was deleted on the remote. */
+  readonly gone: boolean
 }
 
 export interface Branches {
@@ -48,11 +58,25 @@ const out = async (exec: Run, cwd: string, args: ReadonlyArray<string>) => {
   return r.ok ? r.stdout.trim() : null
 }
 
-/** `git for-each-ref --format=%(refname:short)<US>%(worktreepath) refs/heads` into branches, against the worktree at `cwd`. */
+/**
+ * `git for-each-ref` lines of five fields, each after a unit separator: the name, the worktree it's in, its
+ * last commit's date, its upstream, and how it stands against that upstream (`ahead 2`, `behind 1`,
+ * `ahead 2, behind 1`, `gone`, or nothing), into branches, against the worktree at `cwd`. A line with fewer
+ * fields (older output) leaves the rest empty.
+ */
 export const parseLocal = (text: string, cwd: string): Array<Branch> =>
   text.split("\n").filter((l) => l.trim()).map((l) => {
-    const [name = "", where = ""] = l.split(FS)
-    return { name: name.trim(), elsewhere: where.trim() && !samePath(where.trim(), cwd) ? where.trim() : null }
+    const [name = "", where = "", at = "", upstream = "", track = ""] = l.split(FS).map((f) => f.trim())
+    const count = (re: RegExp) => Number(re.exec(track)?.[1] ?? 0)
+    return {
+      name,
+      elsewhere: where && !samePath(where, cwd) ? where : null,
+      at,
+      upstream,
+      ahead: count(/ahead (\d+)/),
+      behind: count(/behind (\d+)/),
+      gone: track === "gone"
+    }
   }).filter((b) => b.name !== "")
 
 /** Remote branches (`origin/x`) that no local branch already stands for; never `origin/HEAD` or the bare remote. */
@@ -67,7 +91,7 @@ export const listBranches = async (cwd: string, exec: Run = run): Promise<Branch
   if ((await out(exec, cwd, ["rev-parse", "--is-inside-work-tree"])) !== "true") return none
   const [current, heads, remotes, remoteHead, gitDir, common] = await Promise.all([
     out(exec, cwd, ["branch", "--show-current"]),
-    out(exec, cwd, ["for-each-ref", `--format=%(refname:short)${FS}%(worktreepath)`, "--sort=-committerdate", "refs/heads"]),
+    out(exec, cwd, ["for-each-ref", `--format=%(refname:short)${FS}%(worktreepath)${FS}%(committerdate:iso-strict)${FS}%(upstream:short)${FS}%(upstream:track,nobracket)`, "--sort=-committerdate", "refs/heads"]),
     out(exec, cwd, ["for-each-ref", "--format=%(refname:short)", "--sort=-committerdate", "refs/remotes"]),
     out(exec, cwd, ["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"]),
     out(exec, cwd, ["rev-parse", "--absolute-git-dir"]),
@@ -105,6 +129,27 @@ export const switchBranch = async (cwd: string, branch: string, exec: Run = run)
   return { ok: true, branch: (await out(exec, cwd, ["branch", "--show-current"])) || branch }
 }
 
+/**
+ * A new branch `branch` started from `base` (a local or remote branch), checked out in the worktree at
+ * `cwd`. Uncommitted changes come along when git can carry them; when it can't, it refuses and nothing changes.
+ */
+export const createBranch = async (
+  cwd: string,
+  input: { readonly base: string; readonly branch: string },
+  exec: Run = run
+): Promise<{ ok: true; branch: string } | { ok: false; error: string }> => {
+  const branch = input.branch.trim()
+  const base = input.base.trim()
+  if (!branch) return { ok: false, error: "name the new branch" }
+  if (!isRefName(branch)) return { ok: false, error: `${branch} can't be a branch name` }
+  if (!isRefName(base)) return { ok: false, error: "pick the branch it starts from" }
+  if (!(await out(exec, cwd, ["rev-parse", "--verify", "--quiet", `${base}^{commit}`]))) return { ok: false, error: `there's no branch ${base}` }
+  if (await out(exec, cwd, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])) return { ok: false, error: `${branch} already exists: switch to it, or pick another name` }
+  const r = await exec("git", ["switch", "--no-track", "-c", branch, base], cwd)
+  if (!r.ok) return { ok: false, error: why(r, "git switch") }
+  return { ok: true, branch }
+}
+
 /** A branch name's last part as a folder name: `feat/Login fix` → `login-fix`. */
 export const slug = (s: string): string =>
   s.toLowerCase().replace(/^.*\//, "").replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 60) || "work"
@@ -135,4 +180,17 @@ export const createWorktree = async (
   const r = await exec("git", ["worktree", "add", "--no-track", "-b", branch, path, base], repo)
   if (!r.ok) return { ok: false, error: why(r, "git worktree add") }
   return { ok: true, path, branch }
+}
+
+/** The folder where the local branch `branch` is checked out, when that's another worktree than the one at `cwd`. */
+export const worktreeOf = async (
+  cwd: string,
+  branch: string,
+  exec: Run = run
+): Promise<{ ok: true; path: string; branch: string } | { ok: false; error: string }> => {
+  if (!isRefName(branch)) return { ok: false, error: "that isn't a branch name" }
+  const found = (await listBranches(cwd, exec)).local.find((b) => b.name === branch)
+  if (!found) return { ok: false, error: `there's no branch ${branch}` }
+  if (found.elsewhere === null) return { ok: false, error: `${branch} isn't checked out in another worktree` }
+  return { ok: true, path: resolve(found.elsewhere), branch }
 }
