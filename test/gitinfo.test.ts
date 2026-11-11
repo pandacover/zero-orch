@@ -129,7 +129,7 @@ describe("actions", () => {
     expect(parseAction("push", { branch: "a..b" })).toMatch(/which branch/)
     expect(parseAction("push", { branch: "zero/feat-1" })).toEqual({ kind: "push", branch: "zero/feat-1" })
     expect(parseAction("create", { branch: "feat", title: "" })).toMatch(/title/)
-    expect(parseAction("close", {})).toMatch(/no such action/)
+    expect(parseAction("nope", {})).toMatch(/no such action/)
   })
 
   it("runs gh and git with text on stdin and flag values bound to their flags", () => {
@@ -146,5 +146,39 @@ describe("actions", () => {
     const r = await runAction(".", { kind: "create", branch: "feat", base: "", title: "T", body: "", draft: false }, fake([["git push", no("rejected: non-fast-forward")]], calls))
     expect(r).toEqual({ ok: false, error: "rejected: non-fast-forward" })
     expect(calls).toHaveLength(1)
+  })
+
+  it("takes the new git and pull request actions", () => {
+    expect(parseAction("fetch", {})).toEqual({ kind: "fetch" })
+    expect(parseAction("pull", {})).toEqual({ kind: "pull" })
+    expect(parseAction("close", {})).toMatch(/which/)
+    expect(parseAction("close", { number: 3, comment: "  done " })).toEqual({ kind: "close", number: 3, comment: "done" })
+    expect(parseAction("reopen", {})).toMatch(/which/)
+    expect(parseAction("reopen", { number: 3 })).toEqual({ kind: "reopen", number: 3 })
+    expect(parseAction("edit", { number: 3, title: "  " })).toMatch(/title/)
+    expect(parseAction("edit", { number: 3, title: "New", body: "B" })).toEqual({ kind: "edit", number: 3, title: "New", body: "B" })
+    expect(parseAction("update", { number: 3 })).toEqual({ kind: "update", number: 3, rebase: false })
+    expect(parseAction("update", { number: 3, rebase: true })).toEqual({ kind: "update", number: 3, rebase: true })
+    expect(parseAction("reviewers", { number: 3, reviewers: "@ada, bob  ada" })).toEqual({ kind: "reviewers", number: 3, reviewers: ["ada", "bob"] })
+    expect(parseAction("reviewers", { number: 3, reviewers: ["org/team"] })).toEqual({ kind: "reviewers", number: 3, reviewers: ["org/team"] })
+    expect(parseAction("reviewers", { number: 3, reviewers: "" })).toMatch(/name someone/)
+    expect(parseAction("reviewers", { number: 3, reviewers: "bad name!" })).toMatch(/name! isn't a GitHub username/)
+    expect(parseAction("reviewers", { number: 3, reviewers: "--flag" })).toMatch(/isn't a GitHub username/)
+  })
+
+  it("runs the new actions' commands", () => {
+    expect(commandsFor({ kind: "fetch" })).toEqual([{ cmd: "git", args: ["fetch", "--all", "--prune"] }])
+    expect(commandsFor({ kind: "pull" })).toEqual([{ cmd: "git", args: ["pull", "--ff-only"] }])
+    expect(commandsFor({ kind: "close", number: 3, comment: "done" })).toEqual([
+      { cmd: "gh", args: ["pr", "comment", "3", "--body-file", "-"], input: "done" },
+      { cmd: "gh", args: ["pr", "close", "3"] }
+    ])
+    expect(commandsFor({ kind: "close", number: 3, comment: "" })).toEqual([{ cmd: "gh", args: ["pr", "close", "3"] }])
+    expect(commandsFor({ kind: "reopen", number: 3 })).toEqual([{ cmd: "gh", args: ["pr", "reopen", "3"] }])
+    expect(commandsFor({ kind: "edit", number: 3, title: "New title", body: "--B" })).toEqual([
+      { cmd: "gh", args: ["pr", "edit", "3", "--title=New title", "--body-file", "-"], input: "--B" }
+    ])
+    expect(commandsFor({ kind: "update", number: 3, rebase: true })).toEqual([{ cmd: "gh", args: ["pr", "update-branch", "3", "--rebase"] }])
+    expect(commandsFor({ kind: "reviewers", number: 3, reviewers: ["ada", "bob"] })).toEqual([{ cmd: "gh", args: ["pr", "edit", "3", "--add-reviewer=ada,bob"] }])
   })
 })

@@ -10,7 +10,7 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
-import { createWorktree, listBranches, samePath, switchBranch } from "./Branches.ts"
+import { createBranch, createWorktree, listBranches, samePath, switchBranch, worktreeOf } from "./Branches.ts"
 import { fileDiff, gitView, parseAction, pendingChange, runAction } from "./GitInfo.ts"
 import { commitMessage, loadClaudeModels } from "./providers/Claude.ts"
 import { type Access, ACCESSES, compactionOffered, metaOf, type Project, type ProviderId, type Settings } from "./Model.ts"
@@ -91,10 +91,13 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
   /** Whether a thread is working in `dir` now: a branch switch there would pull the floor from under it. */
   const workingIn = (project: Project, dir: string) =>
     store.threads().some((m) => m.projectId === project.id && threads.isRunning(m.id) && samePath(dirOf(m, project), dir))
-  /** Switch the folder `dir` to `branch`; the thread (if any) follows it in its Git panel. */
-  const switchIn = async (project: Project, dir: string, branch: string): Promise<Reply | string> => {
+  /** Switch the folder `dir` to the branch named in `body`, or create it when `body["create"]` is true; the thread (if any) follows it in its Git panel. */
+  const switchIn = async (project: Project, dir: string, body: Record<string, unknown>): Promise<Reply | string> => {
     if (workingIn(project, dir)) return error(409, "a thread is working in this folder; wait for it, or stop it, before switching branches")
-    const done = await switchBranch(dir, branch)
+    const branch = typeof body["branch"] === "string" ? body["branch"] : ""
+    const done = body["create"] === true
+      ? await createBranch(dir, { branch, base: typeof body["base"] === "string" ? body["base"] : "" })
+      : await switchBranch(dir, branch)
     return done.ok ? done.branch : error(409, done.error)
   }
 
@@ -135,7 +138,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
       const project = id ? store.project(id) : undefined
       if (project && m === "GET" && parts[2] === "branches") return reply(200, await listBranches(project.path))
       if (project && m === "POST" && parts[2] === "branch") {
-        const switched = await switchIn(project, project.path, typeof body["branch"] === "string" ? body["branch"] : "")
+        const switched = await switchIn(project, project.path, body)
         if (typeof switched !== "string") return switched
         // The threads working in the project's folder are on this branch now: their Git panels follow.
         for (const meta of store.threads()) {
@@ -158,7 +161,13 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         // A new worktree for the thread to work in, on a new branch from the base the person picked.
         const w = body["worktree"]
         if (w && typeof w === "object") {
-          const { base = "", branch = "" } = w as Record<string, unknown>
+          const { base = "", branch = "", join } = w as Record<string, unknown>
+          // Into the worktree where a branch is already checked out: no new folder.
+          if (typeof join === "string") {
+            const found = await worktreeOf(project.path, join)
+            if (!found.ok) return error(400, found.error)
+            return reply(201, threads.create(project, { ...choices(body), cwd: found.path, branch: found.branch }))
+          }
           const made = await createWorktree(project.path, { base: String(base), branch: String(branch), root: worktreeRoot(store.home, project) })
           if (!made.ok) return error(400, made.error)
           return reply(201, threads.create(project, { ...choices(body), cwd: made.path, branch: made.branch }))
@@ -214,7 +223,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         if (m === "GET" && parts[2] === "branches") return reply(200, { ...(await listBranches(dir)), cwd: dir, project: project.path })
         if (threads.isRunning(thread.id)) return error(409, "wait for the turn to end before changing this thread's branch")
         if (m === "POST" && parts[2] === "branch") {
-          const switched = await switchIn(project, dir, typeof body["branch"] === "string" ? body["branch"] : "")
+          const switched = await switchIn(project, dir, body)
           if (typeof switched !== "string") return switched
           threads.moveTo(thread, thread.cwd, switched)
           return reply(200, metaOf(thread))
@@ -224,6 +233,13 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
           if (body["leave"] === true) {
             const current = (await listBranches(project.path)).current
             threads.moveTo(thread, undefined, current)
+            return reply(200, metaOf(thread))
+          }
+          // Into the worktree where a branch is already checked out.
+          if (typeof body["join"] === "string") {
+            const found = await worktreeOf(dir, body["join"])
+            if (!found.ok) return error(400, found.error)
+            threads.moveTo(thread, samePath(found.path, project.path) ? undefined : found.path, found.branch)
             return reply(200, metaOf(thread))
           }
           const made = await createWorktree(dir, {
@@ -258,6 +274,8 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         if (m === "POST" && parts[3] && parts.length === 4) {
           const action = parseAction(parts[3], body)
           if (typeof action === "string") return error(400, action)
+          // A pull moves the files under a working agent: wait for it.
+          if (action.kind === "pull" && workingIn(project, dir)) return error(409, "a thread is working in this folder; wait for it, or stop it, before pulling")
           const done = await runAction(dir, action)
           return done.ok ? reply(200, done) : error(502, done.error)
         }

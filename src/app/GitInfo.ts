@@ -5,8 +5,9 @@
  *
  * Local facts come from `git`; the pull request from the GitHub CLI (`gh`),
  * signed in as the person. Both run with no shell, and never prompt.
- * Actions (comment, ready, re-run, merge, push and open a PR) are the
- * person's clicks, each one `gh` or `git` command.
+ * Actions (comment, ready, re-run, merge, push, open a PR, close, reopen, edit,
+ * update a branch, request reviewers, fetch and pull) are the person's clicks,
+ * each one `gh` or `git` command.
  */
 import { execFile } from "node:child_process"
 import { readFile } from "node:fs/promises"
@@ -370,11 +371,23 @@ export type GitAction =
   /** Everything in the working tree, committed with `message`. */
   | { readonly kind: "commit"; readonly message: string }
   | { readonly kind: "create"; readonly branch: string; readonly base: string; readonly title: string; readonly body: string; readonly draft: boolean }
+  /** Fetch every remote, and drop remote branches that are gone. */
+  | { readonly kind: "fetch" }
+  /** Fast-forward the checked-out branch to its upstream; never a merge or a rebase. */
+  | { readonly kind: "pull" }
+  | { readonly kind: "close"; readonly number: number; readonly comment: string }
+  | { readonly kind: "reopen"; readonly number: number }
+  | { readonly kind: "edit"; readonly number: number; readonly title: string; readonly body: string }
+  /** Bring the pull request's branch up to date with its base, on GitHub. */
+  | { readonly kind: "update"; readonly number: number; readonly rebase: boolean }
+  | { readonly kind: "reviewers"; readonly number: number; readonly reviewers: ReadonlyArray<string> }
 
 const isPrNumber = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x > 0
 const str = (x: unknown) => (typeof x === "string" ? x : "")
 /** A ref name git would take, and that can't be read as an option. */
 export const isRefName = (x: string) => x !== "" && !x.startsWith("-") && !/[\s~^:?*[\\]|\.\.|@\{|\/\/|\.lock$|\/$|^\//.test(x)
+/** A GitHub user (`ada`), or a team (`org/team`), as a reviewer is named. */
+const REVIEWER = /^[A-Za-z0-9][A-Za-z0-9-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/
 
 /** A page's request into an action, or what's wrong with it. */
 export const parseAction = (kind: string, body: Record<string, unknown>): GitAction | string => {
@@ -409,6 +422,32 @@ export const parseAction = (kind: string, body: Record<string, unknown>): GitAct
       if (!title) return "give the pull request a title"
       return { kind, branch, base, title: title.slice(0, 256), body: str(body["body"]), draft: body["draft"] === true }
     }
+    case "fetch":
+      return { kind }
+    case "pull":
+      return { kind }
+    case "close":
+      return isPrNumber(body["number"]) ? { kind, number: body["number"], comment: str(body["comment"]).trim() } : "which pull request?"
+    case "reopen":
+      return isPrNumber(body["number"]) ? { kind, number: body["number"] } : "which pull request?"
+    case "edit": {
+      if (!isPrNumber(body["number"])) return "which pull request?"
+      const title = str(body["title"]).trim().slice(0, 256)
+      return title ? { kind, number: body["number"], title, body: str(body["body"]) } : "give the pull request a title"
+    }
+    case "update":
+      return isPrNumber(body["number"]) ? { kind, number: body["number"], rebase: body["rebase"] === true } : "which pull request?"
+    case "reviewers": {
+      if (!isPrNumber(body["number"])) return "which pull request?"
+      const raw = body["reviewers"]
+      // One string split on commas and spaces, or a list; an @ before a name is allowed, and a name counted once.
+      const names = typeof raw === "string" ? raw.split(/[\s,]+/) : Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : []
+      const reviewers = [...new Set(names.map((n) => n.trim().replace(/^@/, "")).filter((n) => n !== ""))]
+      if (reviewers.length === 0) return "name someone to review it"
+      if (reviewers.length > 15) return "that's too many reviewers"
+      const bad = reviewers.find((n) => !REVIEWER.test(n))
+      return bad === undefined ? { kind, number: body["number"], reviewers } : `${bad} isn't a GitHub username`
+    }
     default:
       return "no such action"
   }
@@ -438,6 +477,24 @@ export const commandsFor = (a: GitAction): Array<{ cmd: "git" | "gh"; args: Arra
           input: a.body
         }
       ]
+    case "fetch":
+      return [{ cmd: "git", args: ["fetch", "--all", "--prune"] }]
+    case "pull":
+      return [{ cmd: "git", args: ["pull", "--ff-only"] }]
+    case "close":
+      // The comment goes first, on stdin; the close runs either way.
+      return [
+        ...(a.comment ? [{ cmd: "gh" as const, args: ["pr", "comment", String(a.number), "--body-file", "-"], input: a.comment }] : []),
+        { cmd: "gh", args: ["pr", "close", String(a.number)] }
+      ]
+    case "reopen":
+      return [{ cmd: "gh", args: ["pr", "reopen", String(a.number)] }]
+    case "edit":
+      return [{ cmd: "gh", args: ["pr", "edit", String(a.number), `--title=${a.title}`, "--body-file", "-"], input: a.body }]
+    case "update":
+      return [{ cmd: "gh", args: ["pr", "update-branch", String(a.number), ...(a.rebase ? ["--rebase"] : [])] }]
+    case "reviewers":
+      return [{ cmd: "gh", args: ["pr", "edit", String(a.number), `--add-reviewer=${a.reviewers.join(",")}`] }]
   }
 }
 
