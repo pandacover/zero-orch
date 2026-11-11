@@ -20,6 +20,11 @@ export const Access = Schema.Literals(["ask", "auto-edit", "full-access", "read-
 export const ACCESSES: ReadonlyArray<Access> = Access.literals
 export type Access = typeof Access.Type
 
+/** From least to most an agent may do without asking. */
+const ACCESS_RANK: Record<Access, number> = { "read-only": 0, ask: 1, "auto-edit": 2, "full-access": 3 }
+/** The lesser of two accesses: a thread a thread starts may do no more than the thread that started it. */
+export const atMost = (wanted: Access, limit: Access): Access => (ACCESS_RANK[wanted] <= ACCESS_RANK[limit] ? wanted : limit)
+
 /** How hard Claude thinks each step. */
 export const Effort = Schema.Literals(["low", "medium", "high", "xhigh", "max"])
 export type Effort = typeof Effort.Type
@@ -101,6 +106,28 @@ export type Item =
     /** The message; `{{att:<id>}}` marks where an attached file sits among the words. */
     text: string
     attachments?: ReadonlyArray<Attachment> | undefined
+    /** Sent by the agent in another thread (the one that started this), not by the person. */
+    from?: { readonly threadId: string; readonly title: string } | undefined
+  }
+  | {
+    /**
+     * This thread's agent started, messaged or waited for another thread (src/app/Threads.ts,
+     * `threadTools`). One card per call, updated as it goes; it links to that thread.
+     */
+    readonly kind: "link"
+    readonly id: string
+    readonly at: string
+    readonly threadId: string
+    /** That thread's title when the call was made; the page shows its title now. */
+    title: string
+    action: "started" | "messaged" | "waited"
+    /** `sent`: not waited for. `timeout`: still working when the wait ran out. */
+    state: "sent" | "waiting" | "replied" | "timeout" | "failed"
+    /** What was sent: the task, or the message. */
+    text: string
+    /** The other thread's answer, once it replied. */
+    reply?: string | undefined
+    error?: string | undefined
   }
   | { readonly kind: "assistant"; readonly id: string; readonly at: string; text: string }
   | {
@@ -194,6 +221,10 @@ export interface ThreadMeta {
   taskHead?: string | undefined
   /** The git branch the project was on when the thread's last turn ended: what its Git panel is about. */
   branch?: string | undefined
+  /** A git worktree of the project this thread works in, instead of the project's own folder. */
+  cwd?: string | undefined
+  /** The thread whose agent started this one: it talks to it and waits for its answers. */
+  parentId?: string | undefined
   readonly createdAt: string
   updatedAt: string
 }

@@ -10,12 +10,13 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
+import { createWorktree, listBranches, samePath, switchBranch } from "./Branches.ts"
 import { fileDiff, gitView, parseAction, pendingChange, runAction } from "./GitInfo.ts"
-import { commitMessage } from "./providers/Claude.ts"
-import { type Access, ACCESSES, compactionOffered, metaOf, type ProviderId, type Settings } from "./Model.ts"
+import { commitMessage, loadClaudeModels } from "./providers/Claude.ts"
+import { type Access, ACCESSES, compactionOffered, metaOf, type Project, type ProviderId, type Settings } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
-import { type Hub, makeThreads, PROVIDERS } from "./Threads.ts"
+import { dirOf, type Hub, makeThreads, PROVIDERS, worktreeRoot } from "./Threads.ts"
 
 export interface ApiOptions {
   /** zero's own repo: its genome, benchmark and ledger. */
@@ -24,6 +25,8 @@ export interface ApiOptions {
   readonly cli: string
   /** Why evolution runs can't start yet, or undefined. */
   readonly blocked?: (() => string | undefined) | undefined
+  /** Ask Claude Code which models it offers, once at the start (it starts a session that sends nothing). */
+  readonly listModels?: boolean | undefined
 }
 
 /** An answer, with an HTTP-style status so the page can tell errors (>= 400, `body.error`) apart. */
@@ -61,7 +64,7 @@ const choices = (b: Record<string, unknown>) => ({
   ...(typeof b["effort"] === "string" ? { effort: b["effort"] } : {})
 })
 
-export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> => {
+export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOptions): Promise<Api> => {
   const runtime = ManagedRuntime.make(
     Layer.mergeAll(Singularity.layer, StoreModule.layer()).pipe(Layer.provideMerge(NodeServices.layer))
   )
@@ -79,6 +82,20 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
     const s = store.settings()
     const entries = await Promise.all(Object.values(PROVIDERS).map(async (p) => [p.id, { label: p.label, compaction: p.compaction, ...(await p.status(s)) }] as const))
     return Object.fromEntries(entries)
+  }
+  // Every model Claude Code offers joins the menus once it has said which; until then, the built-in few.
+  if (listModels && store.settings().claude.enabled) {
+    void loadClaudeModels().then(async (loaded) => { if (loaded) hub.send("providers", await providers()) })
+  }
+
+  /** Whether a thread is working in `dir` now: a branch switch there would pull the floor from under it. */
+  const workingIn = (project: Project, dir: string) =>
+    store.threads().some((m) => m.projectId === project.id && threads.isRunning(m.id) && samePath(dirOf(m, project), dir))
+  /** Switch the folder `dir` to `branch`; the thread (if any) follows it in its Git panel. */
+  const switchIn = async (project: Project, dir: string, branch: string): Promise<Reply | string> => {
+    if (workingIn(project, dir)) return error(409, "a thread is working in this folder; wait for it, or stop it, before switching branches")
+    const done = await switchBranch(dir, branch)
+    return done.ok ? done.branch : error(409, done.error)
   }
 
   const route = async (m: string, parts: ReadonlyArray<string>, body: Record<string, unknown>): Promise<Reply> => {
@@ -114,6 +131,23 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
         hub.send("threads", store.threads())
         return reply(200, { removed: id })
       }
+      // The project folder's branches, for a new thread's branch menu; switching one switches the folder.
+      const project = id ? store.project(id) : undefined
+      if (project && m === "GET" && parts[2] === "branches") return reply(200, await listBranches(project.path))
+      if (project && m === "POST" && parts[2] === "branch") {
+        const switched = await switchIn(project, project.path, typeof body["branch"] === "string" ? body["branch"] : "")
+        if (typeof switched !== "string") return switched
+        // The threads working in the project's folder are on this branch now: their Git panels follow.
+        for (const meta of store.threads()) {
+          const t = meta.projectId === project.id && !meta.cwd ? store.thread(meta.id) : undefined
+          if (!t || t.branch === switched) continue
+          // Not activity: each keeps its place in the sidebar.
+          t.branch = switched
+          hub.send("thread", metaOf(t))
+          store.saveThread(t, true)
+        }
+        return reply(200, { branch: switched })
+      }
     }
 
     // --- threads ---
@@ -121,6 +155,14 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
       if (m === "POST" && parts.length === 1) {
         const project = store.project(String(body["projectId"] ?? ""))
         if (!project) return error(400, "pick a project for the thread")
+        // A new worktree for the thread to work in, on a new branch from the base the person picked.
+        const w = body["worktree"]
+        if (w && typeof w === "object") {
+          const { base = "", branch = "" } = w as Record<string, unknown>
+          const made = await createWorktree(project.path, { base: String(base), branch: String(branch), root: worktreeRoot(store.home, project) })
+          if (!made.ok) return error(400, made.error)
+          return reply(201, threads.create(project, { ...choices(body), cwd: made.path, branch: made.branch }))
+        }
         return reply(201, threads.create(project, choices(body)))
       }
       const thread = parts[1] ? store.thread(parts[1]) : undefined
@@ -139,6 +181,7 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
         threads.stop(thread.id)
         removeAttachments(store.home, thread)
         store.deleteThread(thread.id)
+        threads.forget(thread.id)
         hub.send("threads", store.threads())
         return reply(200, { removed: thread.id })
       }
@@ -163,20 +206,51 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
         return reply(202, { started: true })
       }
       // --- the thread's git: its branch, working tree, commits, and its pull request ---
+      // --- the thread's branch, from its composer: switch it, or move the thread to a new worktree ---
+      if (parts[2] === "branches" || parts[2] === "branch" || parts[2] === "worktree") {
+        const project = store.project(thread.projectId)
+        if (!project) return error(409, "this thread's project was removed")
+        const dir = dirOf(thread, project)
+        if (m === "GET" && parts[2] === "branches") return reply(200, { ...(await listBranches(dir)), cwd: dir, project: project.path })
+        if (threads.isRunning(thread.id)) return error(409, "wait for the turn to end before changing this thread's branch")
+        if (m === "POST" && parts[2] === "branch") {
+          const switched = await switchIn(project, dir, typeof body["branch"] === "string" ? body["branch"] : "")
+          if (typeof switched !== "string") return switched
+          threads.moveTo(thread, thread.cwd, switched)
+          return reply(200, metaOf(thread))
+        }
+        if (m === "POST" && parts[2] === "worktree") {
+          // Back to the project's own folder, on whatever branch it has.
+          if (body["leave"] === true) {
+            const current = (await listBranches(project.path)).current
+            threads.moveTo(thread, undefined, current)
+            return reply(200, metaOf(thread))
+          }
+          const made = await createWorktree(dir, {
+            base: typeof body["base"] === "string" ? body["base"] : "",
+            branch: typeof body["branch"] === "string" ? body["branch"] : "",
+            root: worktreeRoot(store.home, project)
+          })
+          if (!made.ok) return error(400, made.error)
+          threads.moveTo(thread, made.path, made.branch)
+          return reply(200, metaOf(thread))
+        }
+      }
       if (parts[2] === "git") {
         const project = store.project(thread.projectId)
         if (!project) return error(409, "this thread's project was removed")
-        if (m === "GET" && parts.length === 3) return reply(200, await gitView(project.path, thread.branch))
+        const dir = dirOf(thread, project)
+        if (m === "GET" && parts.length === 3) return reply(200, { ...(await gitView(dir, thread.branch)), cwd: dir, worktree: thread.cwd !== undefined })
         // One changed file's diff, for the panel's file list.
         if (m === "GET" && parts[3] === "diff" && parts[4] && parts.length === 5) {
-          const diff = await fileDiff(project.path, decodeURIComponent(parts[4]))
+          const diff = await fileDiff(dir, decodeURIComponent(parts[4]))
           return diff === undefined ? error(404, "that file has no uncommitted change") : reply(200, { diff })
         }
         // A commit message for what's uncommitted, from the small model that names threads.
         if (m === "POST" && parts[3] === "message" && parts.length === 4) {
           const s = store.settings()
           if (!s.claude.enabled) return error(409, "a commit message needs Claude, which is turned off in settings")
-          const change = await pendingChange(project.path)
+          const change = await pendingChange(dir)
           if (!change) return error(409, "there's nothing to commit")
           const message = await commitMessage(change, s.titles.model)
           return message ? reply(200, { message }) : error(502, "the model didn't answer; write the message yourself")
@@ -184,7 +258,7 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
         if (m === "POST" && parts[3] && parts.length === 4) {
           const action = parseAction(parts[3], body)
           if (typeof action === "string") return error(400, action)
-          const done = await runAction(project.path, action)
+          const done = await runAction(dir, action)
           return done.ok ? reply(200, done) : error(502, done.error)
         }
       }

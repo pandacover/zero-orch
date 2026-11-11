@@ -259,8 +259,8 @@ function renderSide() {
   for (const t of S.threads) if (!drafted.has(t.id)) byProject.get(t.projectId)?.push(t)
   shownDrafted = [...drafted].sort().join(" ")
   const hasThreads = new Set(S.threads.map((t) => t.projectId))
-  // Pinned threads first, each group newest first as S.threads is.
-  for (const list of byProject.values()) list.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
+  // Pinned threads first, each group newest first as S.threads is; a thread another started sits under it.
+  for (const [id, list] of byProject) byProject.set(id, nested(list.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))))
   const shown = S.projects.flatMap((p) => {
     const all = byProject.get(p.id) ?? []
     if (!q || p.name.toLowerCase().includes(q)) return [[p, all]]
@@ -286,8 +286,10 @@ function renderSide() {
         threads.length === 0
           // Every thread of it is up in Drafts: it still has threads, just none to list here.
           ? (hasThreads.has(p.id) ? [] : el("li", { class: "none", text: "No threads yet" }))
-          : threads.map((t) => held(el("li", { class: `thread-row${t.pinned ? " pinned" : ""}` },
-            el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null },
+          : threads.map((t) => held(el("li", { class: `thread-row${t.pinned ? " pinned" : ""}${t.depth ? " child" : ""}`, style: t.depth ? `--depth: ${t.depth}` : null },
+            el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null,
+              title: t.depth ? `Started by “${threadMeta(t.parentId)?.title ?? "another thread"}”` : null },
+              t.depth ? el("span", { class: "child-mark", "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${CHILD_PATHS}</svg>` }) : null,
               ...threadMarks(t),
               el("span", { class: "t", text: t.title }),
               el("span", { class: "age", text: ago(t.updatedAt) })),
@@ -298,6 +300,27 @@ function renderSide() {
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
 }
+/**
+ * A project's threads in sidebar order, each thread another started right under it (newest first),
+ * marked with how deep it sits: `{ ...meta, depth }`. A thread whose starter isn't in the list stands alone.
+ */
+function nested(list) {
+  const here = new Set(list.map((t) => t.id))
+  const kids = new Map()
+  for (const t of list) if (t.parentId && here.has(t.parentId)) kids.set(t.parentId, [...(kids.get(t.parentId) ?? []), t])
+  const out = []
+  const seen = new Set()
+  const add = (t, depth) => {
+    if (seen.has(t.id)) return
+    seen.add(t.id)
+    out.push(depth ? { ...t, depth } : t)
+    for (const k of kids.get(t.id) ?? []) add(k, depth + 1)
+  }
+  for (const t of list) if (!t.parentId || !here.has(t.parentId)) add(t, 0)
+  for (const t of list) add(t, 0) // a loop of starters, which shouldn't happen, still lists them
+  return out
+}
+const CHILD_PATHS = '<path d="M4 3v5.5A1.5 1.5 0 0 0 5.5 10H12M9.5 7.5 12 10l-2.5 2.5"/>'
 /** `node`, with `open` on a long press or right-click. */
 const held = (node, open) => { onHold(node, open); return node }
 const pinThread = (t) => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail)
@@ -596,6 +619,9 @@ const effortLabel = (p, v) => EFFORTS[p]?.find(([x]) => x === v)?.[1] ?? ""
 /** A model id as people say it: claude-opus-5-5 → Opus 5.5, gpt-5.5-codex → GPT-5.5 Codex, qwen2.5-coder:7b → Qwen2.5 Coder 7B. */
 function modelName(id) {
   if (!id) return "Default"
+  // The name the provider gives it (Claude Code names every model it offers), else one made from the id.
+  const named = modelLabel(id)?.name
+  if (named) return named
   const cap = (w) => (w ? w[0].toUpperCase() + w.slice(1) : w)
   const claude = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id)
   if (claude) return `${cap(claude[1])} ${claude[2]}${claude[3] ? `.${claude[3]}` : ""}`
@@ -605,6 +631,22 @@ function modelName(id) {
   const [base, tag] = id.split(":")
   const words = base.split(/[-_]/).map(cap).join(" ")
   return tag && tag !== "latest" ? `${words} ${tag.toUpperCase()}` : words
+}
+
+/** What a provider says of a model: { name, description, efforts }, or undefined. */
+const modelLabel = (id, provider) => {
+  for (const [p] of PROVIDERS) {
+    if (provider && p !== provider) continue
+    const label = S.providers[p]?.labels?.[id]
+    if (label) return label
+  }
+  return undefined
+}
+/** The effort levels a model takes: its provider's, cut to the ones the model knows when the provider says. */
+const effortsFor = (provider, model) => {
+  const levels = EFFORTS[provider] ?? []
+  const known = modelLabel(model, provider)?.efforts
+  return known ? levels.filter(([v]) => v === "" || known.includes(v)) : levels
 }
 
 /**
@@ -683,7 +725,7 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
   const mark = el("span", { class: "ap-mark", "aria-hidden": "true" })
   pop.trigger.prepend(mark)
   const paintLabel = () => {
-    const e = EFFORTS[state.provider]?.length ? effortLabel(state.provider, state.effort) : ""
+    const e = effortsFor(state.provider, state.model).length ? effortLabel(state.provider, state.effort) : ""
     mark.dataset.level = state.access
     pop.label.textContent = e ? `${modelName(state.model)} · ${e}` : modelName(state.model)
     pop.trigger.title = `${providerLabel(state.provider)} · ${state.model}${e ? ` · ${e} effort` : ""}\n${accessLabel(state.access)}: ${ACCESS.find(([v]) => v === state.access)?.[2] ?? ""}`
@@ -703,23 +745,30 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
         return [el("div", { class: "pop-group", role: "group", "aria-label": name }, el("div", { class: "pop-head", text: name }),
           list.map((m) => {
             const on = p === state.provider && m === state.model
-            return popItem({
+            const item = popItem({
               key: `${p}/${m}`, on, text: modelName(m), disabled: state.busy && !on,
               onPick: () => {
                 const patch = { provider: p, model: m }
                 // A provider change keeps the effort if the new one knows it, else takes its default.
                 if (p !== state.provider && !EFFORTS[p].some(([v]) => v === state.effort)) patch.effort = defaultEffort(p)
+                // A model that takes fewer effort levels keeps the effort if it can, else the nearest it takes.
+                const levels = effortsFor(p, m).map(([v]) => v)
+                const effort = patch.effort ?? state.effort
+                if (levels.length && !levels.includes(effort)) patch.effort = levels.includes("high") ? "high" : levels.at(-1)
                 save(patch)
               }
             })
+            const about = modelLabel(m, p)?.description
+            item.title = about ? `${about}\n${m}` : m
+            return item
           }))]
       }
       // Turned on but not reachable: say why, so a missing group isn't a mystery.
       if (p !== "claude" && S.settings[p]?.enabled && st && !st.available) return [el("div", { class: "pop-group" }, el("div", { class: "pop-head", text: name }), el("div", { class: "pop-note", text: st.detail }))]
       return []
     })
-    const levels = EFFORTS[state.provider] ?? []
-    pop.panel.replaceChildren(
+    const levels = effortsFor(state.provider, state.model)
+    pop.panel.replaceChildren(...[
       el("div", { class: "pop-col mp-models" },
         state.busy ? el("div", { class: "pop-note", text: "Models switch once this turn ends." }) : null,
         el("div", { class: "pop-scroll", role: "menu", "aria-label": "Model" }, groups)),
@@ -743,7 +792,7 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
           })
           item.title = help
           return item
-        })))
+        }))].filter(Boolean))
     // Keep the chosen model in view when the list scrolls.
     pop.panel.querySelector(".mp-models .pop-item[aria-checked=true]")?.scrollIntoView({ block: "nearest" })
   }
@@ -754,6 +803,125 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
     set: (patch) => { Object.assign(state, patch); paintLabel(); pop.repaint() },
     setAccess: (v) => { if (v !== state.access) { state.access = v; paintLabel(); pop.repaint() } },
     setBusy: (b) => { if (state.busy !== b) { state.busy = b; pop.repaint() } }
+  }
+}
+
+/**
+ * The branch chip, beside Attach: the branch the thread works on, or (for a new thread) the project
+ * folder's. Its panel switches to another branch (a remote one makes a local branch that tracks it),
+ * and makes a git worktree on a new branch from a base you pick, for the thread to work in apart.
+ *
+ * `load()` reads the branches (src/app/Branches.ts). `onSwitch(name)` and `onWorktree({ base, branch })`
+ * act and resolve once done; with `deferWorktree` (a new thread) the worktree is only chosen here, and
+ * made when the thread starts: `choice()` says which. `onLeave()` takes a thread out of its worktree.
+ */
+function branchPicker({ load, onSwitch, onWorktree, onLeave = null, deferWorktree = false }) {
+  const state = { data: null, error: "", working: false, running: false, filter: "", base: "", name: "", pending: null }
+  const pop = popover({ name: "Branch", panelClass: "bp-panel" })
+  pop.trigger.classList.add("bp-trigger")
+  pop.trigger.prepend(icon(BRANCH_PATHS))
+  pop.wrap.hidden = true // until it's known the folder is in git
+  const paintLabel = () => {
+    const d = state.data
+    const p = state.pending
+    pop.label.textContent = p ? `New worktree from ${p.base}` : d?.current || (d?.repo ? "detached HEAD" : "Branch")
+    pop.trigger.classList.toggle("on", Boolean(p) || Boolean(d?.worktree))
+    pop.trigger.title = p
+      ? `A new worktree on ${p.branch || "a new branch"} from ${p.base}, made when you send`
+      : d?.worktree ? `Works in a worktree, on ${d.current || "a detached HEAD"}\n${d.cwd}` : `On ${d?.current || "a detached HEAD"}: switch branches, or work in a new worktree`
+  }
+  const refresh = async () => {
+    try {
+      const d = await load()
+      state.data = { ...d, worktree: Boolean(d.cwd && d.project && d.cwd !== d.project) || false }
+      state.error = ""
+      if (!state.base || ![...d.local.map((b) => b.name), ...d.remote].includes(state.base)) state.base = d.base
+    } catch (e) { state.error = e.message }
+    pop.wrap.hidden = !state.data?.repo
+    paintLabel()
+    pop.repaint()
+  }
+  /** Run one of the panel's actions; the chip says it's busy, and an error is a toast. */
+  const act = async (fn) => {
+    if (state.working) return
+    state.working = true
+    pop.repaint()
+    try { await fn() } catch (e) { fail(e) }
+    state.working = false
+    await refresh()
+  }
+  // Keys typed in the panel's boxes are for the boxes: not the panel's arrow keys, nor the page's.
+  const own = (node) => { node.addEventListener("keydown", (e) => { if (e.key !== "Escape") e.stopPropagation() }); return node }
+  const listBox = el("div", { class: "pop-scroll bp-list", role: "menu", "aria-label": "Branches" })
+  const paintList = () => {
+    const d = state.data
+    const q = state.filter.trim().toLowerCase()
+    const hit = (name) => !q || name.toLowerCase().includes(q)
+    const locked = state.working || state.running
+    const local = (d?.local ?? []).filter((b) => hit(b.name))
+    const remote = (d?.remote ?? []).filter(hit)
+    listBox.replaceChildren(...[
+      local.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Local branches" }, local.map((b) => {
+        const on = b.name === d.current && !state.pending
+        const item = popItem({
+          key: `b/${b.name}`, on, text: b.name, help: b.elsewhere ? "checked out in another worktree" : null,
+          disabled: (locked || Boolean(b.elsewhere)) && !on,
+          onPick: () => act(async () => { state.pending = null; await onSwitch(b.name) })
+        })
+        item.title = b.elsewhere ? `Checked out in ${b.elsewhere}: git won't check it out twice` : `Switch to ${b.name}`
+        return item
+      })) : null,
+      remote.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Remote branches" }, el("div", { class: "pop-head", text: "Remote" }),
+        remote.map((r) => popItem({ key: `r/${r}`, on: false, text: r, disabled: locked, onPick: () => act(async () => { state.pending = null; await onSwitch(r) }) }))) : null,
+      !local.length && !remote.length ? el("div", { class: "pop-note", text: d ? `No branch matches “${state.filter.trim()}”.` : state.error || "Reading the branches…" }) : null].filter(Boolean))
+  }
+  pop.paint = () => {
+    const d = state.data
+    const locked = state.working || state.running
+    const filter = own(el("input", { class: "bp-filter", type: "search", placeholder: "Find a branch", "aria-label": "Find a branch", "data-key": "filter", autocomplete: "off", spellcheck: "false", value: state.filter }))
+    filter.addEventListener("input", () => { state.filter = filter.value; paintList() })
+    const all = [...(d?.local ?? []).map((b) => b.name), ...(d?.remote ?? [])]
+    const base = own(el("select", { class: "bp-base", "aria-label": "The branch it starts from", "data-key": "base", disabled: locked },
+      all.map((name) => el("option", { value: name, selected: name === state.base }, name))))
+    base.addEventListener("change", () => { state.base = base.value })
+    const name = own(el("input", { class: "bp-name", placeholder: "Made up if empty", "aria-label": "The new branch's name", "data-key": "name", autocomplete: "off", spellcheck: "false", value: state.name, disabled: locked }))
+    name.addEventListener("input", () => { state.name = name.value })
+    const create = el("button", { class: "btn btn-primary btn-xs", type: "button", "data-key": "create", disabled: locked || !all.length, onclick: () => {
+      const choice = { base: base.value, branch: name.value.trim() }
+      if (deferWorktree) { state.pending = choice; paintLabel(); pop.close(true); return }
+      act(async () => { await onWorktree(choice); state.name = "" })
+    } }, deferWorktree ? "Use a new worktree" : "Create worktree")
+    pop.panel.replaceChildren(
+      el("div", { class: "pop-col bp-switch" },
+        el("div", { class: "pop-head", text: "Switch branch" }),
+        filter,
+        state.running ? el("div", { class: "pop-note", text: "Branches switch once this turn ends." }) : null,
+        listBox,
+        d?.worktree && onLeave ? el("div", { class: "bp-where" },
+          el("div", { class: "pop-note", text: `Works in a worktree: ${d.cwd}` }),
+          el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "leave", disabled: locked, onclick: () => act(onLeave) }, "Work in the project folder")) : null),
+      el("div", { class: "pop-col bp-new" },
+        el("div", { class: "pop-head", text: "New worktree" }),
+        el("label", { class: "bp-field" }, el("span", { text: "From" }), base),
+        el("label", { class: "bp-field" }, el("span", { text: "New branch" }), name),
+        el("div", { class: "bp-actions" },
+          create,
+          state.pending ? el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "cancel", onclick: () => { state.pending = null; paintLabel(); pop.repaint() } }, "Work in the project folder") : null),
+        el("p", { class: "pop-note bp-help", text: deferWorktree
+          ? state.pending ? `Made when you send: the thread works there, on ${state.pending.branch || "a new branch"} from ${state.pending.base}.` : "Made when you send: the thread works in a folder of its own, on a new branch, apart from the project folder."
+          : "The thread moves to a folder of its own on the new branch, and starts a fresh session there. Its messages stay." })))
+    paintList()
+  }
+  // Opening it reads the branches again: the agent may have made or switched some.
+  pop.trigger.addEventListener("click", () => { if (!pop.panel.hidden) refresh() })
+  refresh()
+  return {
+    node: pop.wrap,
+    refresh,
+    /** The worktree a new thread starts in, if one was chosen: { base, branch }. */
+    choice: () => state.pending,
+    clear: () => { state.pending = null; paintLabel() },
+    setBusy: (b) => { if (state.running !== b) { state.running = b; pop.repaint() } }
   }
 }
 
@@ -801,13 +969,25 @@ function startView(project) {
     access: S.settings.defaultAccess,
     onChange: () => readyFor(models.value().provider)
   })
+  // The project folder's branch: switching it switches the folder now; a worktree is made when the thread starts.
+  const branch = branchPicker({
+    load: () => api("GET", `projects/${project.id}/branches`),
+    onSwitch: async (name) => {
+      const r = await api("POST", `projects/${project.id}/branch`, { branch: name })
+      toast(`${project.name} is on ${r.branch} now.`)
+    },
+    deferWorktree: true
+  })
   const box = composer({
     controls: [models.node],
+    tools: [branch.node],
     draftKey: `new:${project.id}`,
     onSend: async (text) => {
       const projectId = project.id
       const { provider, model, effort, access } = models.value()
-      const t = await api("POST", "threads", { projectId, provider, model, effort, access })
+      const worktree = branch.choice()
+      const t = await api("POST", "threads", { projectId, provider, model, effort, access, ...(worktree ? { worktree } : {}) })
+      branch.clear()
       await api("POST", `threads/${t.id}/messages`, { text })
       go(`#/t/${t.id}`)
     }
@@ -989,7 +1169,9 @@ function userMessage(item) {
     paintMore()
   })
   new ResizeObserver(paintMore).observe(body)
-  const wrap = el("div", { class: "msg msg-u" }, bubble, msgActions(() => plainText(item)))
+  // A message from the agent in the thread that started this one, not from the person: it says whose.
+  const from = item.from ? el("div", { class: "msg-from" }, icon(LINK_PATHS), el("span", { text: "From the agent in" }), threadLink(item.from.threadId, item.from.title)) : null
+  const wrap = el("div", { class: `msg msg-u${from ? " from-thread" : ""}` }, from, bubble, msgActions(() => plainText(item)))
   const start = () => { if (!wrap.classList.contains("editing")) editMessage(item, wrap, bubble) }
   bubble.addEventListener("click", (e) => {
     // A file chip opens the file; a drag that selected words is for copying them.
@@ -1112,7 +1294,7 @@ function discardDraft(key) {
  * it lands as a chip where the caret was. Each file uploads as it lands;
  * Send waits until they all have.
  */
-function composer({ onSend, onStop, controls = [], running = false, disabled = false, draftKey = "" }) {
+function composer({ onSend, onStop, controls = [], tools = [], running = false, disabled = false, draftKey = "" }) {
   const input = el("div", { class: "input empty", contenteditable: disabled ? "false" : "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message", "data-placeholder": "" })
   // What was written here before going elsewhere comes back, chips and all.
   const kept = draftKey && drafts.get(draftKey)?.nodes
@@ -1312,7 +1494,7 @@ function composer({ onSend, onStop, controls = [], running = false, disabled = f
   send.addEventListener("mousedown", (e) => e.preventDefault())
   send.addEventListener("click", submit)
   // Attach on the left; the model picker sits on the right, beside Send.
-  node.append(input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach), hint, el("div", { class: "composer-end" }, controls, send)), picker)
+  node.append(input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach, tools), hint, el("div", { class: "composer-end" }, controls, send)), picker)
   sync()
   queueMicrotask(() => {
     // On a phone, focus would put the keyboard over the thread just opened: a tap on the box asks for it.
@@ -1382,15 +1564,33 @@ function threadView(t) {
     S.compactOff.has(t.id) ? S.compactOff.delete(t.id) : S.compactOff.add(t.id)
     paintCompact(S.open)
   } }, el("span", { class: "compact-knob", "aria-hidden": "true" }), el("span", { text: "Compact" }))
+  // The thread's branch: switch it, or move the thread to a new worktree from a base you pick.
+  const branched = (meta, words) => {
+    Object.assign(S.open ?? {}, meta)
+    if (!("cwd" in meta) && S.open) delete S.open.cwd
+    toast(words)
+    if (gitPanel?.threadId === t.id) loadGit()
+  }
+  const branch = branchPicker({
+    load: () => api("GET", `threads/${t.id}/branches`),
+    onSwitch: async (name) => branched(await api("POST", `threads/${t.id}/branch`, { branch: name }), `Switched to ${name}.`),
+    onWorktree: async (choice) => {
+      const meta = await api("POST", `threads/${t.id}/worktree`, choice)
+      branched(meta, `This thread works in a new worktree now, on ${meta.branch}.`)
+    },
+    onLeave: async () => branched(await api("POST", `threads/${t.id}/worktree`, { leave: true }), "This thread works in the project folder again.")
+  })
   const box = composer({
     running: t.status === "running",
     controls: [compact, models.node],
+    tools: [branch.node],
     draftKey: `t:${t.id}`,
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
   const queued = el("div", { class: "queued", hidden: true })
-  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact }
+  const links = linksNode(t)
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact, branch, links }
   paintReady(t)
   scroll.addEventListener("scroll", () => { feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60 })
   renderFeed()
@@ -1407,7 +1607,8 @@ function threadView(t) {
               ? el("button", { class: "title-project", type: "button", title: `New thread in ${project.name}\n${project.path}`, onclick: () => go(`#/new/${project.id}`) }, project.name)
               : el("span", { class: "title-project gone", text: "removed project" }),
             el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
-            title)),
+            title,
+            links)),
         scroll,
         el("div", { class: "composer-wrap" }, box.node)),
       git.node,
@@ -1470,6 +1671,7 @@ function paintWorking() {
   feed.list.append(feed.queued, feed.working)
   feed.composer.setBusy(running)
   feed.models.setBusy(running)
+  feed.branch?.setBusy(running)
   paintCompact(S.open)
 }
 const follow = () => { if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight }
@@ -1510,6 +1712,8 @@ function renderFeed() {
   let run = null
   for (const item of S.open.items) {
     if (merged.has(item.id)) continue // its details ride in the answer's action row instead
+    // A call to zero's thread tools shows as its link card instead (a pending approval for one still shows).
+    if (item.kind === "tool" && item.name.startsWith(THREAD_TOOL)) continue
     if (!foldable(item)) { run = null; top.push(item); continue }
     if (!run) top.push(run = { key: item.id, items: [] })
     run.items.push(item)
@@ -1709,6 +1913,7 @@ function renderItem(item) {
       return el("div", { class: `mem ${item.action}` }, head, item.text ? el("pre", { class: "mem-text", text: item.text }) : null)
     }
     case "compact": return compactCard(item)
+    case "link": return linkCard(item)
     // zero's own follow-up, not the person's: the agent stopped on a failed call without saying where things stand.
     case "followup": return el("div", { class: "mem followup" },
       el("div", { class: "mem-head", title: item.reason },
@@ -1767,7 +1972,73 @@ function memoryCard(item) {
   const head = el("div", { class: "mem-head" }, el("span", { class: "mem-label", text: label }), commit ? el("code", { text: commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: title }))
   return el("div", { class: `mem ${commit ? "recalled" : "checked"}` }, head, el("pre", { class: "mem-text", text: out }))
 }
-const verb = (tool) =>({ Bash: "run a command", Edit: "edit a file", Write: "write a file", MultiEdit: "edit a file", NotebookEdit: "edit a notebook" })[tool] ?? `use ${tool}`
+const verb = (tool) =>({
+  Bash: "run a command", Edit: "edit a file", Write: "write a file", MultiEdit: "edit a file", NotebookEdit: "edit a notebook",
+  [`${THREAD_TOOL}start_thread`]: "start another thread", [`${THREAD_TOOL}message_thread`]: "message a thread it started"
+})[tool] ?? `use ${tool}`
+
+// ---------- linked threads: one started another, talks to it, waits for it ----------
+/** How Claude Code names zero's thread tools (src/app/providers/Claude.ts, THREAD_TOOL_PREFIX). */
+const THREAD_TOOL = "mcp__zero__"
+const LINK_PATHS = '<path d="M6.5 9.5 9.5 6.5M7 4.5l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7L10.7 8.2M9 11.5l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7L5.3 7.8"/>'
+const threadMeta = (id) => S.threads.find((t) => t.id === id)
+/** A link to another thread, by its title now (the one the card was made with if it's gone). */
+function threadLink(id, fallback, cls = "link-title") {
+  const t = threadMeta(id)
+  if (!t) return el("span", { class: `${cls} gone`, text: fallback || "a deleted thread", title: "That thread was deleted" })
+  return el("a", { class: cls, href: `#/t/${id}`, title: `Open “${t.title}”` }, t.title)
+}
+/** Whether a thread is working, waiting on the person, or done, as a word and a dot. */
+function threadState(id) {
+  const t = threadMeta(id)
+  if (!t) return null
+  const asking = S.asking.has(id)
+  return el("span", { class: `link-live${t.status === "running" ? (asking ? " asking" : " running") : ""}` },
+    t.status === "running" ? el("span", { class: asking ? "ask-dot" : "run-dot", "aria-hidden": "true" }) : null,
+    t.status === "running" ? (asking ? "waiting for your approval" : "working") : "idle")
+}
+/**
+ * What this thread's agent did with another thread: started it on a task, sent it a message, or waited
+ * for its reply. The other thread's title links to it; its reply shows once it's in.
+ */
+function linkCard(item) {
+  const verbs = { started: "Started", messaged: "Sent a message to", waited: "Waited for" }
+  const states = { sent: "", waiting: "waiting for its reply…", replied: "replied", timeout: "still working when the wait ran out", failed: "didn't finish" }
+  const head = el("div", { class: "link-head" },
+    icon(LINK_PATHS, "link-ico"),
+    el("span", { class: "link-verb", text: verbs[item.action] ?? "Linked" }),
+    threadLink(item.threadId, item.title),
+    states[item.state] ? el("span", { class: "link-state", text: states[item.state] }) : threadState(item.threadId))
+  const what = item.text ? el("details", { class: "link-what" },
+    el("summary", { text: item.action === "started" ? "The task it was given" : "The message" }),
+    el("div", { class: "prose" }, mdNodes(item.text))) : null
+  const reply = item.reply ? el("div", { class: "link-reply" }, el("div", { class: "link-reply-head", text: "Its reply" }), el("div", { class: "prose" }, mdNodes(item.reply))) : null
+  const error = item.error ? el("div", { class: "link-error", text: item.error }) : null
+  return el("div", { class: `link-card ${item.state}` }, head, what, reply, error)
+}
+/**
+ * The thread's links in its header: the thread that started it, and the threads it started,
+ * each a click away. Hidden when it has neither.
+ */
+function linksNode(t) {
+  const node = el("div", { class: "thread-links" })
+  node.paint = () => {
+    const now = S.open?.id === t.id ? S.open : t
+    const kids = S.threads.filter((x) => x.parentId === now.id)
+    const parent = now.parentId ? threadMeta(now.parentId) : null
+    node.hidden = !parent && !kids.length
+    node.replaceChildren(...[
+      parent ? el("a", { class: "link-chip", href: `#/t/${parent.id}`, title: `Started by the agent in “${parent.title}”` }, icon(LINK_PATHS), el("span", { text: `From ${parent.title}` })) : null,
+      kids.length ? el("button", { class: "link-chip", type: "button", title: "Threads this thread's agent started",
+        onclick: () => actionSheet(`Started from “${now.title}”`, kids.map((k) => ({ label: `${k.status === "running" ? "● " : ""}${k.title}`, run: () => go(`#/t/${k.id}`) }))) },
+        icon(LINK_PATHS), el("span", { text: `${kids.length} thread${kids.length === 1 ? "" : "s"}` }),
+        kids.some((k) => k.status === "running") ? el("span", { class: "run-dot", "aria-hidden": "true" }) : null) : null].filter(Boolean))
+  }
+  node.paint()
+  return node
+}
+/** Repaint the open thread's header links: a thread it links to was made, renamed, or started or ended a turn. */
+function paintLinks() { feed?.links?.paint() }
 
 // ---------- git panel: a right sidebar with the thread's branch and its pull request ----------
 const BRANCH_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="4.5" r="1.5"/><path d="M4.5 5v6M11.5 6c0 3.5-7 2.5-7 5"/>'
@@ -2082,6 +2353,7 @@ function branchCard(d) {
       el("code", { class: "git-branch-name", text: d.branch || "detached HEAD", title: d.branch }),
       canPush ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("push", { branch: d.branch }, `Pushed ${d.branch}.`)) }, "Push") : null),
     facts.length ? el("div", { class: "git-facts" }, facts) : null,
+    d.worktree ? el("p", { class: "git-note", title: d.cwd, text: `In a worktree: ${d.cwd}` }) : null,
     d.current && d.branch !== d.current
       ? el("p", { class: "git-note", text: `The project is on ${d.current} now; this thread last worked on ${d.branch}.` })
       : null)
@@ -2851,8 +3123,12 @@ function connect() {
     if (S.open?.id === meta.id) {
       // A turn that just ended may have committed, pushed or opened a PR: the Git panel looks again.
       const ended = S.open.status === "running" && meta.status !== "running"
+      // A new branch or folder (the thread moved to a worktree, or back): the chip and Git panel read it again.
+      const moved = S.open.branch !== meta.branch || S.open.cwd !== meta.cwd
       Object.assign(S.open, meta)
-      if (ended && gitPanel?.threadId === meta.id) loadGit()
+      if (!("cwd" in meta)) delete S.open.cwd
+      if ((ended || moved) && gitPanel?.threadId === meta.id) loadGit()
+      if ((ended || moved) && feed?.branch) feed.branch.refresh()
       if (!("effort" in meta)) delete S.open.effort // cleared: back to the provider's default
       if (feed && document.activeElement !== feed.title) feed.title.value = meta.title
       if (feed) {
@@ -2862,16 +3138,34 @@ function connect() {
       }
       paintWorking()
     }
+    // A thread the open one linked to (started, messaged, waited for) changed: its cards show how it is now.
+    repaintLinksTo(meta.id, meta.parentId)
     renderSide()
+  }
+  /** A thread the open one links to (started, messaged, waited for) changed: its cards and the header show how it is now. */
+  const repaintLinksTo = (id, parentId) => {
+    if (!feed || !S.open || S.open.id === id) return
+    const linked = S.open.items.some((i) => i.kind === "link" && i.threadId === id)
+    if (!linked && S.open.parentId !== id && parentId !== S.open.id) return
+    for (const i of S.open.items) if (i.kind === "link" && i.threadId === id) feed.cache.delete(i.id)
+    renderFeed()
+    paintLinks()
   }
   on["threads"] = (data) => {
     S.threads = data
     if (S.open && !S.threads.some((t) => t.id === S.open.id)) go("#/")
+    // A linked thread may be gone: its cards and the header say so.
+    if (feed && S.open) {
+      for (const i of S.open.items) if (i.kind === "link" && !S.threads.some((t) => t.id === i.threadId)) feed.cache.delete(i.id)
+      renderFeed()
+      paintLinks()
+    }
     renderSide()
   }
   on["item"] = ({ threadId, item }) => {
     if (item.kind === "permission") {
       item.state === "pending" ? S.asking.add(threadId) : S.asking.delete(threadId)
+      repaintLinksTo(threadId)
       renderSide()
       if (item.state === "pending" && S.open?.id !== threadId) threadToast(threadId, `${threadName(threadId)} is waiting for your approval.`)
     }
@@ -2891,6 +3185,11 @@ function connect() {
     if (S.route.name === "home" || S.route.name === "new") renderMain()
   }
   on["settings"] = (data) => { S.settings = data }
+  // Claude Code said which models it offers: the menus have them from the next time they open.
+  on["providers"] = (data) => {
+    S.providers = data
+    if (feed && S.open) feed.models.set({ model: S.open.model })
+  }
   // A phone scanned the QR code (or typed the code): say so, and show it in Settings if that's open.
   on["remote-paired"] = ({ device }) => {
     toast(`${device} paired with zero.`)

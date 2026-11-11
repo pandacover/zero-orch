@@ -8,15 +8,19 @@
  * turn ends, if it committed, `singularity store` keeps that commit for the
  * next thread to recall. Every change is sent to open pages as it happens.
  */
-import { Effect, Option, Stream } from "effect"
+import { Effect, FileSystem, Option, Path, Stream } from "effect"
+import { ChildProcessSpawner } from "effect/process"
+import { existsSync } from "node:fs"
+import { basename, join } from "node:path"
 import { type Attachment, plainText, promptText } from "./Attachments.ts"
+import { createWorktree, listBranches, slug } from "./Branches.ts"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
 import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "../Singularity.ts"
 import type { Access, Item, Project, ProviderId, Settings, Thread } from "./Model.ts"
-import { isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
-import { type Provider, turnStream, type Verdict } from "./providers/Provider.ts"
-import { claude, nameThread } from "./providers/Claude.ts"
+import { atMost, isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
+import { type Provider, type ThreadTools, turnStream, type Verdict } from "./providers/Provider.ts"
+import { claude, claudeModels, nameThread } from "./providers/Claude.ts"
 import { codex } from "./providers/Codex.ts"
 import { ollama } from "./providers/Ollama.ts"
 import { Store } from "./Store.ts"
@@ -140,6 +144,40 @@ export const followUp = (tool: Item & { kind: "tool" }): string => {
   ].join("\n")
 }
 
+/** The folder a thread works in: its worktree, else its project's. */
+export const dirOf = (t: { readonly cwd?: string | undefined }, project: Project): string => t.cwd ?? project.path
+
+/** Where the worktrees of a project's threads go: `<root>/<project>-<id>/<branch>`. */
+export const worktreeRoot = (home: string, project: Project): string => join(home, "worktrees", `${slug(project.name)}-${project.id.slice(-6)}`)
+
+/** How deep threads may start threads: a thread the person started, and two levels under it. */
+export const MAX_DEPTH = 2
+/** How long a wait for another thread lasts unless the agent says. */
+const WAIT_S = 600
+/** Most of a reply an agent reads back from another thread. */
+const REPLY_MAX = 24_000
+
+/** Told to a thread another thread's agent started: who's talking to it, and who reads its answer. */
+export const childNote = (parent: string) => [
+  "# Started by another thread",
+  "",
+  `This thread was started by the agent in another zero thread ("${parent}"). Its messages here come from that agent,`,
+  "not from the person, though the person can read this thread and answer its approvals. Work the task through,",
+  "then end your turn with a reply that stands on its own: that agent reads only your last message."
+].join("\n")
+
+/** What a thread said in its last turn: its text after the last message it was sent, and how the turn ended. */
+export const lastReply = (t: Thread): { text: string; outcome: string; error: string } => {
+  let from = -1
+  for (let i = t.items.length - 1; i >= 0; i--) if (t.items[i]!.kind === "user") { from = i; break }
+  const after = t.items.slice(from + 1)
+  const said = after.flatMap((i) => (i.kind === "assistant" ? [i.text.trim()] : [])).filter(Boolean)
+  const end = after.findLast((i) => i.kind === "turn")
+  // Its last message is its answer; the narration between tool calls before it is kept only when it's short.
+  const text = said.join("\n\n").length <= REPLY_MAX ? said.join("\n\n") : `…${said.at(-1)!.slice(-REPLY_MAX)}`
+  return { text, outcome: end?.kind === "turn" ? end.outcome : "", error: end?.kind === "turn" ? end.error : "" }
+}
+
 export const recalledTitle = (text: string): string => /committed as \w+: "([^"]+)"/.exec(text)?.[1] ?? "a past change"
 
 /** Why a provider won't take `/compact` in this thread, or "" when it will. */
@@ -160,7 +198,19 @@ export const makeThreads = (options: {
 }) =>
   Effect.gen(function*() {
     const store = yield* Store
+    // What a turn runs with, kept so a thread's agent can start another thread's turn from a tool call.
+    const services = yield* Effect.context<Memory | ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path>()
     const live = new Map<string, Live>()
+    /** Threads whose turn was asked for and hasn't set itself up yet: they count as working. */
+    const starting = new Set<string>()
+    /** Who's waiting for a thread's turn to end. */
+    const waiters = new Map<string, Set<() => void>>()
+    const busy = (id: string) => live.has(id) || starting.has(id)
+    const settle = (id: string) => {
+      const ws = waiters.get(id)
+      waiters.delete(id)
+      for (const w of ws ?? []) w()
+    }
     const { hub } = options
     const name = options.nameThread ?? nameThread
 
@@ -176,17 +226,23 @@ export const makeThreads = (options: {
       store.saveThread(t, soon)
     }
 
-    const create = (project: Project, input: { provider?: ProviderId; model?: string; access?: Access; effort?: string }) => {
+    const create = (
+      project: Project,
+      input: { provider?: ProviderId; model?: string; access?: Access; effort?: string; title?: string; cwd?: string; parentId?: string; branch?: string }
+    ) => {
       const settings = store.settings()
       const provider = input.provider ?? settings.defaultProvider
       const thread: Thread = {
         id: newId("t"),
         projectId: project.id,
-        title: "New thread",
+        title: input.title?.trim().slice(0, 120) || "New thread",
         provider,
         model: input.model || PROVIDERS[provider].defaultModel(settings),
         access: input.access ?? settings.defaultAccess,
         ...(isEffortFor(provider, input.effort) ? { effort: input.effort } : {}),
+        ...(input.cwd ? { cwd: input.cwd } : {}),
+        ...(input.parentId ? { parentId: input.parentId } : {}),
+        ...(input.branch ? { branch: input.branch } : {}),
         status: "idle",
         resume: null,
         createdAt: now(),
@@ -234,6 +290,25 @@ export const makeThreads = (options: {
       store.saveThread(t)
     }
 
+    /**
+     * Work in another folder from the next turn: a worktree, or (undefined) the project's own. A
+     * provider's session belongs to the folder it ran in (Claude Code keeps it under that path), so
+     * the thread starts a new one there; its messages stay on the thread.
+     */
+    const moveTo = (t: Thread, cwd: string | undefined, branch: string) => {
+      if (cwd !== t.cwd) {
+        if (cwd) t.cwd = cwd
+        else delete t.cwd
+        t.resume = null
+        t.sessionCostUsd = 0
+        delete t.context
+        delete t.taskHead
+      }
+      if (branch) t.branch = branch
+      touch(t)
+      store.saveThread(t)
+    }
+
     const ask = (t: Thread, l: Live) => (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask"): Promise<Verdict> =>
       new Promise((resolve) => {
         const item: Item = { kind: "permission", id: newId("ask"), at: now(), tool, detail, state: "pending" }
@@ -256,7 +331,13 @@ export const makeThreads = (options: {
      * With `compactFirst` (the person left Compact on when the context was filling), the provider
      * compacts its session first while the message waits in `queued`; then the message runs.
      */
-    const turn = (t: Thread, project: Project, text: string, attachments: ReadonlyArray<Attachment> = [], opts: { readonly compactFirst?: boolean } = {}) =>
+    const turn = (
+      t: Thread,
+      project: Project,
+      text: string,
+      attachments: ReadonlyArray<Attachment> = [],
+      opts: { readonly compactFirst?: boolean; readonly from?: { readonly threadId: string; readonly title: string } } = {}
+    ) =>
       Effect.gen(function*() {
         const memory = yield* Memory
         // A thread's own effort wins over the settings' default.
@@ -264,7 +345,10 @@ export const makeThreads = (options: {
         const provider = PROVIDERS[t.provider]
         const l: Live = { abort: new AbortController(), asks: new Map() }
         live.set(t.id, l)
+        starting.delete(t.id)
         const started = Date.now()
+        // The thread's worktree, else the project's folder: where the agent works, and whose git counts.
+        const cwd = dirOf(t, project)
         const firstTurn = !t.items.some((i) => i.kind === "user")
         const history = t.items.flatMap((i): Array<{ role: "user" | "assistant"; text: string }> =>
           i.kind === "user"
@@ -307,9 +391,12 @@ export const makeThreads = (options: {
           put(t, compaction, false)
         }
         /** One prompt to the provider, its events onto the thread; how it ended. */
+        // A thread can start threads of its own, down to MAX_DEPTH; only a provider that takes tools uses them.
+        const tools = !compact && depthOf(t) < MAX_DEPTH ? threadTools(t, project, l) : undefined
         const run = (prompt: string, instructions: string, remembers: boolean) =>
           turnStream(provider, {
-            cwd: project.path,
+            cwd,
+            ...(tools && !prompt.startsWith("/compact") ? { threads: tools } : {}),
             prompt,
             history,
             model: t.model,
@@ -396,16 +483,22 @@ export const makeThreads = (options: {
           delete t.queued
         }
 
-        put(t, { kind: "user", id: newId("u"), at: now(), text, ...(attachments.length ? { attachments } : {}) }, false)
-        const refused = compact ? cantCompact(provider, t.resume) : ""
+        put(t, { kind: "user", id: newId("u"), at: now(), text, ...(attachments.length ? { attachments } : {}), ...(opts.from ? { from: opts.from } : {}) }, false)
+        const refused = compact
+          ? cantCompact(provider, t.resume)
+          : t.cwd && !existsSync(t.cwd)
+          ? `This thread's worktree is gone (${t.cwd}). Pick a branch for it in the composer.`
+          : ""
         if (refused) {
           put(t, { kind: "turn", id: newId("end"), at: now(), provider: t.provider, model: t.model, durationMs: 0, costUsd: null, tokens: null, outcome: "failed", error: refused }, false)
           live.delete(t.id)
           touch(t)
           store.saveThread(t)
+          settle(t.id)
           return
         }
-        if (firstTurn && !compact) {
+        // A title given when the thread was made (another thread's agent named it) stands.
+        if (firstTurn && !compact && t.title === "New thread") {
           const placeholder = titleFrom(words)
           t.title = placeholder
           // A small model names the thread meanwhile; the first line stands until it answers, or if it can't.
@@ -422,7 +515,7 @@ export const makeThreads = (options: {
         t.status = "running"
         touch(t)
 
-        const before = yield* head(project.path).pipe(Effect.option)
+        const before = yield* head(cwd).pipe(Effect.option)
         // singularity keeps memory per git repo, and the person may turn recall off.
         const remembers = settings.memory.recall && Option.isSome(before) && !compact
         let prompt = compact ? text.trim() : promptText(text, attachments)
@@ -432,7 +525,7 @@ export const makeThreads = (options: {
           const startsTask = t.taskHead !== before.value
           t.taskHead = before.value
           const handed = new Set(t.items.flatMap((i) => (i.kind === "memory" && i.action === "recalled" && i.commit ? [i.commit] : [])))
-          const asked = yield* memory.handOver({ session: memorySession(t), prompt: words, cwd: project.path, startsTask }).pipe(
+          const asked = yield* memory.handOver({ session: memorySession(t), prompt: words, cwd, startsTask }).pipe(
             Effect.match({
               onFailure: (e) => ({ handOver: Option.none<HandOver>(), searched: false, failed: e.message }),
               onSuccess: (answer) => ({ ...answer, failed: "" })
@@ -464,7 +557,10 @@ export const makeThreads = (options: {
           ? yield* loadGenome(options.zeroRoot).pipe(Effect.map(solverPrompt), Effect.orElseSucceed(() => ""))
           : ""
         // Every turn in a repo with memory is told what singularity is and how to recall mid-task.
-        const instructions = [genome, remembers ? MEMORY_NOTE : "", compact ? "" : TOOL_FAILURE_NOTE].filter((s) => s !== "").join("\n\n")
+        // A thread another thread's agent started is told so: that agent reads its last message back.
+        const parent = t.parentId ? store.thread(t.parentId)?.title ?? opts.from?.title ?? "another thread" : ""
+        const instructions = [genome, remembers ? MEMORY_NOTE : "", compact ? "" : TOOL_FAILURE_NOTE, parent && !compact ? childNote(parent) : ""]
+          .filter((s) => s !== "").join("\n\n")
 
         if (compact && !l.abort.signal.aborted) startCompaction()
         const start = t.items.length
@@ -488,11 +584,11 @@ export const makeThreads = (options: {
         if (compaction?.state === "running") put(t, { ...compaction, state: result.outcome === "done" ? "done" : "failed" })
 
         // A commit this turn made: let singularity keep it.
-        const after = yield* head(project.path).pipe(Effect.option)
+        const after = yield* head(cwd).pipe(Effect.option)
         if (settings.memory.store && Option.isSome(before) && Option.isSome(after) && after.value !== before.value) {
-          yield* memory.store(project.path).pipe(Effect.ignore)
-          const stored = yield* memory.changes(project.path).pipe(Effect.orElseSucceed(() => []))
-          const subject = yield* git(project.path, ["log", "-1", "--format=%s"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
+          yield* memory.store(cwd).pipe(Effect.ignore)
+          const stored = yield* memory.changes(cwd).pipe(Effect.orElseSucceed(() => []))
+          const subject = yield* git(cwd, ["log", "-1", "--format=%s"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
           const kept = stored.some((c) => c.commit === after.value)
           put(t, {
             kind: "memory",
@@ -517,19 +613,166 @@ export const makeThreads = (options: {
           error: result.error
         }, false)
         // The branch the turn left the project on: the one the thread's Git panel follows (it may have made it).
-        const branch = yield* git(project.path, ["branch", "--show-current"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
+        const branch = yield* git(cwd, ["branch", "--show-current"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
         if (branch) t.branch = branch
         live.delete(t.id)
         t.status = "idle"
         touch(t)
         store.saveThread(t)
+        settle(t.id)
       })
+
+    /** How many threads up this one's line goes: 0 for a thread the person started. */
+    const depthOf = (t: Thread): number => {
+      let depth = 0
+      const seen = new Set([t.id])
+      for (let p = t.parentId; p && !seen.has(p); p = store.thread(p)?.parentId) {
+        seen.add(p)
+        depth++
+      }
+      return depth
+    }
+
+    /** A thread's turn, run on its own as the page's Send runs one; a wait sees the thread working from now. */
+    const startTurn = (c: Thread, project: Project, text: string, from: { readonly threadId: string; readonly title: string }) => {
+      starting.add(c.id)
+      Effect.runForkWith(services)(turn(c, project, text, [], { from }).pipe(
+        // A turn that died before its end leaves no one waiting on it for nothing.
+        Effect.ensuring(Effect.sync(() => {
+          starting.delete(c.id)
+          if (!live.has(c.id)) settle(c.id)
+        }))
+      ))
+    }
+
+    /** Until a thread's turn ends ("idle"), the wait runs out, or the waiting turn is stopped. */
+    const whenIdle = (id: string, ms: number, signal: AbortSignal): Promise<"idle" | "timeout" | "stopped"> =>
+      new Promise((resolve) => {
+        if (!busy(id)) return resolve("idle")
+        if (signal.aborted) return resolve("stopped")
+        const done = (how: "idle" | "timeout" | "stopped") => {
+          clearTimeout(timer)
+          signal.removeEventListener("abort", onAbort)
+          waiters.get(id)?.delete(onIdle)
+          resolve(how)
+        }
+        const onIdle = () => done("idle")
+        const onAbort = () => done("stopped")
+        const timer = setTimeout(() => done("timeout"), ms)
+        let ws = waiters.get(id)
+        if (!ws) waiters.set(id, ws = new Set())
+        ws.add(onIdle)
+        signal.addEventListener("abort", onAbort, { once: true })
+      })
+
+    /**
+     * The tools a thread's agent has for other threads: start one (in a worktree of its own, if it
+     * likes), message the ones it started, wait for their replies, list them. Each call shows on this
+     * thread as a card linking to the other thread; the other thread shows who started it.
+     */
+    const threadTools = (parent: Thread, project: Project, l: Live): ThreadTools => {
+      const from = () => ({ threadId: parent.id, title: parent.title })
+      type Link = Item & { kind: "link" }
+      // Not onto a thread deleted meanwhile: saving it would write it back.
+      const show = (link: Link) => { if (store.thread(parent.id) === parent) put(parent, link) }
+      const seconds = (s: number | undefined) => Math.min(3600, Math.max(10, Math.round(s ?? WAIT_S)))
+      const childOf = (id: string): Thread => {
+        const c = store.thread(id)
+        if (!c || c.parentId !== parent.id) throw new Error(`${id} isn't a thread this one started; list_threads names those.`)
+        return c
+      }
+      /** Wait for the thread, and say what came of it: on the card, and to the agent. */
+      const report = async (id: string, link: Link, timeoutSeconds: number | undefined): Promise<string> => {
+        const s = seconds(timeoutSeconds)
+        const how = await whenIdle(id, s * 1000, l.abort.signal)
+        const c = store.thread(id)
+        if (how === "stopped") {
+          show({ ...link, state: "failed", error: "Stopped waiting: this turn was stopped." })
+          return "Stopped waiting: this turn was stopped. The other thread goes on."
+        }
+        if (!c) {
+          show({ ...link, state: "failed", error: "The thread was deleted." })
+          throw new Error(`Thread ${id} was deleted.`)
+        }
+        if (how === "timeout") {
+          show({ ...link, title: c.title, state: "timeout" })
+          return `Thread ${id} ("${c.title}") is still working after ${s}s. Call wait_for_thread again to keep waiting.`
+        }
+        const r = lastReply(c)
+        const failed = r.outcome === "failed" || r.outcome === "stopped"
+        show({ ...link, title: c.title, state: failed ? "failed" : "replied", reply: r.text, ...(r.error ? { error: r.error } : failed ? { error: `Its turn ${r.outcome === "stopped" ? "was stopped" : "failed"}.` } : {}) })
+        const ended = failed ? ` (its turn ${r.outcome === "stopped" ? "was stopped" : `failed${r.error ? `: ${r.error}` : ""}`})` : ""
+        return [`Thread ${id} ("${c.title}") finished its turn${ended}.`, r.text ? `Its reply:\n\n${r.text}` : "It said nothing."].join("\n\n")
+      }
+      return {
+        start: async (a) => {
+          if (depthOf(parent) + 1 > MAX_DEPTH) throw new Error("Threads started from threads can't start threads of their own here.")
+          if (a.model && parent.provider === "claude" && !claudeModels().includes(a.model)) {
+            throw new Error(`There's no model ${a.model} here. Models: ${claudeModels().join(", ")}`)
+          }
+          let cwd = parent.cwd
+          let branch: string | undefined
+          if (a.worktree) {
+            const repo = dirOf(parent, project)
+            const base = a.worktree.base?.trim() || (await listBranches(repo)).base
+            if (!base) throw new Error("This project isn't a git repository, so a thread can't get a worktree.")
+            const wt = await createWorktree(repo, { base, branch: a.worktree.branch ?? "", root: worktreeRoot(store.home, project) })
+            if (!wt.ok) throw new Error(`Couldn't make the worktree: ${wt.error}`)
+            cwd = wt.path
+            branch = wt.branch
+          }
+          const c = create(project, {
+            provider: parent.provider,
+            model: a.model || parent.model,
+            access: atMost(a.access ?? parent.access, parent.access),
+            ...(parent.effort ? { effort: parent.effort } : {}),
+            ...(a.title ? { title: a.title } : {}),
+            ...(cwd ? { cwd } : {}),
+            ...(branch ? { branch } : {}),
+            parentId: parent.id
+          })
+          const link: Link = { kind: "link", id: newId("l"), at: now(), threadId: c.id, title: c.title, action: "started", state: a.wait ? "waiting" : "sent", text: a.prompt }
+          show(link)
+          startTurn(c, project, a.prompt, from())
+          const where = branch ? ` in a worktree on the new branch ${branch} (${cwd})` : ""
+          if (!a.wait) return `Started thread ${c.id}${where}. It works on its own: call wait_for_thread with its id for its reply.`
+          return report(c.id, link, a.timeoutSeconds)
+        },
+        message: async (a) => {
+          const c = childOf(a.threadId)
+          if (busy(c.id)) throw new Error(`Thread ${c.id} is still working. Call wait_for_thread first, then message it.`)
+          const link: Link = { kind: "link", id: newId("l"), at: now(), threadId: c.id, title: c.title, action: "messaged", state: a.wait ? "waiting" : "sent", text: a.text }
+          show(link)
+          startTurn(c, project, a.text, from())
+          if (!a.wait) return `Sent. Thread ${c.id} is working on it: call wait_for_thread for its reply.`
+          return report(c.id, link, a.timeoutSeconds)
+        },
+        wait: async (a) => {
+          const c = childOf(a.threadId)
+          const link: Link = { kind: "link", id: newId("l"), at: now(), threadId: c.id, title: c.title, action: "waited", state: "waiting", text: "" }
+          show(link)
+          return report(c.id, link, a.timeoutSeconds)
+        },
+        list: async () => {
+          const kids = store.threads().filter((m) => m.parentId === parent.id)
+          if (!kids.length) return "This thread hasn't started any threads."
+          return kids.map((m) => {
+            const said = lastReply(store.thread(m.id)!).text
+            return `- ${m.id} "${m.title}": ${busy(m.id) ? "working" : "idle"}${m.cwd ? `, in worktree ${m.cwd} (${m.branch ?? basename(m.cwd)})` : ""}` +
+              (said ? `\n  last reply: ${said.replace(/\s+/g, " ").slice(0, 300)}` : "")
+          }).join("\n")
+        }
+      }
+    }
 
     return {
       create,
       update,
+      moveTo,
       turn,
-      isRunning: (id: string) => live.has(id),
+      /** A thread was deleted: anyone waiting for it hears so now. */
+      forget: (id: string) => settle(id),
+      isRunning: busy,
       /** How many threads have a turn going. */
       running: () => live.size,
       stop: (id: string) => {
