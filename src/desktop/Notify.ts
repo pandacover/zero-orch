@@ -1,9 +1,10 @@
 /**
- * Desktop notifications, only while zero isn't the window in front: a thread
- * finished its turn or stopped on an error, or a tool call waits for approval.
- * Clicking one brings zero back, on that thread.
+ * Desktop notifications, only while zero isn't the window in front (or has no
+ * window: its threads finishing in the background): a thread finished its turn
+ * or stopped on an error, or a tool call waits for approval. Clicking one
+ * brings zero back, on that thread.
  */
-import { type BrowserWindow, Notification } from "electron"
+import { Notification } from "electron"
 
 interface Event {
   readonly id?: string
@@ -25,15 +26,15 @@ export const notice = (event: string, data: Event, titles: ReadonlyMap<string, s
   return undefined
 }
 
-export const notifier = (window: () => BrowserWindow | null) => {
+/** `focused`: zero's window is the one in front. `open`: bring zero back (a window, if it has none) on a thread. */
+export const notifier = (focused: () => boolean, open: (threadId: string) => void) => {
   const titles = new Map<string, string>()
   // Held until dismissed: a Notification nothing references is collected, and its click goes nowhere.
   const live = new Set<Notification>()
   return (event: string, data: unknown) => {
     const e = data as Event
     if (event === "thread" && e.id && e.title) titles.set(e.id, e.title)
-    const win = window()
-    if (!win || win.isFocused() || !Notification.isSupported()) return
+    if (focused() || !Notification.isSupported()) return
     const n = notice(event, e, titles)
     if (!n) return
     const shown = new Notification({ title: n.title, body: n.body, silent: false })
@@ -43,11 +44,7 @@ export const notifier = (window: () => BrowserWindow | null) => {
     shown.on("failed", gone)
     shown.on("click", () => {
       gone()
-      if (win.isDestroyed()) return
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
-      win.webContents.send("event", "open", { threadId: n.threadId })
+      open(n.threadId)
     })
     shown.show()
   }

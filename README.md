@@ -128,9 +128,13 @@ A desktop chat app, instead of the CLI:
   `>` block, to answer it point by point.
 - **Notifications:** when zero isn't the window in front, a finished turn, an
   error or a wait for approval shows a desktop notification; click it to go there.
+- **Closing the window doesn't stop work:** while a thread's turn or an evolution
+  run is going, zero keeps running in the background, with an icon in the tray
+  and the same notifications, and quits once it all ends. Click the icon to open
+  zero again; **Quit** in its menu stops what's running.
 - **Remote access:** the same app from your phone or another computer, through
   Tailscale. You can start threads and carry on old ones, attach files and approve tool
-  calls, all live, for as long as the desktop app is open. See below.
+  calls, all live, for as long as the desktop app runs. See below.
 
 #### From your phone, over Tailscale
 
