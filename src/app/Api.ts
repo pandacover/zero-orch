@@ -41,6 +41,8 @@ export interface Api {
   /** The settings as saved now; a change is also sent to subscribers as a `settings` event. */
   readonly settings: () => Settings
   readonly subscribe: (listener: Listener) => () => void
+  /** What's still working: threads with a turn going, and whether an evolution run is. */
+  readonly busy: () => { readonly threads: number; readonly evolution: boolean }
   /** Stops running turns and evolution runs, then frees the runtime. */
   readonly close: () => Promise<void>
 }
@@ -231,6 +233,7 @@ export const makeApi = async ({ root, cli, blocked }: ApiOptions): Promise<Api> 
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
+    busy: () => ({ threads: threads.running(), evolution: evolution.running() }),
     close: async () => {
       evolution.stop()
       threads.stopAll()

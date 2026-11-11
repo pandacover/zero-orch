@@ -98,7 +98,9 @@ A desktop chat app, instead of the CLI:
   with **+ Add project** by pasting a folder's path.
 - **Threads:** conversations with Claude (through the Agent SDK) in a project.
   Text streams in a line at a time; each run of tool calls folds into one
-  row that opens to show every call and its output. Under the message box,
+  row that opens to show every call and its output. A call shows as soon as
+  Claude starts writing it, not once it has (a long Write streams for many
+  seconds), and its file or command as soon as that much has streamed. Under the message box,
   pick the model and effort (one menu, models grouped by provider) and what
   Claude may do without asking: **Ask first**, **Auto-edit** (edits in the
   project run freely), **Full access** (edits and commands run without
@@ -126,9 +128,13 @@ A desktop chat app, instead of the CLI:
   `>` block, to answer it point by point.
 - **Notifications:** when zero isn't the window in front, a finished turn, an
   error or a wait for approval shows a desktop notification; click it to go there.
+- **Closing the window doesn't stop work:** while a thread's turn or an evolution
+  run is going, zero keeps running in the background, with an icon in the tray
+  and the same notifications, and quits once it all ends. Click the icon to open
+  zero again; **Quit** in its menu stops what's running.
 - **Remote access:** the same app from your phone or another computer, through
   Tailscale. You can start threads and carry on old ones, attach files and approve tool
-  calls, all live, for as long as the desktop app is open. See below.
+  calls, all live, for as long as the desktop app runs. See below.
 
 #### From your phone, over Tailscale
 

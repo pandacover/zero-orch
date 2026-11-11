@@ -6,11 +6,16 @@
  * `zero://app/` scheme. Nothing listens on a port for this window. Remote
  * access (src/app/Remote.ts), when Settings turns it on, serves the same page
  * and backend over HTTP on 127.0.0.1 for other devices, with its own pairing.
+ *
+ * Closing the window doesn't stop work: while a thread's turn or an evolution
+ * run is going, zero keeps running in the background (an icon in the tray, the
+ * notifications as before) and quits once it all ends. Quit from the tray stops it.
  */
-import { app, BrowserWindow, dialog, type IpcMainInvokeEvent, ipcMain, nativeTheme, net, protocol, shell } from "electron"
+import { app, BrowserWindow, dialog, type IpcMainInvokeEvent, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, protocol, shell, Tray } from "electron"
 import { enableCompileCache } from "node:module"
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
+import type { Api } from "../app/Api.ts"
 import { isInlineImage } from "../app/Attachments.ts"
 import { notifier } from "./Notify.ts"
 import { openWorkspace, useLoginPath } from "./Workspace.ts"
@@ -86,7 +91,18 @@ else {
     else win?.webContents.downloadURL(url)
   }
 
-  const createWindow = () => {
+  /** zero's window, opened if it was closed, on `threadId` if given. */
+  const openWindow = (threadId?: string) => {
+    if (!win) return createWindow(threadId)
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    if (threadId) win.webContents.send("event", "open", { threadId })
+  }
+
+  const createWindow = (threadId?: string) => {
+    tray?.destroy()
+    tray = null
     win = new BrowserWindow({
       width: 1280,
       height: 840,
@@ -108,30 +124,65 @@ else {
       e.preventDefault()
       void open(url)
     })
-    const notify = notifier(() => win)
+    const own = win
     api.then((a) => {
-      const off = a.subscribe((event, data) => {
-        win?.webContents.send("event", event, data)
-        notify(event, data)
-      })
-      win?.once("closed", off)
+      const off = a.subscribe((event, data) => own.webContents.send("event", event, data))
+      own.once("closed", off)
     })
-    win.once("closed", () => (win = null))
-    void win.loadURL(PAGE)
+    own.once("closed", () => {
+      if (win === own) win = null
+    })
+    void own.loadURL(threadId ? `${PAGE}#/t/${threadId}` : PAGE)
   }
 
-  app.on("second-instance", () => {
-    if (!win) return
-    if (win.isMinimized()) win.restore()
-    win.focus()
-  })
-  app.on("window-all-closed", () => app.quit())
-  // Running turns and evolution runs stop with the app.
+  // --- in the background: the window closed while work goes on ---
+  let tray: Tray | null = null
+  /** zero is quitting: past the point where work keeps it open. */
   let closed = false
+  /** What's still going, in words ("2 threads", "a thread and an evolution run"), or "" when nothing is. */
+  const going = (a: Api): string => {
+    const b = a.busy()
+    return [b.threads ? (b.threads === 1 ? "a thread" : `${b.threads} threads`) : "", b.evolution ? "an evolution run" : ""].filter(Boolean).join(" and ")
+  }
+  /** With no window: show what's still going in the tray, or quit once nothing is. */
+  const settle = (a: Api) => {
+    if (win || closed) return
+    const what = going(a)
+    if (!what) return app.quit()
+    const tip = `zero: still working on ${what}`
+    if (!tray) {
+      tray = new Tray(nativeImage.createFromPath(join(ROOT, "ui", "icon-192.png")).resize({ width: 16, height: 16 }))
+      tray.on("click", () => openWindow())
+    }
+    tray.setToolTip(tip)
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: tip, enabled: false },
+      { type: "separator" },
+      { label: "Open zero", click: () => openWindow() },
+      { label: `Quit, stopping ${what}`, click: () => app.quit() }
+    ]))
+  }
+
+  app.on("second-instance", () => openWindow())
+  app.on("activate", () => openWindow())
+  // Closing the window while work goes on leaves zero running in the background until it ends.
+  app.on("window-all-closed", () => {
+    api.then((a) => {
+      const what = going(a)
+      if (!what) return app.quit()
+      settle(a)
+      if (Notification.isSupported()) {
+        new Notification({ title: "zero is still working", body: `It keeps going on ${what} in the background and quits when that's done. Open it again from the tray.`, silent: true }).show()
+      }
+    }, () => app.quit())
+  })
+  // Quitting stops running turns and evolution runs.
   app.on("will-quit", (e) => {
     if (closed) return
     e.preventDefault()
     closed = true
+    tray?.destroy()
+    tray = null
     // Quitting again, now past this handler, lets a downloaded update install on the way out.
     api.then((a) => a.close()).finally(() => app.quit())
   })
@@ -139,6 +190,13 @@ else {
   app.whenReady().then(() => {
     protocol.handle("zero", serve)
     createWindow()
+    // Notifications, and the background's tray, follow the app, not a window: they go on with the window closed.
+    const notify = notifier(() => win?.isFocused() ?? false, openWindow)
+    void api.then((a) => a.subscribe((event, data) => {
+      notify(event, data)
+      // After the event's own change is done: a turn that ended is out of `busy` by then.
+      setImmediate(() => settle(a))
+    }))
     if (packaged) void import("./Updates.ts").then((u) => u.pollForUpdates())
   }, fail)
 }

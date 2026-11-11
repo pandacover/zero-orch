@@ -32,6 +32,8 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
  * line (Send sends), nothing opens the keyboard unasked, and a long press opens a row's actions.
  */
 const touchFirst = matchMedia("(hover: none) and (pointer: coarse)")
+/** This page came over remote access (ui/web.js), not in zero's own window (zero://). */
+const remote = location.protocol !== "zero:"
 /** What last pressed: "mouse", "pen" or "touch". */
 let lastPointer = "mouse"
 addEventListener("pointerdown", (e) => { lastPointer = e.pointerType || "mouse" }, true)
@@ -270,12 +272,16 @@ function renderSide() {
   tree.replaceChildren(...(draftsSec ? [draftsSec] : []), ...shown.map(([p, threads]) => {
     const closed = !q && S.collapsed.has(p.id)
     return el("section", { class: `proj${closed ? " closed" : ""}`, "data-id": p.id },
-      el("div", { class: "proj-head" },
+      held(el("div", { class: "proj-head" },
         el("button", { class: "proj-toggle", type: "button", "aria-expanded": String(!closed), title: p.path, onclick: () => toggleProject(p.id) },
           el("span", { class: "proj-name", text: p.name })),
         el("span", { class: "proj-actions" },
           el("button", { class: "icon-btn", type: "button", title: `New thread in ${p.name}`, "aria-label": `New thread in ${p.name}`, onclick: () => go(`#/new/${p.id}`) }, "+"),
-          el("button", { class: "icon-btn", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, onclick: () => removeProject(p) }, "×"))),
+          el("button", { class: "icon-btn proj-remove", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, onclick: () => removeProject(p) }, "×"))),
+        () => actionSheet(p.name, [
+          { label: "New thread", run: () => go(`#/new/${p.id}`) },
+          { label: "Remove from zero", danger: true, run: () => removeProject(p) }
+        ])),
       el("ul", { class: "threads", inert: closed },
         threads.length === 0
           // Every thread of it is up in Drafts: it still has threads, just none to list here.
@@ -448,6 +454,8 @@ $("scrim").addEventListener("click", closeSide)
 $("side-toggle").addEventListener("click", toggleSide)
 narrow.addEventListener("change", paintToggle)
 paintToggle()
+// Narrow: a tap on a thread puts the sidebar away, the one already open too (that tap changes no route).
+$("tree").addEventListener("click", (e) => { if (narrow.matches && !e.defaultPrevented && e.target.closest("a[href]")) closeSide() })
 $("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide() })
 $("search").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; S.query = ""; renderSide() } })
 
@@ -957,17 +965,17 @@ function plainText(item) {
   return item.text.replace(ATT, (_, id) => known.get(id)?.name ?? "a file")
 }
 /** A sent message: click it (or Enter on it) to edit it and send it again. */
-/** How many lines of a sent prompt show before Show more. */
-const USER_LINES = 5
+/** How many lines of a sent prompt show before Show more: 3 on a phone, where it sticks above a small screen (app.css). */
+const userLines = () => (narrow.matches ? 3 : 5)
 function userMessage(item) {
-  // A long prompt shows its first 5 lines; Show more opens the rest (and stays open while the page is).
+  // A long prompt shows its first lines (userLines); Show more opens the rest (and stays open while the page is).
   const body = el("div", { class: "msg-user-body" }, userNodes(item))
   const key = `msg:${item.id}`
   const more = el("button", { class: "msg-more", type: "button", hidden: true })
   const bubble = el("div", { class: "msg-user", tabindex: "0" }, body, more)
   const paintMore = () => {
     const open = S.expanded.has(key)
-    const lines = parseFloat(getComputedStyle(body).lineHeight) * USER_LINES
+    const lines = parseFloat(getComputedStyle(body).lineHeight) * userLines()
     more.hidden = !(body.scrollHeight > lines + 2)
     bubble.classList.toggle("clamped", !more.hidden && !open)
     // Opened in full, it reads in the feed: not stuck to the top, not scrolling inside itself.
@@ -2535,17 +2543,25 @@ function paintSettings() {
     const reach = !r.enabled ? null
       : !t.found ? group("Tailscale", "Tailscale isn't installed here, or the tailscale command isn't on the PATH. Install it on this machine and your phone, sign both in to one tailnet, then look again.")
       : !t.running ? group("Tailscale", "Tailscale is installed but not connected. Sign in on this machine, then look again.")
-      : r.pairUrl ? group("Pair your phone", null,
-        el("div", { class: "qr-pair" },
-          el("img", { class: "qr", src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(r.qr)}`, alt: "QR code: the pairing link", width: 184, height: 184 }),
-          el("div", { class: "qr-steps" },
-            el("ol", {},
-              el("li", { text: "Turn Tailscale on on your phone, signed in to the same tailnet as this computer." }),
-              el("li", { text: "Point the phone's camera at this code and open the link." })),
-            el("p", { class: "hint", text: "zero opens there, paired. To keep it a tap away, add it to the home screen from the browser's menu." }),
-            r.paired ? el("p", { class: "qr-paired" }, el("i"), `${r.paired.device} paired ${ago(r.paired.at) === "now" ? "just now" : `${ago(r.paired.at)} ago`}.`) : null,
-            el("div", { class: "row-end" }, copyBtn("Copy pairing link", r.pairUrl), copyBtn("Copy address", t.url)))),
-        el("p", { class: "hint", text: "The link carries the pairing code: send it only to your own devices." }))
+      : r.pairUrl ? (() => {
+        const paired = r.paired ? el("p", { class: "qr-paired" }, el("i"), `${r.paired.device} paired ${ago(r.paired.at) === "now" ? "just now" : `${ago(r.paired.at)} ago`}.`) : null
+        const copies = el("div", { class: "row-end" }, copyBtn("Copy pairing link", r.pairUrl), copyBtn("Copy address", t.url))
+        const img = el("img", { class: "qr", src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(r.qr)}`, alt: "QR code: the pairing link", width: 184, height: 184 })
+        const warning = el("p", { class: "hint", text: "The link carries the pairing code: send it only to your own devices." })
+        // On the phone itself the code is for some other device: there it waits behind a tap, and the links come first.
+        if (remote) return group("Pair another device", "This device is paired already. To pair another, send it the link, or show it the code.",
+          el("div", { class: "qr-remote" }, paired, copies, el("details", { class: "qr-more" }, el("summary", { class: "btn btn-quiet btn-xs", text: "Show the QR code" }), img)),
+          warning)
+        return group("Pair your phone", null,
+          el("div", { class: "qr-pair" }, img,
+            el("div", { class: "qr-steps" },
+              el("ol", {},
+                el("li", { text: "Turn Tailscale on on your phone, signed in to the same tailnet as this computer." }),
+                el("li", { text: "Point the phone's camera at this code and open the link." })),
+              el("p", { class: "hint", text: "zero opens there, paired. To keep it a tap away, add it to the home screen from the browser's menu." }),
+              paired, copies)),
+          warning)
+      })()
       : said?.enableUrl ? group("Share zero on your tailnet", "Tailscale asks for one thing first: HTTPS on for your tailnet. Turn it on in Tailscale's admin page; zero finishes on its own, and the QR code shows here.",
         row("Turn on HTTPS", "Once, for the whole tailnet.", el("a", { class: "btn btn-primary btn-xs", href: said.enableUrl, target: "_blank", rel: "noopener noreferrer", text: "Open Tailscale" })),
         manual(r, "If it doesn't finish, run this once HTTPS is on."))
@@ -2604,12 +2620,26 @@ function paintSettings() {
         s.remote.port = n
         commit()
       })
+      // Turned off from a paired device, it cuts off that very device: asked first.
+      const remoteSwitch = () => {
+        const b = sw(() => s.remote.enabled, (v) => (s.remote.enabled = v), "Remote access")
+        b.addEventListener("click", async (e) => {
+          if (!s.remote.enabled) return
+          e.stopImmediatePropagation()
+          if (await dialog({ title: "Turn off remote access?", text: "This device loses zero as well, until remote access is turned on again on the computer.", ok: "Turn off" })) {
+            s.remote.enabled = false
+            b.setAttribute("aria-checked", "false")
+            commit()
+          }
+        }, { capture: true })
+        return b
+      }
       // What's listening and what Tailscale says come from the backend: painted when they arrive.
       const live = el("div", { class: "set-live" }, el("p", { class: "hint", text: "Looking…" }))
       api("GET", "remote").then((r) => live.replaceChildren(...remoteGroups(r, live)), (e) => live.replaceChildren(el("p", { class: "hint", text: e.message })))
       return [
         group(null, "Use zero from your phone or another computer on your tailnet: start threads and carry on old ones, as here. It works while this app is open.",
-          row("Serve zero to your other devices", "On this machine only (127.0.0.1); Tailscale Serve carries it to your devices over HTTPS.", sw(() => s.remote.enabled, (v) => (s.remote.enabled = v), "Remote access")),
+          row("Serve zero to your other devices", "On this machine only (127.0.0.1); Tailscale Serve carries it to your devices over HTTPS.", remote ? remoteSwitch() : sw(() => s.remote.enabled, (v) => (s.remote.enabled = v), "Remote access")),
           row("Port", "The local port Tailscale forwards to.", port)),
         live
       ]

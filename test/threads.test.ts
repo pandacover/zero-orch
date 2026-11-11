@@ -46,6 +46,9 @@ describe("tool failures", () => {
     const real = PROVIDERS.claude
     let stop = () => {}
     let turns = 0
+    // The desktop app stays open while a turn runs and quits, closed, on the event that says it ended.
+    let running = () => 0
+    const busyWhen: Array<[string, number]> = []
     // As Claude does on a Stop: the call waiting on an approval fails with "Stream closed",
     // and the one running is never heard from again.
     PROVIDERS.claude = {
@@ -70,10 +73,15 @@ describe("tool failures", () => {
       const layer = Layer.mergeAll(memory, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
       const t = await Effect.gen(function*() {
         const store = yield* Store
-        const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: () => {} }, nameThread: async () => "" })
+        const hub = { send: (event: string, data: unknown) => event === "thread" && busyWhen.push([(data as Thread).status, running()]) }
+        const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub, nameThread: async () => "" })
+        running = threads.running
         const project = yield* store.addProject(proj)
         const t = threads.create(project, { access: "full-access" })
-        stop = () => threads.stop(t.id)
+        stop = () => {
+          busyWhen.push(["mid-turn", running()])
+          threads.stop(t.id)
+        }
         yield* threads.turn(t, project, "edit a.ts")
         return store.thread(t.id)!
       }).pipe(Effect.provide(layer), Effect.runPromise)
@@ -85,6 +93,8 @@ describe("tool failures", () => {
       expect(t.items.some((i) => i.kind === "followup")).toBe(false)
       expect(turns).toBe(1)
       expect(cutShort(cutShort("x"))).toBe(cutShort("x"))
+      expect(busyWhen).toContainEqual(["mid-turn", 1])
+      expect(busyWhen.at(-1)).toEqual(["idle", 0])
     } finally {
       PROVIDERS.claude = real
       for (const d of [home, proj]) rmSync(d, { recursive: true, force: true })

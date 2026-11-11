@@ -530,6 +530,8 @@ export const makeThreads = (options: {
       update,
       turn,
       isRunning: (id: string) => live.has(id),
+      /** How many threads have a turn going. */
+      running: () => live.size,
       stop: (id: string) => {
         const l = live.get(id)
         if (!l) return false
