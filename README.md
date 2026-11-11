@@ -98,7 +98,9 @@ A desktop chat app, instead of the CLI:
   with **+ Add project** by pasting a folder's path.
 - **Threads:** conversations with Claude (through the Agent SDK) in a project.
   Text streams in a line at a time; each run of tool calls folds into one
-  row that opens to show every call and its output. Under the message box,
+  row that opens to show every call and its output. A call shows as soon as
+  Claude starts writing it, not once it has (a long Write streams for many
+  seconds), and its file or command as soon as that much has streamed. Under the message box,
   pick the model and effort (one menu, models grouped by provider) and what
   Claude may do without asking: **Ask first**, **Auto-edit** (edits in the
   project run freely), **Full access** (edits and commands run without

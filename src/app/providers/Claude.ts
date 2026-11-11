@@ -25,6 +25,55 @@ const EDITS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
 const detailOf = (_tool: string, input: Record<string, unknown>): string =>
   short(input["command"] ?? input["file_path"] ?? input["pattern"] ?? input["url"] ?? input["query"] ?? input, 400)
 
+const DETAIL_KEYS = ["command", "file_path", "pattern", "url", "query"]
+
+/**
+ * The top-level string fields of a tool call's input that has only partly streamed in, those
+ * whose value is complete: `{"file_path":"a.ts","content":"exp` gives `{ file_path: "a.ts" }`.
+ */
+export const partialFields = (json: string): Record<string, string> => {
+  const out: Record<string, string> = {}
+  let depth = 0
+  let i = 0
+  let key: string | undefined
+  while (i < json.length) {
+    const c = json[i]!
+    if (c === "\"") {
+      let j = i + 1
+      while (j < json.length && json[j] !== "\"") j += json[j] === "\\" ? 2 : 1
+      if (j >= json.length) break // the string is still streaming
+      let s: string
+      try {
+        s = JSON.parse(json.slice(i, j + 1)) as string
+      } catch {
+        break
+      }
+      i = j + 1
+      if (depth !== 1) continue
+      while (i < json.length && /\s/.test(json[i]!)) i++
+      if (json[i] === ":") {
+        key = s
+        i++
+      } else if (key !== undefined) {
+        out[key] = s
+        key = undefined
+      }
+      continue
+    }
+    if (c === "{" || c === "[") depth++
+    else if (c === "}" || c === "]") depth--
+    else if (c === "," && depth === 1) key = undefined
+    i++
+  }
+  return out
+}
+
+/** A card's detail from a call's input so far; "" until a field the detail shows has streamed in whole. */
+export const earlyDetail = (tool: string, json: string): string => {
+  const fields = partialFields(json)
+  return DETAIL_KEYS.some((k) => k in fields) ? detailOf(tool, fields) : ""
+}
+
 /** Whether a call runs without asking, is refused, or waits for the person. */
 export const gate = (access: Access, cwd: string, tool: string, input: Record<string, unknown>): "allow" | "deny" | "ask" => {
   if (READS.has(tool)) return "allow"
@@ -108,7 +157,10 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   let messageId = ""
   const streamed = new Set<string>()
   const tools = new Map<string, { name: string; detail: string }>()
-  const announced = new Set<string>()
+  /** What each tool card shows now: a card goes up as the model starts writing its call, not once it has. */
+  const announced = new Map<string, string>()
+  /** Tool calls still streaming in the current message, by content block index: their input so far. */
+  const drafts = new Map<number, { id: string; name: string; json: string }>
   const pending: Array<TurnEvent> = []
   // Compaction the person asked for with `/compact`; any other is Claude Code's own, as the context filled.
   const asked = isCompact(input.prompt)
@@ -142,11 +194,35 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
     if (m.type === "stream_event") {
       if (m.parent_tool_use_id) continue
       const e = m.event
-      if (e.type === "message_start") messageId = e.message.id
+      if (e.type === "message_start") {
+        messageId = e.message.id
+        drafts.clear()
+      }
       if (e.type === "content_block_delta" && e.delta.type === "text_delta") {
         streamed.add(messageId)
         yield { type: "text", key: `${messageId}:${e.index}`, delta: e.delta.text }
       }
+      // A tool call shows from its first token: a long Write or Edit streams for many seconds, and
+      // the card used to go up only once all of it had, then finish at once.
+      if (e.type === "content_block_start" && e.content_block.type === "tool_use") {
+        const { id, name } = e.content_block
+        drafts.set(e.index, { id, name, json: "" })
+        tools.set(id, { name, detail: "" })
+        announced.set(id, "")
+        yield { type: "tool", key: id, name, detail: "", status: "running" }
+      }
+      if (e.type === "content_block_delta" && e.delta.type === "input_json_delta") {
+        const d = drafts.get(e.index)
+        if (d && announced.get(d.id) === "") {
+          d.json += e.delta.partial_json
+          const detail = earlyDetail(d.name, d.json)
+          if (detail) {
+            announced.set(d.id, detail)
+            yield { type: "tool", key: d.id, name: d.name, detail, status: "running" }
+          }
+        }
+      }
+      if (e.type === "content_block_stop") drafts.delete(e.index)
       continue
     }
     if (m.type === "assistant") {
@@ -158,9 +234,10 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
         // Text that didn't arrive as deltas (a provider without partial messages) arrives whole.
         if (block.type === "text" && !streamed.has(m.message.id)) pending.push({ type: "text", key: `${m.message.id}:${i}`, delta: block.text })
       })
+      // New calls, and calls whose card went up while streaming, now with their whole input.
       for (const [id, t] of tools) {
-        if (announced.has(id)) continue
-        announced.add(id)
+        if (announced.get(id) === t.detail) continue
+        announced.set(id, t.detail)
         pending.push({ type: "tool", key: id, name: t.name, detail: t.detail, status: "running" })
       }
       yield* pending.splice(0)
