@@ -1137,3 +1137,68 @@ body.resizing .git-panel { transition: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- branches: the composer's branch chip and its panel (switch, or a new worktree) ---------- */
+.bp-trigger .ico svg { display: block; width: 13px; height: 13px; }
+.bp-trigger.on { color: var(--accent-text); border-color: var(--accent-line); }
+.bp-panel { width: 520px; max-width: calc(100vw - 32px); }
+.bp-switch { flex: 1 1 auto; }
+.bp-new { flex: none; width: 210px; margin-left: 6px; padding: 0 4px 0 10px; border-left: 1px solid var(--line); gap: 8px; }
+.bp-filter, .bp-name, .bp-base {
+  width: 100%; height: 30px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--sunk); color: var(--ink);
+  padding: 0 9px; font: 400 12px var(--mono);
+}
+.bp-filter { width: auto; margin: 0 6px 6px 8px; }
+.bp-filter:focus, .bp-name:focus, .bp-base:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.bp-base option { background: var(--surface); color: var(--ink); }
+.bp-list .pop-item { font-family: var(--mono); font-size: 12.5px; }
+.bp-list .pop-help { font-family: var(--body); }
+.bp-field { display: grid; gap: 4px; font-size: 12px; font-weight: 500; color: var(--muted); }
+.bp-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.bp-help { padding: 0; margin: 0; }
+.bp-where { margin-top: 6px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
+.bp-where .pop-note { padding: 0 0 6px; overflow-wrap: anywhere; }
+@media (max-width: 620px) {
+  .bp-panel { width: min(400px, calc(100vw - 32px)); flex-direction: column; overflow: auto; }
+  .bp-new { width: auto; margin: 6px 0 0; padding: 8px 6px 4px; border-left: 0; border-top: 1px solid var(--line); }
+}
+
+/* ---------- linked threads: one thread's agent started another, talks to it, waits for it ---------- */
+.link-card { margin: 6px 0; padding: 10px 14px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 13px; }
+.link-card.waiting { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+.link-card.failed { border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.link-head { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.link-ico svg, .link-chip .ico svg, .msg-from .ico svg { display: block; width: 13px; height: 13px; }
+.link-ico { color: var(--accent-text); }
+.link-verb { color: var(--muted); }
+.link-title { font-weight: 600; color: var(--ink); text-decoration: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+@media (hover: hover) { a.link-title:hover { color: var(--accent-text); text-decoration: underline; } }
+.link-title.gone { font-style: italic; color: var(--faint); font-weight: 500; }
+.link-state, .link-live { color: var(--faint); font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+.link-card.waiting .link-state { color: var(--accent-text); }
+.link-live.running { color: var(--accent-text); }
+.link-live.asking { color: var(--warn); }
+.link-what { margin-top: 6px; }
+.link-what summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.link-what .prose { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--line); font-size: 13px; }
+.link-reply { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.link-reply-head { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); margin-bottom: 4px; }
+.link-reply .prose { max-height: 360px; overflow: auto; font-size: 13.5px; }
+.link-error { margin-top: 6px; color: var(--warn); font-size: 12.5px; }
+/* in a thread's header: the thread that started it, and the threads it started */
+.thread-links { flex: none; display: flex; align-items: center; gap: 6px; max-width: 45%; min-width: 0; }
+.thread-links[hidden] { display: none; }
+.link-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 26px; max-width: 100%; min-width: 0; padding: 0 10px 0 8px;
+  border: 1px solid var(--line-strong); border-radius: 99px; background: none; color: var(--muted);
+  font: 500 12px var(--body); text-decoration: none; cursor: pointer; white-space: nowrap;
+}
+.link-chip span:not(.run-dot):not(.ico) { overflow: hidden; text-overflow: ellipsis; }
+@media (hover: hover) { .link-chip:hover { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); } }
+/* a message the agent in another thread sent this one */
+.msg-from { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+.msg-from .link-title { font-weight: 500; color: var(--accent-text); max-width: 60%; }
+/* in the sidebar, a thread another started sits indented under it */
+.thread-row.child .thread-link { padding-left: calc(22px + var(--depth, 1) * 14px - 14px); }
+.child-mark { display: inline-flex; flex: none; width: 12px; height: 12px; color: var(--faint); }
+.child-mark svg { width: 12px; height: 12px; }

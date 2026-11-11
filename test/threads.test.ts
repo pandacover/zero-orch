@@ -5,12 +5,25 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { compactionOffered, DEFAULT_SETTINGS, isCompact, type Item, needsCompaction, type Thread } from "../src/app/Model.ts"
-import { cleanTitle, gate, summaryOf } from "../src/app/providers/Claude.ts"
+import { type Access, atMost, compactionOffered, DEFAULT_SETTINGS, isCompact, type Item, needsCompaction, type Project, type Thread } from "../src/app/Model.ts"
+import { claudeModels, cleanTitle, effortFor, gate, summaryOf, toLabels } from "../src/app/providers/Claude.ts"
 import type { Provider, TurnInput } from "../src/app/providers/Provider.ts"
 import * as StoreModule from "../src/app/Store.ts"
 import { Store } from "../src/app/Store.ts"
-import { cutShort, lineBuffer, makeThreads, PROVIDERS, recalledTitle, stalledOn, STOPPED_NOTE, TOOL_FAILURE_NOTE, turnCost, withEffort } from "../src/app/Threads.ts"
+import {
+  cutShort,
+  lastReply,
+  lineBuffer,
+  makeThreads,
+  PROVIDERS,
+  recalledTitle,
+  stalledOn,
+  STOPPED_NOTE,
+  type Threads,
+  TOOL_FAILURE_NOTE,
+  turnCost,
+  withEffort
+} from "../src/app/Threads.ts"
 import { notRun } from "../src/app/providers/Provider.ts"
 import { MemoryError } from "../src/Errors.ts"
 import * as Singularity from "../src/Singularity.ts"
@@ -173,6 +186,209 @@ describe("thread turns", () => {
     expect(gate("ask", cwd, "Bash", { command: 'singularity recall "x" && rm -rf .' })).toBe("ask")
     expect(gate("ask", cwd, "Bash", { command: "singularity store" })).toBe("ask")
     expect(gate("read-only", cwd, "Bash", { command: "singularity setup" })).toBe("deny")
+  })
+
+  it("lets a thread wait on and list its threads freely, and asks before starting one only under Ask first", () => {
+    const cwd = join(tmpdir(), "proj")
+    for (const access of ["ask", "auto-edit", "full-access", "read-only"] as const) {
+      expect(gate(access, cwd, "mcp__zero__wait_for_thread", { threadId: "t_1" })).toBe("allow")
+      expect(gate(access, cwd, "mcp__zero__list_threads", {})).toBe("allow")
+      expect(gate(access, cwd, "mcp__zero__start_thread", { prompt: "x" })).toBe(access === "ask" ? "ask" : "allow")
+    }
+    expect(gate("auto-edit", cwd, "mcp__other__start_thread", {})).toBe("ask")
+  })
+
+  it("caps a thread's access at its starter's", () => {
+    expect(atMost("full-access", "auto-edit")).toBe("auto-edit")
+    expect(atMost("ask", "full-access")).toBe("ask")
+    expect(atMost("auto-edit", "read-only")).toBe("read-only")
+  })
+})
+
+describe("Claude Code's models", () => {
+  it("lists each model once, by its full id, with its name and effort levels", () => {
+    const rows = toLabels([
+      { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", description: "Opus 5.5 · Best", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
+      { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5", description: "For complex work", supportsEffort: true, supportedEffortLevels: ["low", "high", "max"] },
+      { value: "claude-fable-5-2", resolvedModel: "claude-fable-5-2", displayName: "Fable 5.2", description: "Toughest", supportsEffort: true, supportedEffortLevels: ["low", "max"] },
+      { value: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5", description: "Fast" },
+      { value: "some-alias", displayName: "Not a model id", description: "" }
+    ])
+    expect(rows).toEqual([
+      { id: "claude-opus-5-5", name: "Opus 5.5", description: "For complex work", efforts: ["low", "high", "max"] },
+      { id: "claude-fable-5-2", name: "Fable 5.2", description: "Toughest", efforts: ["low", "max"] },
+      { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", description: "Fast", efforts: [] }
+    ])
+  })
+
+  it("starts with the built-in models before Claude Code has said, and passes an effort through as asked", () => {
+    expect(claudeModels()).toEqual(expect.arrayContaining(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]))
+    expect(effortFor("claude-opus-5-5", "xhigh")).toBe("xhigh")
+  })
+})
+
+describe("threads that start threads", () => {
+  const dirs: Array<string> = []
+  const real = PROVIDERS.claude
+  afterEach(() => {
+    PROVIDERS.claude = real
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+  })
+
+  const memory = Layer.succeed(Singularity.Memory, Singularity.Memory.of({
+    recall: () => Effect.succeedNone,
+    handOver: () => Effect.succeed({ handOver: Option.none(), searched: false }),
+    afterTool: () => Effect.succeedNone,
+    store: () => Effect.void,
+    changes: () => Effect.succeed([])
+  }))
+
+  /**
+   * A fake Claude whose every turn is `script(input)`: it may call the thread tools it's given and
+   * say what it heard. Each turn's input is kept by its prompt.
+   */
+  const run = async (
+    script: (input: TurnInput, say: (s: string) => void) => Promise<void>,
+    access: Access = "auto-edit"
+  ) => {
+    const home = mkdtempSync(join(tmpdir(), "zero-home-"))
+    const proj = mkdtempSync(join(tmpdir(), "zero-proj-"))
+    dirs.push(home, proj)
+    const inputs = new Map<string, TurnInput>()
+    PROVIDERS.claude = {
+      ...real,
+      turn: (async function*(input: TurnInput) {
+        inputs.set(input.prompt, input)
+        const said: Array<string> = []
+        await script(input, (s) => said.push(s))
+        if (said.length) yield { type: "text", key: "a", delta: said.join("\n") }
+      }) as Provider["turn"]
+    }
+    const layer = Layer.mergeAll(memory, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
+    const out = await Effect.gen(function*() {
+      const store = yield* Store
+      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: () => {} }, nameThread: async () => "" })
+      const project = yield* store.addProject(proj)
+      const parent = threads.create(project, { access })
+      return { store, threads, project, parent }
+    }).pipe(Effect.provide(layer), Effect.runPromise)
+    return { ...out, inputs, layer } as { store: typeof out.store; threads: Threads; project: Project; parent: Thread; inputs: typeof inputs; layer: typeof layer }
+  }
+
+  /** Run a thread's turn to its end. */
+  const turnOf = (ctx: Awaited<ReturnType<typeof run>>, t: Thread, text: string) =>
+    ctx.threads.turn(t, ctx.project, text).pipe(Effect.provide(ctx.layer), Effect.runPromise)
+
+  /** Until `f` holds, checking every few ms (for a thread working on its own). */
+  const until = async (f: () => boolean, ms = 5000) => {
+    const end = Date.now() + ms
+    while (!f()) {
+      if (Date.now() > end) throw new Error("timed out")
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+
+  it("starts a thread, waits for its reply, and shows both ends of the link", async () => {
+    let heard = ""
+    const ctx = await run(async (input, say) => {
+      if (input.prompt === "lead") {
+        heard = await input.threads!.start({ prompt: "count the files", title: "Count files", access: "full-access", wait: true })
+        say("done leading")
+      } else say(`there are 3 files (asked: ${input.prompt})`)
+    })
+    await turnOf(ctx, ctx.parent, "lead")
+    const parent = ctx.store.thread(ctx.parent.id)!
+    const child = ctx.store.threads().find((m) => m.parentId === parent.id)!
+    expect(heard).toContain(`Thread ${child.id} ("Count files") finished its turn.`)
+    expect(heard).toContain("there are 3 files (asked: count the files)")
+    // What it may do is capped at its starter's; its title is the one it was given.
+    expect(child).toMatchObject({ title: "Count files", access: "auto-edit", parentId: parent.id, status: "idle" })
+    const link = parent.items.find((i) => i.kind === "link")
+    expect(link).toMatchObject({ kind: "link", threadId: child.id, action: "started", state: "replied", text: "count the files" })
+    expect(link?.kind === "link" && link.reply).toContain("there are 3 files")
+    // The other end: the message came from the parent's agent, and it was told so.
+    const first = ctx.store.thread(child.id)!.items.find((i) => i.kind === "user")
+    expect(first).toMatchObject({ text: "count the files", from: { threadId: parent.id } })
+    expect(ctx.inputs.get("count the files")!.instructions).toContain("Started by another thread")
+    expect(ctx.inputs.get("lead")!.instructions).not.toContain("Started by another thread")
+  })
+
+  it("messages a thread it started once it's idle, waits again, and lists it", async () => {
+    const answers: Record<string, string> = {}
+    let child = ""
+    const ctx = await run(async (input, say) => {
+      const tools = input.threads!
+      if (input.prompt === "lead") {
+        const started = await tools.start({ prompt: "step one" })
+        child = /Started thread (\S+)\./.exec(started)![1]!
+        // Still working on step one: a message must wait.
+        answers["early"] = await tools.message({ threadId: child, text: "step two" }).catch((e: Error) => `error: ${e.message}`)
+        answers["first"] = await tools.wait({ threadId: child })
+        answers["second"] = await tools.message({ threadId: child, text: "step two", wait: true })
+        answers["list"] = await tools.list()
+        answers["stranger"] = await tools.wait({ threadId: "t_nobody" }).catch((e: Error) => `error: ${e.message}`)
+        say("ok")
+      } else {
+        await new Promise((r) => setTimeout(r, 30))
+        say(`did ${input.prompt}`)
+      }
+    })
+    await turnOf(ctx, ctx.parent, "lead")
+    expect(answers["early"]).toMatch(/^error: Thread \S+ is still working/)
+    expect(answers["first"]).toContain("did step one")
+    expect(answers["second"]).toContain("did step two")
+    expect(answers["second"]).not.toContain("did step one")
+    expect(answers["list"]).toContain(`- ${child} `)
+    expect(answers["list"]).toContain("idle")
+    expect(answers["stranger"]).toMatch(/isn't a thread this one started/)
+    const links = ctx.store.thread(ctx.parent.id)!.items.filter((i) => i.kind === "link").map((i) => i.kind === "link" && [i.action, i.state])
+    expect(links).toEqual([["started", "sent"], ["waited", "replied"], ["messaged", "replied"]])
+  })
+
+  it("gives threads tools down to two levels, and none below", async () => {
+    const ctx = await run(async (input, say) => {
+      if (input.prompt === "lead") await input.threads!.start({ prompt: "middle", wait: true })
+      else if (input.prompt === "middle") await input.threads!.start({ prompt: "bottom", wait: true })
+      say(input.threads ? "has tools" : "no tools")
+    })
+    await turnOf(ctx, ctx.parent, "lead")
+    expect(ctx.inputs.get("lead")!.threads).toBeDefined()
+    expect(ctx.inputs.get("middle")!.threads).toBeDefined()
+    expect(ctx.inputs.get("bottom")!.threads).toBeUndefined()
+    const metas = ctx.store.threads()
+    const middle = metas.find((m) => m.parentId === ctx.parent.id)!
+    expect(metas.find((m) => m.parentId === middle.id)).toBeDefined()
+  })
+
+  it("stops waiting when its own turn is stopped, and leaves the other thread working", async () => {
+    let release = () => {}
+    const held = new Promise<void>((r) => (release = r))
+    let heard = ""
+    const ctx = await run(async (input, say) => {
+      if (input.prompt === "lead") heard = await input.threads!.start({ prompt: "slow", wait: true })
+      else { await held; say("finally") }
+    })
+    const leading = turnOf(ctx, ctx.parent, "lead")
+    await until(() => ctx.store.threads().some((m) => m.parentId === ctx.parent.id && ctx.threads.isRunning(m.id)))
+    ctx.threads.stop(ctx.parent.id)
+    await leading
+    expect(heard).toMatch(/^Stopped waiting/)
+    const child = ctx.store.threads().find((m) => m.parentId === ctx.parent.id)!
+    expect(ctx.threads.isRunning(child.id)).toBe(true)
+    release()
+    await until(() => !ctx.threads.isRunning(child.id))
+    expect(lastReply(ctx.store.thread(child.id)!).text).toBe("finally")
+    expect(ctx.store.thread(ctx.parent.id)!.items.find((i) => i.kind === "link")).toMatchObject({ state: "failed" })
+  })
+
+  it("refuses a model Claude Code doesn't offer, saying which it does", async () => {
+    let heard = ""
+    const ctx = await run(async (input) => {
+      if (input.prompt === "lead") heard = await input.threads!.start({ prompt: "x", model: "gpt-9" }).catch((e: Error) => e.message)
+    })
+    await turnOf(ctx, ctx.parent, "lead")
+    expect(heard).toMatch(/^There's no model gpt-9 here\. Models: claude-/)
+    expect(ctx.store.threads().filter((m) => m.parentId)).toEqual([])
   })
 })
 

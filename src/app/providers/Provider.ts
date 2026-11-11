@@ -91,6 +91,32 @@ export interface TurnInput {
   readonly signal: AbortSignal
   /** What memory adds after a tool call, given Claude Code's PostToolUse input; providers without hooks skip it. */
   readonly afterTool?: ((input: Readonly<Record<string, unknown>>) => Promise<string | undefined>) | undefined
+  /** Tools to start other threads, talk to them and wait for them; providers that take no custom tools skip it. */
+  readonly threads?: ThreadTools | undefined
+}
+
+/**
+ * What an agent can do with other threads (src/app/Threads.ts makes it). Each call answers with
+ * the words the agent reads; a call that can't be done throws, and the agent reads why.
+ */
+export interface ThreadTools {
+  /** Start a thread on a task; with `wait`, answer with its reply once it has one. */
+  start(input: {
+    readonly prompt: string
+    readonly title?: string | undefined
+    readonly model?: string | undefined
+    readonly access?: Access | undefined
+    /** Work in a new git worktree, on a new branch from `base` (the project's default branch if not given). */
+    readonly worktree?: { readonly branch?: string | undefined; readonly base?: string | undefined } | undefined
+    readonly wait?: boolean | undefined
+    readonly timeoutSeconds?: number | undefined
+  }): Promise<string>
+  /** Send a thread this one started its next message; with `wait`, answer with its reply. */
+  message(input: { readonly threadId: string; readonly text: string; readonly wait?: boolean | undefined; readonly timeoutSeconds?: number | undefined }): Promise<string>
+  /** Wait for a thread this one started to finish its turn, and answer with its reply. */
+  wait(input: { readonly threadId: string; readonly timeoutSeconds?: number | undefined }): Promise<string>
+  /** The threads this one started: each one's id, title, whether it's working, and the start of its last reply. */
+  list(): Promise<string>
 }
 
 export interface ProviderStatus {
@@ -98,9 +124,18 @@ export interface ProviderStatus {
   /** One line: why it's unavailable, or what it will use. */
   readonly detail: string
   readonly models: ReadonlyArray<string>
+  /** What the provider says of a model, by id: its name, a line about it, and the effort levels it takes. */
+  readonly labels?: Readonly<Record<string, ModelLabel>> | undefined
   /** Can it pause for approval before a tool call? */
   readonly asks: boolean
   readonly tools: boolean
+}
+
+export interface ModelLabel {
+  readonly name: string
+  readonly description: string
+  /** The effort levels it takes; empty when it takes none. Unknown: all of its provider's. */
+  readonly efforts?: ReadonlyArray<string> | undefined
 }
 
 export interface Provider {

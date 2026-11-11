@@ -123,6 +123,24 @@ A desktop chat app, instead of the CLI:
   everything; **Write message** has the small model that names threads write the
   message from the diff. It reads at most 12,000 characters of it; a small
   change cost $0.0006 with Haiku in testing.
+- **Branches and worktrees from the composer:** the branch chip beside Attach lists the
+  branches (remote ones too) and switches the thread's folder to one, unless a thread is working
+  there. Its **New worktree** side makes a git worktree on a new branch from the base you pick,
+  under `~/.zero/worktrees/`, and the thread works there from then on. It starts a new session
+  there, and its Git panel follows. On a new thread's page, a switch acts on the project folder at
+  once, and a worktree is made when you send.
+- **Every model Claude Code offers:** at startup zero asks Claude Code for its model list (a
+  session that sends no message, so nothing is billed), and the model menu shows each one by
+  name, with only the effort levels that model takes.
+- **Threads that start threads:** a Claude thread's agent has four tools: `start_thread` (a
+  task, optionally in a worktree of its own), `message_thread`, `wait_for_thread` and
+  `list_threads`. A started thread may do no more than its starter (its access is capped), and
+  threads nest two levels deep at most. Under **Ask first**, starting or messaging one waits for your
+  approval; waiting and listing never do.
+- **Linked threads you can see:** each start, message and wait is a card in the starter's thread
+  linking to the other thread, with its reply once it's in. A started thread sits indented under its
+  starter in the sidebar. Its header links back ("From …"), its messages say which thread's agent
+  sent them, and a starter's header lists the threads it started.
 - **Pinned threads** stay at the top of their project (the pin on a row's hover).
 - **Quote** on a reply puts it (or the part you selected) in the composer as a
   `>` block, to answer it point by point.

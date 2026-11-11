@@ -43,7 +43,7 @@ else {
   const workspace = (packaged ? useLoginPath() : Promise.resolve()).then(() => openWorkspace({ packaged, bundled: ROOT }))
   const api = Promise.all([import("../app/Api.ts"), import("../app/Remote.ts"), import("../app/Store.ts"), workspace]).then(
     async ([{ makeApi }, { withRemote }, { appHome }, { root, blocked }]) =>
-      withRemote(await makeApi({ root, cli: join(root, "src", "cli.ts"), blocked }), { ui: join(ROOT, "ui"), home: appHome() }))
+      withRemote(await makeApi({ root, cli: join(root, "src", "cli.ts"), blocked, listModels: true }), { ui: join(ROOT, "ui"), home: appHome() }))
   api.catch(fail)
   let win: BrowserWindow | null = null
 

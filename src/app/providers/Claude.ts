@@ -7,16 +7,77 @@
  * everything runs under `full-access`, and anything else waits for the
  * person to allow it in the thread.
  */
-import { type CanUseTool, type Query, query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import { type CanUseTool, createSdkMcpServer, type ModelInfo, type Query, query, type SDKMessage, type SDKUserMessage, tool } from "@anthropic-ai/claude-agent-sdk"
+import { z } from "zod"
 import { memoryHooks } from "../../Claude.ts"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
-import { type Access, isCompact } from "../Model.ts"
-import type { Provider, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
+import { type Access, ACCESSES, type Effort, isCompact } from "../Model.ts"
+import type { ModelLabel, Provider, ThreadTools, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
 import { keepOutput, notRun, short } from "./Provider.ts"
 
+/** The models a thread can pick before Claude Code has said which it offers (or when it can't). */
 export const CLAUDE_MODELS = [...MODELS]
+
+/** Every model Claude Code offers here, as it said, by id; undefined until it has. */
+let offered: ReadonlyArray<{ readonly id: string } & ModelLabel> | undefined
+let asking: Promise<boolean> | undefined
+
+/**
+ * Claude Code's model list (the one its `/model` shows) as threads pick from it: one row per model,
+ * by its full id. An alias (`opus`, `default`) gives way to the model it stands for, so each model
+ * shows once and a thread keeps a model that doesn't change under it.
+ */
+export const toLabels = (models: ReadonlyArray<ModelInfo>): Array<{ id: string } & ModelLabel> => {
+  const seen = new Map<string, { id: string } & ModelLabel>()
+  for (const m of models) {
+    const id = m.resolvedModel ?? m.value
+    // "Default (recommended)" is another model's alias; that model's own row names it.
+    if (!id.startsWith("claude-") || seen.has(id) || m.value === "default") continue
+    seen.set(id, { id, name: m.displayName, description: m.description, efforts: m.supportsEffort ? [...(m.supportedEffortLevels ?? [])] : [] })
+  }
+  return [...seen.values()]
+}
+
+/**
+ * Ask Claude Code which models it offers, once: it starts a session that sends no message (nothing
+ * is billed), reads the list and ends it. True once the list is in; a failure leaves the built-in list,
+ * and the next call asks again.
+ */
+export const loadClaudeModels = (): Promise<boolean> =>
+  asking ??= (async () => {
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), 60_000)
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    // A prompt that never comes: the session answers control requests, and sends nothing to a model.
+    async function* nothing(): AsyncGenerator<SDKUserMessage> { await held }
+    try {
+      const q = query({ prompt: nothing(), options: { abortController: abort, settingSources: [], persistSession: false, tools: [], env: cleanEnv() } })
+      const list = toLabels(await q.supportedModels())
+      if (list.length) offered = list
+      return list.length > 0
+    } catch {
+      asking = undefined
+      return false
+    } finally {
+      clearTimeout(timer)
+      release()
+      abort.abort()
+    }
+  })()
+
+/** The model ids a thread can pick now. */
+export const claudeModels = (): Array<string> => (offered ? offered.map((m) => m.id) : CLAUDE_MODELS)
+
+/** The effort to run `model` at: as asked when it takes it, else its highest up to "high", else none. */
+export const effortFor = (model: string, effort: string): string | undefined => {
+  const known = offered?.find((m) => m.id === model)
+  if (!known || !known.efforts) return effort
+  if (known.efforts.includes(effort)) return effort
+  return ["high", "medium", "low"].find((e) => known.efforts!.includes(e))
+}
 
 const TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch"]
 const READS = new Set(["Read", "Glob", "Grep", "WebSearch", "WebFetch"])
@@ -74,9 +135,17 @@ export const earlyDetail = (tool: string, json: string): string => {
   return DETAIL_KEYS.some((k) => k in fields) ? detailOf(tool, fields) : ""
 }
 
+/** zero's own tools for other threads, as Claude Code names them: `mcp__zero__<tool>`. */
+export const THREAD_TOOL_PREFIX = "mcp__zero__"
+/** Reading about threads this one started, or waiting on them, changes nothing. */
+const THREAD_READS = new Set(["wait_for_thread", "list_threads"].map((t) => `${THREAD_TOOL_PREFIX}${t}`))
+
 /** Whether a call runs without asking, is refused, or waits for the person. */
 export const gate = (access: Access, cwd: string, tool: string, input: Record<string, unknown>): "allow" | "deny" | "ask" => {
-  if (READS.has(tool)) return "allow"
+  if (READS.has(tool) || THREAD_READS.has(tool)) return "allow"
+  // A thread started from this one may do no more than this one may (Threads caps its access), so starting
+  // or messaging it needs asking only where everything does: under Ask first.
+  if (tool.startsWith(THREAD_TOOL_PREFIX)) return access === "ask" ? "ask" : "allow"
   // Reading singularity's memory is a read: an agent shouldn't have to ask to recall.
   if (tool === "Bash" && isMemoryRead(input["command"])) return "allow"
   if (access === "read-only") return "deny"
@@ -96,6 +165,57 @@ const resultText = (content: unknown): string => {
   }
   return ""
 }
+
+const THREADS_NOTE = [
+  "These tools start other zero threads in this project, each a Claude agent of its own, and talk to them.",
+  "Use one to hand off a separate piece of work, or several to run parallel pieces at once, then wait for their answers.",
+  "A thread you start may do no more than this one may. The person sees each thread, and may answer its approvals.",
+  "Give each thread a self-contained task: it doesn't see this conversation. For work that edits files in parallel,",
+  "give each thread a worktree, so they don't edit the same checkout at once."
+].join(" ")
+
+const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] })
+/** A tool's answer: what it says, or why it couldn't, as an error the agent reads. */
+const answerOf = async (f: () => Promise<string>) => {
+  try {
+    return text(await f())
+  } catch (e) {
+    return { ...text(e instanceof Error ? e.message : String(e)), isError: true }
+  }
+}
+const timeout = z.number().int().min(10).max(3600).optional().describe("How long to wait, in seconds (default 600). Wait again if it's still working.")
+
+/** zero's thread tools as an in-process MCP server: Claude Code calls them `mcp__zero__<name>`. */
+export const threadServer = (threads: ThreadTools) =>
+  createSdkMcpServer({
+    name: "zero",
+    instructions: THREADS_NOTE,
+    tools: [
+      tool("start_thread", "Start a new zero thread in this project: a Claude agent of its own, working on the task you give it. It runs on its own; set wait to get its reply, or call wait_for_thread later.", {
+        prompt: z.string().min(1).describe("The task, complete in itself: the other thread doesn't see this conversation."),
+        title: z.string().max(120).optional().describe("A short title for the thread, as the person sees it in the sidebar."),
+        model: z.string().optional().describe("A Claude model id; this thread's model if not given."),
+        access: z.enum(ACCESSES as [Access, ...Array<Access>]).optional().describe("What it may do without asking; at most this thread's access, which it gets if not given."),
+        worktree: z.object({
+          branch: z.string().optional().describe("The new branch's name; one is made up if not given."),
+          base: z.string().optional().describe("The branch it starts from; the project's default branch if not given.")
+        }).optional().describe("Work in a new git worktree on a new branch, apart from the project's folder."),
+        wait: z.boolean().optional().describe("Wait for its reply before answering (default false)."),
+        timeoutSeconds: timeout
+      }, (a) => answerOf(() => threads.start(a)), { alwaysLoad: true }),
+      tool("message_thread", "Send a thread this one started its next message, once it has finished its turn. Set wait to get its reply.", {
+        threadId: z.string().describe("The thread's id, from start_thread or list_threads."),
+        text: z.string().min(1),
+        wait: z.boolean().optional().describe("Wait for its reply before answering (default false)."),
+        timeoutSeconds: timeout
+      }, (a) => answerOf(() => threads.message(a)), { alwaysLoad: true }),
+      tool("wait_for_thread", "Wait until a thread this one started finishes its turn, and read its reply.", {
+        threadId: z.string(),
+        timeoutSeconds: timeout
+      }, (a) => answerOf(() => threads.wait(a)), { alwaysLoad: true }),
+      tool("list_threads", "List the threads this one started: id, title, whether each is working, and its last reply.", {}, () => answerOf(() => threads.list()), { alwaysLoad: true })
+    ]
+  })
 
 async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   const abort = new AbortController()
@@ -129,9 +249,10 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
     options: {
       cwd: input.cwd,
       model: input.model,
-      effort: input.settings.claude.effort,
+      ...(effortFor(input.model, input.settings.claude.effort) ? { effort: effortFor(input.model, input.settings.claude.effort) as Effort } : {}),
       systemPrompt: { type: "preset", preset: "claude_code", append: input.instructions },
       tools: TOOLS,
+      ...(input.threads ? { mcpServers: { zero: threadServer(input.threads) } } : {}),
       // The project's own CLAUDE.md and settings, as Claude Code would read them there.
       settingSources: ["project"],
       permissionMode: "default",
@@ -356,7 +477,8 @@ export const claude: Provider = {
   status: async (s) => ({
     available: s.claude.enabled,
     detail: s.claude.enabled ? "Claude Agent SDK, signed in as Claude Code is" : "Turned off in settings",
-    models: CLAUDE_MODELS,
+    models: claudeModels(),
+    ...(offered ? { labels: Object.fromEntries(offered.map(({ id, ...label }) => [id, label])) } : {}),
     asks: true,
     tools: true
   }),

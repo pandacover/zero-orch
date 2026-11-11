@@ -374,7 +374,7 @@ export type GitAction =
 const isPrNumber = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x > 0
 const str = (x: unknown) => (typeof x === "string" ? x : "")
 /** A ref name git would take, and that can't be read as an option. */
-const isRefName = (x: string) => x !== "" && !x.startsWith("-") && !/[\s~^:?*[\\]|\.\.|@\{|\/\/|\.lock$|\/$|^\//.test(x)
+export const isRefName = (x: string) => x !== "" && !x.startsWith("-") && !/[\s~^:?*[\\]|\.\.|@\{|\/\/|\.lock$|\/$|^\//.test(x)
 
 /** A page's request into an action, or what's wrong with it. */
 export const parseAction = (kind: string, body: Record<string, unknown>): GitAction | string => {
