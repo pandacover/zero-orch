@@ -113,7 +113,8 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
   background: none; color: color-mix(in srgb, var(--ink) 86%, transparent); font-size: 13px; text-align: left; cursor: pointer;
 }
 .side-act > svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
-.side-act:hover, .side-act:focus-within { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+.side-act:focus-within { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+@media (hover: hover) { .side-act:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); } }
 .side-act-icon { width: 32px; padding: 0; justify-content: center; }
 .search { flex: 1; min-width: 0; padding: 0 9px; cursor: text; }
 .search:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); background: none; }
@@ -128,15 +129,16 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
   display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 8px; border-radius: 8px;
   color: var(--accent-text); font-size: 12px; font-weight: 600; letter-spacing: .02em;
 }
-.proj-head:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+@media (hover: hover) { .proj-head:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); } }
 .proj-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 0; cursor: pointer; text-align: left; color: inherit; font: inherit; }
 .proj-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proj-actions { display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease; }
-.proj-head:hover .proj-actions, .proj-head:focus-within .proj-actions { opacity: 1; }
+.proj-head:focus-within .proj-actions { opacity: 1; }
+@media (hover: hover) { .proj-head:hover .proj-actions { opacity: 1; } }
 .icon-btn svg { width: 15px; height: 15px; }
 .pickers .icon-btn { width: 32px; height: 32px; }
 .icon-btn { border: 0; background: none; cursor: pointer; width: 24px; height: 24px; border-radius: 7px; color: var(--muted); display: grid; place-items: center; font-size: 13px; }
-.icon-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+@media (hover: hover) { .icon-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); } }
 .threads { list-style: none; margin: 2px 0 0; padding: 0; }
 /* a project folds by easing its list's height (interpolate-size lets it run to and from auto) */
 .threads { overflow: clip; transition: height .24s var(--ease), opacity .2s ease, visibility .24s; }
@@ -145,29 +147,36 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
   display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 22px; border-radius: 8px;
   text-decoration: none; font-size: 13.5px; color: color-mix(in srgb, var(--ink) 86%, transparent);
 }
-.thread-link:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+@media (hover: hover) { .thread-link:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); } }
 .thread-link.active { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
 .thread-link .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-link .age { color: var(--faint); font-size: 11px; font-family: var(--mono); transition: opacity .15s ease; }
 /* a row's delete button takes the age's place on hover */
 .thread-row { position: relative; }
 .thread-del { position: absolute; top: 50%; right: 5px; translate: 0 -50%; opacity: 0; }
-.thread-row:hover .thread-del, .thread-del:focus-visible { opacity: 1; }
-.thread-row:hover .age, .thread-row:focus-within .age { opacity: 0; }
+.thread-del:focus-visible { opacity: 1; }
+@media (hover: hover) { .thread-row:hover .thread-del { opacity: 1; } }
+.thread-row:focus-within .age { opacity: 0; }
+@media (hover: hover) { .thread-row:hover .age { opacity: 0; } }
 .thread-pin { position: absolute; top: 50%; right: 31px; translate: 0 -50%; opacity: 0; }
-.thread-row:hover .thread-pin, .thread-pin:focus-visible { opacity: 1; }
-.thread-row:hover .thread-link, .thread-row:focus-within .thread-link { padding-right: 60px; }
+.thread-pin:focus-visible { opacity: 1; }
+@media (hover: hover) { .thread-row:hover .thread-pin { opacity: 1; } }
+.thread-row:focus-within .thread-link { padding-right: 60px; }
+@media (hover: hover) { .thread-row:hover .thread-link { padding-right: 60px; } }
 .thread-pin[aria-pressed="true"] { color: var(--accent-text); }
 .pin-mark { display: inline-flex; flex: none; width: 12px; height: 12px; color: var(--faint); }
 .pin-mark svg { width: 12px; height: 12px; }
 /* Drafts: unsent words, in the accent and in italics so they read apart from real threads */
 .drafts .proj-head { color: var(--muted); }
-.drafts .proj-head:hover { background: none; }
+@media (hover: hover) { .drafts .proj-head:hover { background: none; } }
 .draft-link { padding-left: 10px; color: var(--accent-text); font-style: italic; }
-.draft-link:hover, .draft-link.active { color: var(--accent-text); background: var(--accent-soft); }
-.draft-row:hover .draft-link, .draft-row:focus-within .draft-link { padding-right: 34px; }
+.draft-link.active { color: var(--accent-text); background: var(--accent-soft); }
+@media (hover: hover) { .draft-link:hover { color: var(--accent-text); background: var(--accent-soft); } }
+.draft-row:focus-within .draft-link { padding-right: 34px; }
+@media (hover: hover) { .draft-row:hover .draft-link { padding-right: 34px; } }
 /* a thread moved up into Drafts keeps two buttons: discard its words, delete the thread */
-.draft-thread:hover .draft-link, .draft-thread:focus-within .draft-link { padding-right: 60px; }
+.draft-thread:focus-within .draft-link { padding-right: 60px; }
+@media (hover: hover) { .draft-thread:hover .draft-link { padding-right: 60px; } }
 .draft-mark { display: inline-flex; flex: none; width: 13px; height: 13px; opacity: .8; }
 .draft-mark svg { width: 13px; height: 13px; }
 .run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: breathe 1.6s ease-in-out infinite; flex: none; }
@@ -177,7 +186,7 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 
 .side-foot { border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 2px; }
 .foot-link { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 8px; background: none; text-align: left; cursor: pointer; text-decoration: none; font-size: 13.5px; color: var(--muted); }
-.foot-link:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
+@media (hover: hover) { .foot-link:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .foot-link.active { color: var(--ink); background: color-mix(in srgb, var(--ink) 9%, transparent); }
 .foot-dot { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--accent); }
 .foot-gear { width: 8px; text-align: center; font-size: 13px; }
@@ -223,7 +232,7 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
   width: 100%; border: 0; background: none; padding: 2px 6px; margin-left: -6px; border-radius: 6px;
   font: 600 16px/1.3 var(--display); letter-spacing: -0.01em; text-overflow: ellipsis;
 }
-.title:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+@media (hover: hover) { .title:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); } }
 .title:focus { outline: none; background: var(--surface); box-shadow: 0 0 0 1px var(--line-strong); }
 /* thread header: "project · title" on one line; the title stays editable */
 .title-line { display: flex; align-items: center; gap: 6px; }
@@ -233,7 +242,7 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 }
 /* the project is a way to a new thread in it */
 button.title-project { cursor: pointer; }
-button.title-project:hover { color: var(--accent-text); background: var(--accent-soft); }
+@media (hover: hover) { button.title-project:hover { color: var(--accent-text); background: var(--accent-soft); } }
 .title-project.gone { font-style: italic; }
 .title-sep { flex: none; color: var(--faint); font: 600 16px/1.3 var(--display); }
 /* Compact, beside the model picker: a switch that shows when the context is filling */
@@ -280,7 +289,7 @@ button.title-project:hover { color: var(--accent-text); background: var(--accent
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   box-shadow: 0 1px 0 #0000000a; transition: border-color .12s ease, background-color .12s ease, box-shadow .12s ease;
 }
-.select:hover { border-color: var(--faint); }
+@media (hover: hover) { .select:hover { border-color: var(--faint); } }
 .select:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .select:disabled { opacity: .5; cursor: not-allowed; }
 .select.mono { font-family: var(--mono); font-size: 11.5px; font-weight: 400; }
@@ -306,7 +315,8 @@ button.title-project:hover { color: var(--accent-text); background: var(--accent
   }
   .select option::checkmark { content: "✓"; order: 0; width: 12px; color: var(--accent-text); font-size: 12px; }
   .select option:not(:checked)::checkmark { visibility: hidden; }
-  .select option:hover, .select option:focus-visible { outline: none; background: color-mix(in srgb, var(--ink) 6%, transparent); }
+  .select option:focus-visible { outline: none; background: color-mix(in srgb, var(--ink) 6%, transparent); }
+  @media (hover: hover) { .select option:hover { outline: none; background: color-mix(in srgb, var(--ink) 6%, transparent); } }
   .select option:checked { font-weight: 600; }
 }
 
@@ -332,11 +342,11 @@ button.title-project:hover { color: var(--accent-text); background: var(--accent
   background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; padding: 10px 15px; white-space: pre-wrap; word-break: break-word; line-height: 1.7;
   cursor: text; transition: border-color .15s ease, box-shadow .15s ease;
 }
-.msg-user:hover { border-color: var(--faint); }
+@media (hover: hover) { .msg-user:hover { border-color: var(--faint); } }
 /* a long prompt: its first 5 lines (1.7 line height), fading out, until Show more */
 .msg-user.clamped .msg-user-body { max-height: calc(5 * 1.7em); overflow: hidden; mask-image: linear-gradient(to bottom, #000 calc(100% - 1.7em), transparent); }
 .msg-more { display: block; margin: 4px 0 0; padding: 0; border: 0; background: none; color: var(--accent-text); font: 500 12.5px var(--body); cursor: pointer; white-space: normal; }
-.msg-more:hover { text-decoration: underline; }
+@media (hover: hover) { .msg-more:hover { text-decoration: underline; } }
 .msg-user:focus-visible { outline: none; border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 /* message actions: a copy button that fades in on hover, in a row that's always there so nothing jumps */
 .msg { display: grid; grid-template-columns: minmax(0, 1fr); }
@@ -346,7 +356,8 @@ button.title-project:hover { color: var(--accent-text); background: var(--accent
 .msg-meta:empty { display: none; }
 .msg-meta .stopped { color: var(--warn); }
 .msg-u .msg-actions { justify-content: flex-end; }
-.msg:hover .msg-actions, .msg:focus-within .msg-actions { opacity: 1; }
+.msg:focus-within .msg-actions { opacity: 1; }
+@media (hover: hover) { .msg:hover .msg-actions { opacity: 1; } }
 .msg.editing .msg-actions { visibility: hidden; }
 /* agent responses: only a turn's last one (its answer) has the row */
 .msg-a:not(.final) .msg-actions { display: none; }
@@ -368,13 +379,13 @@ button.title-project:hover { color: var(--accent-text); background: var(--accent
   background: var(--sunk); color: var(--ink); font: 500 12.5px/20px var(--body); text-decoration: none; white-space: nowrap;
   user-select: none; -webkit-user-select: none;
 }
-a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+@media (hover: hover) { a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); } }
 .att-thumb { width: 20px; height: 20px; flex: none; border-radius: 5px; object-fit: cover; background: var(--line); }
 .att-icon { display: grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: 5px; background: var(--accent-soft); color: var(--accent-text); }
 .att-icon svg { width: 13px; height: 13px; }
 .att-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .att-x { width: 16px; height: 16px; margin-left: 1px; flex: none; display: grid; place-items: center; border: 0; border-radius: 4px; background: none; color: var(--muted); font-size: 13px; line-height: 1; cursor: pointer; padding: 0; }
-.att-x:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 10%, transparent); }
+@media (hover: hover) { .att-x:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 10%, transparent); } }
 .att[data-state="uploading"] { opacity: .6; }
 .att[data-state="uploading"] .att-thumb, .att[data-state="uploading"] .att-icon { animation: pulse 1.2s ease-in-out infinite; }
 .att.gone { color: var(--faint); font-style: italic; padding-left: 6px; }
@@ -411,7 +422,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
 .code-head { display: flex; justify-content: space-between; align-items: center; padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--line); font: 400 10.5px var(--mono); color: var(--muted); }
 .code pre { margin: 0; padding: 12px 14px; overflow: auto; font-size: 12px; line-height: 1.7; }
 .copy { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 11.5px; padding: 2px 6px; border-radius: 5px; }
-.copy:hover { color: var(--ink); background: var(--line); }
+@media (hover: hover) { .copy:hover { color: var(--ink); background: var(--line); } }
 
 /* tool calls: one quiet line each, output on demand */
 .tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
@@ -420,7 +431,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
   width: 100%; display: flex; align-items: center; gap: 10px; padding: 5px 8px; margin: 0 -8px;
   border: 0; background: none; text-align: left; cursor: pointer; border-radius: 8px; font-size: 13px; color: var(--muted);
 }
-.tool-row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); color: var(--ink); }
+@media (hover: hover) { .tool-row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); color: var(--ink); } }
 /* a finished call shows nothing; a running one spins, a failed one is crossed */
 .tool-state { display: none; flex: none; }
 .tool.running > .tool-row .tool-state, .tool-group.running > .tool-group-head .tool-state {
@@ -519,14 +530,15 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
 .composer-end { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .composer-end .select.chip { border-color: transparent; padding-left: 8px; font-weight: 600; color: var(--ink); }
 .composer-end .pop-panel { left: auto; right: 0; }
-.select.chip:hover, .pill-btn:not(:disabled):hover { color: var(--ink); background-color: color-mix(in srgb, var(--ink) 6%, transparent); }
+@media (hover: hover) { .select.chip:hover, .pill-btn:not(:disabled):hover { color: var(--ink); background-color: color-mix(in srgb, var(--ink) 6%, transparent); } }
 @supports selector(:open) { .select.chip:open { color: var(--ink); background-color: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .select.chip:focus-visible { color: var(--ink); border-color: var(--accent-line); }
 .pill-btn { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px 0 10px; cursor: pointer; font-family: var(--body); }
 .pill-btn .ico svg { display: block; width: 14px; height: 14px; }
 .pill-btn:disabled { opacity: .45; cursor: not-allowed; }
 @container (max-width: 640px) { .composer-foot .hint { display: none; } .composer-controls { margin-right: auto; } }
-@container (max-width: 440px) { .pill-btn span:not(.ico) { display: none; } .pill-btn { padding: 0 8px; } }
+/* tight: Attach keeps its icon; Compact keeps its word, or it's an empty pill */
+@container (max-width: 440px) { .pill-btn:not(.compact-toggle) span:not(.ico) { display: none; } .pill-btn:not(.compact-toggle) { padding: 0 8px; } }
 /* composer pickers: a chip that opens a panel above it */
 .pop { position: relative; flex: none; max-width: 100%; }
 .select.pop-trigger { max-width: 100%; appearance: none; display: inline-flex; align-items: center; gap: 7px; font-family: var(--body); }
@@ -547,7 +559,8 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
   width: 100%; display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px 7px 8px; border: 0; border-radius: 8px;
   background: none; text-align: left; font-size: 13.5px; line-height: 1.35; cursor: pointer; color: var(--ink);
 }
-.pop-item:hover, .pop-item:focus-visible { outline: none; background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.pop-item:focus-visible { outline: none; background: color-mix(in srgb, var(--ink) 6%, transparent); }
+@media (hover: hover) { .pop-item:hover { outline: none; background: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .pop-item[aria-checked="true"] { font-weight: 600; }
 .pop-item:disabled { color: var(--faint); cursor: not-allowed; background: none; }
 .pop-check { width: 12px; flex: none; color: var(--accent-text); font-size: 12px; line-height: 1.6; }
@@ -579,7 +592,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
   transition: filter .12s ease, opacity .12s ease;
 }
 .send svg { width: 17px; height: 17px; }
-.send:not(:disabled):hover { filter: brightness(1.15); }
+@media (hover: hover) { .send:not(:disabled):hover { filter: brightness(1.15); } }
 .send:disabled { opacity: .4; cursor: not-allowed; }
 .send.stop { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 
@@ -595,7 +608,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
   border: 1px solid var(--line-strong); background: color-mix(in srgb, var(--surface) 70%, transparent); color: var(--ink); font-size: 13.5px; font-weight: 600;
 }
 .kind .ico svg { display: block; width: 15px; height: 15px; }
-.kind:hover { background: var(--surface); border-color: var(--faint); }
+@media (hover: hover) { .kind:hover { background: var(--surface); border-color: var(--faint); } }
 .kind[aria-selected="true"] { background: var(--cta); border-color: var(--cta-line); color: var(--cta-ink); }
 .suggest { display: grid; }
 .suggest-item {
@@ -603,7 +616,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
   padding: 12px 12px; font-size: 14.5px; cursor: pointer; border-radius: 0;
 }
 .suggest-item:last-child { border-bottom: 0; }
-.suggest-item:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 5%, transparent); border-radius: 9px; border-bottom-color: transparent; }
+@media (hover: hover) { .suggest-item:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 5%, transparent); border-radius: 9px; border-bottom-color: transparent; } }
 /* pages: settings, evolution */
 .page { flex: 1; overflow: auto; }
 .page-inner { max-width: 880px; margin: 0 auto; padding: 28px 24px 64px; display: grid; gap: 18px; }
@@ -632,7 +645,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn-primary { background: var(--accent); color: var(--on-accent); }
 .btn-quiet { background: var(--surface); border-color: var(--line-strong); font-weight: 500; }
-.btn-quiet:hover { border-color: var(--faint); }
+@media (hover: hover) { .btn-quiet:hover { border-color: var(--faint); } }
 .btn-ink { background: var(--ink); color: var(--bg); }
 .btn kbd { font-size: 10px; opacity: .7; font-weight: 400; }
 
@@ -694,7 +707,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
 .quote-pop:not(:popover-open) { display: none; }
 .quote-pop span { display: grid; width: 14px; height: 14px; }
 .quote-pop svg { width: 14px; height: 14px; }
-.quote-pop:hover { opacity: .88; }
+@media (hover: hover) { .quote-pop:hover { opacity: .88; } }
 .quote-pop:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 
 /* toasts, dialog. Toasts are a popover too, so a toast shows above an open modal. */
@@ -709,7 +722,7 @@ a.att:hover { border-color: var(--accent-line); background: var(--accent-soft); 
   flex: none; border: 0; border-radius: 8px; padding: 6px 11px; cursor: pointer; white-space: nowrap;
   background: var(--accent); color: var(--on-accent); font: 600 12.5px/1 var(--body);
 }
-.toast-cta:hover { filter: brightness(1.1); }
+@media (hover: hover) { .toast-cta:hover { filter: brightness(1.1); } }
 .toast-cta:focus-visible { outline: 2px solid var(--bg); outline-offset: 2px; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 dialog { border: 1px solid var(--line); border-radius: 16px; padding: 22px; width: min(460px, calc(100vw - 32px)); background: var(--surface); color: var(--ink); box-shadow: 0 30px 80px -20px #00000066; }
@@ -737,7 +750,7 @@ dialog h3 { margin: 0 0 6px; font: 600 17px/1.3 var(--display); }
   color: var(--muted); font-size: 13.5px; text-align: left; cursor: pointer;
 }
 .set-tab .ico svg { display: block; width: 16px; height: 16px; }
-.set-tab:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
+@media (hover: hover) { .set-tab:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .set-tab.on { color: var(--ink); background: color-mix(in srgb, var(--ink) 9%, transparent); font-weight: 600; }
 .set-tab.on .ico { color: var(--accent-text); }
 .set-body { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -771,6 +784,12 @@ pre.serve-said { margin: 6px 0 0; white-space: pre-wrap; max-height: 160px; over
 .qr-paired i { width: 7px; height: 7px; border-radius: 50%; background: var(--keep); flex: none; }
 @media (max-width: 620px) { .qr-pair { grid-template-columns: minmax(0, 1fr); justify-items: center; } .qr { width: min(220px, 70vw); height: auto; aspect-ratio: 1; } }
 
+/* Remote access seen from a paired phone: the links first, the code behind a tap */
+.qr-remote { display: grid; gap: 12px; justify-items: start; padding: 4px 0 6px; }
+.qr-more > summary { list-style: none; width: max-content; }
+.qr-more > summary::-webkit-details-marker { display: none; }
+.qr-more[open] > summary { margin-bottom: 12px; }
+.qr-more .qr { display: block; }
 /* a long press's actions: a small box, or a sheet up from the bottom on a phone */
 .sheet { width: min(340px, calc(100vw - 32px)); padding: 0; border: 0; background: none; box-shadow: none; overflow: visible; }
 .sheet[open] { display: grid; gap: 8px; animation: modal-in .18s var(--ease) both; }
@@ -779,7 +798,8 @@ pre.serve-said { margin: 6px 0 0; white-space: pre-wrap; max-height: 160px; over
 .sheet-box { display: grid; overflow: hidden; }
 .sheet-title { padding: 12px 16px; font-size: 12.5px; color: var(--muted); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet-item { display: block; width: 100%; min-height: 50px; padding: 0 16px; border: 0; border-top: 1px solid var(--line); background: none; color: var(--accent-text); font-size: 16px; cursor: pointer; }
-.sheet-item:hover, .sheet-item:active { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.sheet-item:active { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+@media (hover: hover) { .sheet-item:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .sheet-item.danger { color: var(--warn); font-weight: 600; }
 .sheet-item.sheet-cancel { border-top: 1px solid var(--line); background: var(--surface); color: var(--ink); font-weight: 600; }
 @media (max-width: 620px) {
@@ -853,7 +873,7 @@ body.resizing .git-panel { transition: none; }
 .git-note.warn { margin: 0; padding: 8px 10px; border-radius: 9px; background: var(--warn-soft); color: var(--ink); }
 .git-none { margin: 2px 0; color: var(--faint); font-size: 12.5px; }
 .git-when { flex: none; margin-left: auto; font: 400 10.5px var(--mono); color: var(--faint); white-space: nowrap; text-decoration: none; }
-a.git-when:hover { color: var(--accent-text); }
+@media (hover: hover) { a.git-when:hover { color: var(--accent-text); } }
 .git-card { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 11px 12px; min-width: 0; }
 .git-branch-line, .git-nopr-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .git-branch-ico svg, .git-pr-ico svg { display: block; width: 15px; height: 15px; color: var(--muted); }
@@ -864,7 +884,7 @@ a.git-when:hover { color: var(--accent-text); }
 .git-nopr-line { color: var(--muted); font-weight: 500; }
 .btn-xs { height: 28px; padding: 0 10px; font-size: 12.5px; border-radius: 8px; gap: 6px; text-decoration: none; }
 .btn-xs .ico svg { display: block; width: 13px; height: 13px; }
-.btn-primary:not(:disabled):hover { filter: brightness(1.08); }
+@media (hover: hover) { .btn-primary:not(:disabled):hover { filter: brightness(1.08); } }
 .git-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .git-pr-top { display: flex; align-items: center; gap: 8px; }
 .git-state { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px 0 7px; border-radius: 99px; font-size: 11.5px; font-weight: 600; background: var(--accent); color: var(--on-accent); }
@@ -873,7 +893,7 @@ a.git-when:hover { color: var(--accent-text); }
 .git-state.st-merged { background: var(--ink); color: var(--bg); }
 .git-state.st-closed { background: none; color: var(--muted); border: 1px solid var(--line-strong); }
 .git-pr-title { display: block; margin: 8px 0 4px; font: 600 14.5px/1.35 var(--display); text-decoration: none; overflow-wrap: anywhere; }
-.git-pr-title:hover { color: var(--accent-text); }
+@media (hover: hover) { .git-pr-title:hover { color: var(--accent-text); } }
 .git-pr-num { color: var(--muted); font-weight: 500; }
 .git-pr-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--muted); font-size: 12px; min-width: 0; }
 .git-refs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -890,12 +910,12 @@ a.git-when:hover { color: var(--accent-text); }
 .git-sec > summary::-webkit-details-marker { display: none; }
 .git-sec > summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; rotate: -45deg; transition: rotate .15s ease; margin: 0 2px 0 1px; }
 .git-sec[open] > summary::before { rotate: 45deg; }
-.git-sec > summary:hover { color: var(--ink); }
+@media (hover: hover) { .git-sec > summary:hover { color: var(--ink); } }
 .git-count { font: 500 10.5px var(--mono); letter-spacing: 0; text-transform: none; color: var(--faint); }
 .git-sec-body { padding: 4px 0 6px; min-width: 0; }
 .git-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
 .git-list > li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 6px; margin: 0 -6px; border-radius: 7px; }
-.git-list > li:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+@media (hover: hover) { .git-list > li:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); } }
 .git-sha { flex: none; font-size: 10.5px; color: var(--accent-text); }
 .git-subject, .git-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-path { font: 400 11.5px var(--mono); }
@@ -917,7 +937,7 @@ a.git-when:hover { color: var(--accent-text); }
 .git-check-sum .sum-passed { color: var(--accent-text); }
 .git-check-sum .sum-failed { color: var(--warn); font-weight: 600; }
 .git-more { margin: 4px 0 0; padding: 0; border: 0; background: none; color: var(--accent-text); font: 500 12px var(--body); cursor: pointer; }
-.git-more:hover { text-decoration: underline; }
+@media (hover: hover) { .git-more:hover { text-decoration: underline; } }
 .ck-mark { flex: none; width: 14px; height: 14px; display: grid; place-items: center; border-radius: 50%; font: 700 10px/1 var(--mono); }
 .ck-passed .ck-mark { background: var(--accent); color: var(--on-accent); }
 .ck-failed .ck-mark { background: var(--warn); color: var(--bg); }
@@ -925,7 +945,7 @@ a.git-when:hover { color: var(--accent-text); }
 .ck-pending .ck-mark { border: 1.5px dashed var(--faint); }
 .ck-skipped .ck-mark, .ck-cancelled .ck-mark, .ck-neutral .ck-mark { color: var(--faint); border: 1px solid var(--line-strong); }
 .ck-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; font-size: 12.5px; }
-a.ck-name:hover { color: var(--accent-text); }
+@media (hover: hover) { a.ck-name:hover { color: var(--accent-text); } }
 .ck-wf { color: var(--muted); }
 .ck-failed .ck-name { font-weight: 600; }
 .git-prose { font-size: 13px; line-height: 1.6; }
@@ -1002,6 +1022,8 @@ a.ck-name:hover { color: var(--accent-text); }
   .composer-wrap { padding-left: calc(8px + env(safe-area-inset-left)); padding-right: calc(8px + env(safe-area-inset-right)); }
   /* a stuck message takes less of a small screen */
   .turn > .msg-u:first-child .msg-user { max-height: 22dvh; }
+  /* and a long one shows three lines, not five, before Show more (app.js: userLines) */
+  .msg-user.clamped .msg-user-body { max-height: calc(3 * 1.7em); }
   /* toasts drop from the top, clear of the composer and the keyboard */
   .toasts { inset: calc(10px + env(safe-area-inset-top)) 10px auto 10px; width: auto; justify-items: center; }
   .toast { max-width: 100%; }
@@ -1023,6 +1045,21 @@ a.ck-name:hover { color: var(--accent-text); }
   /* the model picker opens as a sheet the composer's width, above it */
   .composer .pop { position: static; }
   .composer .pop-panel, .composer .composer-end .pop-panel { left: 0; right: 0; width: auto; max-width: none; max-height: min(72dvh, 560px); }
+  /* a setting whose control is long (a path, a status with its button) puts it under its words */
+  .row:has(> .path), .row:has(> .row-end .btn) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .row:has(> .row-end .btn) .row-end { justify-content: flex-start; }
+  .path { text-align: left; max-width: none; }
+  /* Git takes the whole screen: a sliver of the thread beside it is no use */
+  .git-panel, .git-panel.closed { width: 100vw; border-left-width: 0; box-shadow: none; }
+  /* the sidebar toggle stays fixed over its left end, as over the thread's header */
+  .git-head { padding-left: calc(56px + env(safe-area-inset-left)); }  .git-body { padding-bottom: calc(28px + env(safe-area-inset-bottom)); }
+  /* the kinds of task: one row that scrolls sideways, not a row and a straggler */
+  .start { padding: 20px 18px; overflow-x: hidden; }
+  .start-inner { min-width: 0; }
+  .kinds { flex-wrap: nowrap; overflow-x: auto; margin: 0 -18px 18px; padding: 2px 18px; scrollbar-width: none; }
+  .kinds::-webkit-scrollbar { display: none; }
+  .kind { flex: none; }
+  .start .lede { overflow-wrap: anywhere; }
 }
 
 /* ---------- touch: fingers, not a mouse ---------- */
@@ -1072,6 +1109,27 @@ a.ck-name:hover { color: var(--accent-text); }
   .git-file-btn, .git-list > li { padding-top: 8px; padding-bottom: 8px; }
   .git-sec > summary { padding: 10px 2px; }
   .port-input { height: 40px; }
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  /* a long press on a control is a press: no text selection, no phone menu */
+  button, summary, .tool-row, .proj-head, .kind, .suggest-item, .palette-item, .pop-item, .foot-link, .draft-link {
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  /* the mono labels, a size up: read at arm's length, not a desk */
+  .msg-meta, .turn-meta, .tool-count, .code-head, .git-at, .git-when, .git-fact, .git-sha, .git-count, .queued-label { font-size: 11.5px; }
+  .tool-name, .tool-detail, .compact-time, .compact-facts, .git-path, .path { font-size: 12.5px; }
+  .thread-link .age { font-size: 12px; }
+  .git-chg { width: 68px; font-size: 11px; }
+  .git-sec > summary { font-size: 12px; }
+  .tool-row { min-height: 42px; }
+  .git-file-btn, .git-list > li { min-height: 42px; }
+  /* a project: + for a new thread; removing it is a long press away (app.js), not a mis-tap beside + */
+  .proj-head { min-height: 44px; }
+  .proj-actions .icon-btn { width: 40px; height: 40px; font-size: 18px; }
+  .proj-actions .proj-remove { display: none; }
+  /* Ctrl+Enter means nothing without a keyboard */
+  .git-comment-foot .hint { display: none; }
+  .git-comment-foot { justify-content: flex-end; }
+  .git-comment-foot .btn { white-space: nowrap; }
   /* a press shows, since nothing hovers */
   .thread-link:active, .foot-link:active, .icon-btn:active, .tool-row:active, .suggest-item:active, .pop-item:active, .set-tab:active { background: color-mix(in srgb, var(--ink) 10%, transparent); }
   .btn:active, .send:active, .kind:active { filter: brightness(.92); }
