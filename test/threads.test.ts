@@ -329,6 +329,19 @@ describe("threads that start threads", () => {
     expect(ctx.inputs.get("lead")!.instructions).not.toContain("Started by another thread")
   })
 
+  it("tells the provider which thread a turn is in, and ends its live session when the thread goes or the app quits", async () => {
+    const ctx = await run(async (_input, say) => say("hi"))
+    const closed: Array<string> = []
+    let all = 0
+    PROVIDERS.claude = { ...PROVIDERS.claude, close: (id) => closed.push(id), closeAll: () => all++ }
+    await turnOf(ctx, ctx.parent, "hello")
+    expect(ctx.inputs.get("hello")!.threadId).toBe(ctx.parent.id)
+    ctx.threads.forget(ctx.parent.id)
+    expect(closed).toEqual([ctx.parent.id])
+    ctx.threads.closeAll()
+    expect(all).toBe(1)
+  })
+
   it("messages a thread it started once it's idle, waits again, and lists it", async () => {
     const answers: Record<string, string> = {}
     let child = ""
