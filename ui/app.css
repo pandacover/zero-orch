@@ -1627,3 +1627,11 @@ dialog.keys-sheet { width: min(480px, calc(100vw - 32px)); padding: 18px 20px 20
 @media (max-width: 820px) { .bar-tools { display: none; } }
 button.turn-file-path { border: 0; background: none; padding: 0; text-align: left; cursor: pointer; }
 @media (hover: hover) { button.turn-file-path:hover { color: var(--accent-text); text-decoration: underline; } }
+
+/* ---------- a long thread opens and scrolls without laying out what's off screen ----------
+   Each turn off screen is skipped (its size estimated, then remembered once drawn): a 600-item thread
+   spent ~200ms laying out every turn on open. Its sticky message still sticks inside it. */
+.feed > section.turn { content-visibility: auto; contain-intrinsic-size: auto 480px; }
+/* the turns above those drawn */
+.feed-earlier { align-self: center; margin: 4px auto 10px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 99px; background: none; color: var(--muted); font: 500 12px var(--body); cursor: pointer; }
+@media (hover: hover) { .feed-earlier:hover { color: var(--ink); border-color: var(--line-strong); } }

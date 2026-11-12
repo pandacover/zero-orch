@@ -1857,10 +1857,12 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   // Attach on the left; the model picker sits on the right, beside Send.
   node.append(menu.pop, input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach, tools), hint, el("div", { class: "composer-end" }, controls, send)), picker)
   sync()
-  queueMicrotask(() => {
+  // Focus once the view is on screen, without scrolling: focusing while it's still being built laid the whole
+  // thread out an extra time (a long thread opened ~140ms slower for it).
+  requestAnimationFrame(() => {
     // On a phone, focus would put the keyboard over the thread just opened: a tap on the box asks for it.
-    if (disabled || touchFirst.matches) return
-    input.focus()
+    if (disabled || touchFirst.matches || !input.isConnected) return
+    input.focus({ preventScroll: true })
     // Back to a draft: the caret goes at its end, where you left off.
     if (kept) { const r = document.createRange(); r.selectNodeContents(input); r.collapse(false); caretTo(r) }
   })
@@ -1869,6 +1871,8 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     setBusy: (b) => { busy = b; paint() },
     /** Whether the thread's provider can take a message now, and what the empty box says. */
     setReady: (ready, text) => {
+      // Called on every change of the thread: touching contentEditable, even to what it is, costs a style pass.
+      if (disabled === !ready && input.dataset.placeholder === text) return
       disabled = !ready
       input.contentEditable = ready ? "true" : "false"
       input.dataset.placeholder = text
@@ -1970,7 +1974,12 @@ function threadView(t) {
   })
   const queued = el("div", { class: "queued", hidden: true })
   const links = linksNode(t)
-  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact, meter, branch, links }
+  // The turns above the ones drawn: a button for them, which also loads them as it scrolls into view.
+  const earlier = el("button", { class: "feed-earlier", type: "button", onclick: () => showEarlier() }, el("span"))
+  feed?.io?.disconnect()
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact, meter, branch, links, shown: TURNS_SHOWN, hidden: 0, earlier }
+  feed.io = new IntersectionObserver((seen) => { if (seen.some((e) => e.isIntersecting) && feed?.earlier === earlier) showEarlier() }, { root: scroll, rootMargin: "600px 0px 0px 0px" })
+
   paintReady(t)
   // Scrolled up, a button brings you back to the latest; it says so when something new came in meanwhile.
   const jump = el("button", { class: "jump-latest", type: "button", hidden: true, title: "Jump to the latest", "aria-label": "Jump to the latest",
@@ -1990,7 +1999,12 @@ function threadView(t) {
   })
   renderFeed()
   paintWorking()
-  requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight })
+  // At the end first; only then does scrolling up to the earlier entries load them (at the top, before
+  // that first scroll, the button was in view and drew a second batch at once).
+  requestAnimationFrame(() => {
+    scroll.scrollTop = scroll.scrollHeight
+    requestAnimationFrame(() => { if (feed?.earlier === earlier) feed.io.observe(earlier) })
+  })
   const git = makeGitPanel(t)
   // The session's slash commands, for / (empty until a turn of it has started).
   if (!S.commands.has(t.id)) api("GET", `threads/${t.id}/commands`).then((list) => { if (list.length) S.commands.set(t.id, list) }, () => {})
@@ -2128,9 +2142,18 @@ function tickWorking() {
   t.textContent = w.dataset.since && !w.hidden ? elapsed(w.dataset.since) : ""
 }
 setInterval(tickWorking, 1000)
+/**
+ * Keep a following thread at its end, once a frame: reading scrollHeight lays the whole thread out, and
+ * doing it on every event of a long thread was most of the time an event took.
+ */
+let following = 0
 const follow = () => {
-  if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight
-  else feed?.jump?.classList.add("fresh")
+  if (following) return
+  following = requestAnimationFrame(() => {
+    following = 0
+    if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight
+    else feed?.jump?.classList.add("fresh")
+  })
 }
 
 /** An item's node, rendered again only when the item itself was replaced. */
@@ -2178,20 +2201,35 @@ function renderFeed() {
   const groups = new Map()
   // Each turn (a message of yours and everything after it, up to your next) is one block, so your
   // message can stick to the top while its turn scrolls by, until the next turn's pushes it away.
-  const turns = []
+  const all = []
   for (const x of top) {
-    const node = x.items ? toolGroup(x, groups) : nodeFor(x)
-    if (!turns.length || (!x.items && x.kind === "user")) turns.push({ key: x.items ? x.key : x.id, nodes: [] })
-    turns.at(-1).nodes.push(node)
+    if (!all.length || (!x.items && x.kind === "user")) all.push({ key: x.items ? x.key : x.id, entries: [] })
+    all.at(-1).entries.push(x)
   }
-  feed.groups = groups
-  const sections = turns.map(({ key, nodes }) => {
+  // Only the latest entries (messages, runs of tool calls) are drawn: a long thread opened slowly drawing
+  // all of it. Earlier ones come in as you scroll up to them (or ask), a batch at a time; the oldest turn
+  // drawn may start partway through.
+  let budget = feed.shown, hidden = 0
+  const drawn = []
+  for (let i = all.length - 1; i >= 0; i--) {
+    const { key, entries } = all[i]
+    if (budget <= 0) { hidden += entries.length; continue }
+    const keep = entries.length <= budget ? entries : entries.slice(entries.length - budget)
+    hidden += entries.length - keep.length
+    budget -= keep.length
+    drawn.unshift({ key, entries: keep })
+  }
+  const sections = drawn.map(({ key, entries }) => {
+    const nodes = entries.map((x) => x.items ? toolGroup(x, groups) : nodeFor(x))
     let section = feed.turns.get(key)
     if (!section) feed.turns.set(key, (section = el("section", { class: "turn" })))
     reconcile(section, nodes)
     return section
   })
-  reconcile(feed.list, [...sections, feed.queued, feed.working])
+  feed.groups = groups
+  feed.hidden = hidden
+  if (hidden) feed.earlier.querySelector("span").textContent = `Show earlier (${hidden} more)`
+  reconcile(feed.list, [...(hidden ? [feed.earlier] : []), ...sections, feed.queued, feed.working])
   // Only a turn's last agent response (its answer, not the narration between tool calls) has the
   // action row, and the turn's details (model, time, cost, tokens) sit in that row beside Copy.
   for (const [id, { node }] of feed.cache) {
@@ -2216,7 +2254,7 @@ function turnEnds() {
   for (const item of S.open.items) {
     if (item.kind === "assistant") last = item.id
     else if (item.kind === "tool" && item.diff && item.status !== "failed") {
-      const c = diffCounts(item.diff), was = edited.get(item.detail) ?? { add: 0, del: 0 }
+      const c = countsOf(item), was = edited.get(item.detail) ?? { add: 0, del: 0 }
       edited.set(item.detail, { add: was.add + c.add, del: was.del + c.del })
     } else if (item.kind === "user" || item.kind === "turn") {
       if (last) finals.add(last)
@@ -2260,6 +2298,17 @@ function paintTurnFiles(node, edited) {
     el("ul", { class: "turn-file-list" }, ...files.slice(0, SHOWN).map(row),
       rest > 0 ? el("li", { class: "turn-file more" }, el("details", {}, el("summary", { text: `${rest} more` }), el("ul", { class: "turn-file-list" }, ...files.slice(SHOWN).map(row)))) : null))
 }
+/** How many of a thread's latest entries (messages, runs of tool calls) are drawn when it opens, and how many more each time you scroll up to the rest. */
+const TURNS_SHOWN = 60
+/** Draw the next batch of earlier turns, keeping what you're looking at where it is. */
+function showEarlier() {
+  if (!feed?.hidden) return
+  const s = feed.scroll
+  const from = s.scrollHeight - s.scrollTop
+  feed.shown += TURNS_SHOWN
+  renderFeed()
+  s.scrollTop = s.scrollHeight - from
+}
 /** On a failed turn: send your last message again (its files too), as a new message. Only on the thread's last turn. */
 function retryButton(item) {
   const t = S.open
@@ -2289,7 +2338,10 @@ function toolGroup(run, groups) {
     })
   }
   groups.set(run.key, g)
+  // The same calls as last time (an event elsewhere in the thread): nothing here to draw again.
+  const same = g.items && g.items.length === run.items.length && g.items.every((x, i) => x === run.items[i])
   g.items = run.items
+  if (same) return g.node
   reconcile(g.body, run.items.map(nodeFor))
   paintGroup(g, run.key)
   return g.node
@@ -2312,7 +2364,7 @@ function paintGroup(g, key) {
   // A run that's over says what it did ("Read 7 files, edited 2"); one still going shows its latest call.
   const summary = state !== "running" && tools.length > 1 ? toolSummary(tools) : ""
   const counted = summary ? (failed ? `${failed} failed` : "") : `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`
-  const sum = tools.reduce((s, i) => { if (!i.diff) return s; const c = diffCounts(i.diff); return { add: s.add + c.add, del: s.del + c.del, any: true } }, { add: 0, del: 0, any: false })
+  const sum = tools.reduce((s, i) => { if (!i.diff) return s; const c = countsOf(i); return { add: s.add + c.add, del: s.del + c.del, any: true } }, { add: 0, del: 0, any: false })
   g.head.replaceChildren(...[
     el("span", { class: "tool-state", "aria-label": state }),
     g.win,
@@ -2429,13 +2481,21 @@ function renderItem(item) {
       if (memoryRead(item)) return memoryCard(item)
       const open = S.expanded.has(item.id)
       // An edit opens to what it changed (and its output only when it failed); any other call to its output.
-      const counts = item.diff ? diffCounts(item.diff) : null
+      const counts = item.diff ? countsOf(item) : null
+      // A diff is drawn when its card first opens: hundreds of edits' lines in a long thread, drawn up front,
+      // made the page tens of thousands of nodes heavier.
       const out = item.diff
-        ? el("div", { class: "tool-out tool-diff", inert: !open }, diffView(item.diff), item.status === "failed" && item.output ? el("pre", { class: "tool-fail", text: item.output }) : null)
+        ? el("div", { class: "tool-out tool-diff", inert: !open })
         : el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
+      const drawDiff = () => {
+        if (!item.diff || out.childElementCount) return
+        out.append(diffView(item.diff), ...(item.status === "failed" && item.output ? [el("pre", { class: "tool-fail", text: item.output })] : []))
+      }
+      if (open) drawDiff()
       const node = el("div", { class: `tool ${item.status}${open ? " open" : ""}` })
       const row = el("button", { class: "tool-row", type: "button", "aria-expanded": String(open), onclick: () => {
         const now = !node.classList.contains("open")
+        if (now) drawDiff()
         node.classList.toggle("open", now)
         out.inert = !now
         row.setAttribute("aria-expanded", String(now))
@@ -2908,6 +2968,13 @@ function diffCounts(text) {
     else if (l.startsWith("-") && !l.startsWith("---")) del++
   }
   return { add, del }
+}
+/** An item's diff counts, worked out once per item (an item is replaced, not changed, when it updates). */
+const counted = new WeakMap()
+function countsOf(item) {
+  let c = counted.get(item)
+  if (!c || c.diff !== item.diff) counted.set(item, (c = { diff: item.diff, ...diffCounts(item.diff) }))
+  return c
 }
 /** "+12 −3", green and red, for a row. */
 const diffStat = ({ add, del }) => el("span", { class: "diff-stat", "aria-label": `${add} lines added, ${del} removed` },

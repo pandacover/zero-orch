@@ -327,8 +327,16 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   let compacting = false
   // The summary arrives through Claude Code's PostCompact hook, just before the compaction's boundary message.
   let summary = ""
+  // The session's slash commands: asked once it has started, sent with the next message after they arrive.
+  // The turn never waits for them.
+  let commands: Array<SlashCommandInfo> | undefined
+  let commandsSent = false
   try {
   for await (const m of messages as AsyncIterable<SDKMessage>) {
+    if (commands && !commandsSent) {
+      commandsSent = true
+      yield { type: "commands", commands }
+    }
     if (session === undefined && "session_id" in m && typeof m.session_id === "string") {
       session = m.session_id
       yield { type: "session", resume: session }
@@ -344,11 +352,9 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       }
       continue
     }
-    // The session's slash commands, once it has started: asked, not waited on for long.
     if (m.type === "system" && m.subtype === "init") {
       const terminal = (m as { terminal_slash_commands?: Array<string> }).terminal_slash_commands ?? []
-      const list = await Promise.race([messages.supportedCommands().catch(() => undefined), new Promise<undefined>((ok) => setTimeout(() => ok(undefined), 3000))])
-      if (list) yield { type: "commands", commands: usableCommands(list, terminal) }
+      messages.supportedCommands().then((list) => { commands = usableCommands(list, terminal) }, () => {})
       continue
     }
     if (m.type === "rate_limit_event") {
