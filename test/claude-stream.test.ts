@@ -10,8 +10,9 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
     async function* messages() {
       for (const m of script) yield m
     }
-    const q = messages() as AsyncGenerator<Record<string, unknown>> & { getContextUsage: () => Promise<never> }
+    const q = messages() as AsyncGenerator<Record<string, unknown>> & { getContextUsage: () => Promise<never>; close: () => void }
     q.getContextUsage = () => Promise.reject(new Error("not in tests"))
+    q.close = () => {}
     return q
   }
 }))
