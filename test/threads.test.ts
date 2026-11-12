@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { type Access, atMost, compactionOffered, DEFAULT_SETTINGS, isCompact, type Item, needsCompaction, type Project, type Thread } from "../src/app/Model.ts"
-import { claudeModels, cleanTitle, effortFor, gate, summaryOf, toLabels } from "../src/app/providers/Claude.ts"
+import { claudeModels, cleanTitle, effortFor, gate, summaryOf, toLabels, TOOLS } from "../src/app/providers/Claude.ts"
 import type { Provider, TurnInput } from "../src/app/providers/Provider.ts"
 import * as StoreModule from "../src/app/Store.ts"
 import { Store } from "../src/app/Store.ts"
@@ -196,6 +196,22 @@ describe("thread turns", () => {
       expect(gate(access, cwd, "mcp__zero__start_thread", { prompt: "x" })).toBe(access === "ask" ? "ask" : "allow")
     }
     expect(gate("auto-edit", cwd, "mcp__other__start_thread", {})).toBe("ask")
+  })
+
+  it("gives threads ToolSearch, so connector tools load on demand instead of in full each turn", () => {
+    expect(TOOLS).toContain("ToolSearch")
+  })
+
+  it("lets any thread load a deferred tool without asking, but gates the tool it loads", () => {
+    const cwd = join(tmpdir(), "proj")
+    for (const access of ["ask", "auto-edit", "full-access", "read-only"] as const) {
+      expect(gate(access, cwd, "ToolSearch", { query: "select:mcp__claude_ai_Gmail__send_message" }), access).toBe("allow")
+    }
+    const send = "mcp__claude_ai_Gmail__send_message"
+    expect(gate("ask", cwd, send, { to: "a@b.c" })).toBe("ask")
+    expect(gate("auto-edit", cwd, send, { to: "a@b.c" })).toBe("ask")
+    expect(gate("read-only", cwd, send, { to: "a@b.c" })).toBe("deny")
+    expect(gate("full-access", cwd, send, { to: "a@b.c" })).toBe("allow")
   })
 
   it("caps a thread's access at its starter's", () => {
