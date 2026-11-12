@@ -227,7 +227,8 @@ export const makeThreads = (options: {
       if (i >= 0) t.items[i] = item
       else t.items.push(item)
       hub.send("item", { threadId: t.id, item })
-      store.saveThread(t, soon)
+      // Named: it may be the same object, changed (an approval answered).
+      store.saveThread(t, soon, item)
     }
 
     const create = (
@@ -381,7 +382,7 @@ export const makeThreads = (options: {
           if (known) {
             known.text += chunk
             hub.send("delta", { threadId: t.id, itemId: known.id, delta: chunk })
-            store.saveThread(t, true)
+            store.saveThread(t, true, known)
           } else {
             const item = { kind: "assistant" as const, id: newId("a"), at: now(), text: chunk }
             texts.set(key, item)

@@ -58,7 +58,11 @@ const S = {
   /** The plan's usage windows as Claude last reported them ({ kind, status, used, resetsAt }). */
   limits: [],
   /** Each thread's session's slash commands (thread id → [{ name, description, hint }]), as its provider last said. */
-  commands: new Map()
+  commands: new Map(),
+  /** What the sidebar's search found in threads' messages (zero.db's index): for the words `q`. */
+  hits: { q: "", list: [] },
+  /** An item to bring into view once its thread is open (a search hit's). */
+  jump: null
 }
 function load(key, fallback) {
   try { return JSON.parse(localStorage.getItem(`zero.${key}`)) ?? fallback } catch { return fallback }
@@ -289,8 +293,14 @@ function renderSide() {
     return hits.length ? [[p, hits]] : []
   })
   const draftsSec = draftsSection(inbox.ids)
-  if (q && shown.length === 0 && !draftsSec && !inbox.nodes.length) return tree.replaceChildren(el("p", { class: "tree-empty", text: `No threads match “${S.query.trim()}”.` }))
-  tree.replaceChildren(...inbox.nodes, ...(draftsSec ? [draftsSec] : []), ...shown.map(([p, threads]) => {
+  // Threads whose messages match (not their titles: those are listed above it already).
+  const listed = new Set([...inbox.ids, ...shown.flatMap(([, ts]) => ts.map((t) => t.id))])
+  const found = hitsSection(q, listed)
+  if (q && shown.length === 0 && !draftsSec && !inbox.nodes.length && !found) {
+    const looking = q.length >= 2 && S.hits.q !== q
+    return tree.replaceChildren(el("p", { class: "tree-empty", text: looking ? "Searching messages…" : `No threads match “${S.query.trim()}”.` }))
+  }
+  tree.replaceChildren(...inbox.nodes, ...(draftsSec ? [draftsSec] : []), ...(found ? [found] : []), ...shown.map(([p, threads]) => {
     const closed = !q && S.collapsed.has(p.id)
     return el("section", { class: `proj${closed ? " closed" : ""}`, "data-id": p.id },
       held(el("div", { class: "proj-head" },
@@ -310,6 +320,39 @@ function renderSide() {
           : threads.map((t) => threadRow(t))))
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
+}
+/** The sidebar's "In messages": threads whose messages match the search, each with the words around the match. */
+function hitsSection(q, listed) {
+  if (!q || S.hits.q !== q) return null
+  const rows = S.hits.list.filter((h) => h.itemId && !listed.has(h.threadId)).map((h) => ({ h, t: threadMeta(h.threadId) })).filter((x) => x.t)
+  if (!rows.length) return null
+  return el("section", { class: "proj inbox hits", "aria-label": "In messages" },
+    el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: "In messages" }), el("span", { class: "inbox-count", text: String(rows.length) })),
+    el("ul", { class: "threads" }, rows.map(({ h, t }) => el("li", { class: "thread-row hit-row" },
+      el("a", { class: `thread-link hit-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, onclick: () => { S.jump = h.itemId } },
+        el("span", { class: "t", text: t.title }),
+        el("span", { class: "hit-snippet" }, ...marked(h.snippet)))))))
+}
+/** A search snippet as text, its matched words (between \u0002 and \u0003) in <mark>: built as nodes, never as HTML. */
+function marked(snippet) {
+  return snippet.split("\u0002").flatMap((part, i) => {
+    if (i === 0) return [part]
+    const [hit, rest = ""] = part.split("\u0003")
+    return [el("mark", { text: hit }), rest]
+  })
+}
+/** Search the messages of every thread, a moment after the typing stops; the sidebar lists what's found. */
+let searching = 0
+function searchSoon() {
+  clearTimeout(searching)
+  const q = S.query.trim().toLowerCase()
+  if (q.length < 2) return
+  searching = setTimeout(async () => {
+    const list = await api("GET", `search/${encodeURIComponent(q)}`).catch(() => [])
+    if (S.query.trim().toLowerCase() !== q) return
+    S.hits = { q, list }
+    renderSide()
+  }, 140)
 }
 /** A thread's row in the sidebar: its marks, title and age; pin and delete on hover. `where` names its project (in Needs you and Working). */
 function threadRow(t, where = "") {
@@ -525,7 +568,11 @@ async function removeProject(p) {
 function renderMain() {
   const main = $("main")
   const r = S.route
-  if (r.name === "thread" && S.open) return main.replaceChildren(...threadView(S.open))
+  if (r.name === "thread" && S.open) {
+    main.replaceChildren(...threadView(S.open))
+    if (S.jump) { const id = S.jump; S.jump = null; requestAnimationFrame(() => jumpTo(id)) }
+    return
+  }
   // Off a thread, its Git panel goes (and stops looking).
   if (gitPanel) { clearInterval(gitPanel.timer); gitPanel = null }
   if (r.name === "evolution") return main.replaceChildren(evolutionView())
@@ -560,7 +607,7 @@ narrow.addEventListener("change", paintToggle)
 paintToggle()
 // Narrow: a tap on a thread puts the sidebar away, the one already open too (that tap changes no route).
 $("tree").addEventListener("click", (e) => { if (narrow.matches && !e.defaultPrevented && e.target.closest("a[href]")) closeSide() })
-$("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide() })
+$("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide(); searchSoon() })
 $("search").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; S.query = ""; renderSide() } })
 
 // ---------- touch: the app fits what's visible above the keyboard ----------
@@ -2297,6 +2344,20 @@ function paintTurnFiles(node, edited) {
       el("button", { class: "btn btn-quiet btn-xs turn-files-review", type: "button", title: "Open the Git panel (Alt+G) to see the diffs and commit", onclick: () => { if (gitPanel && !gitOpenNow()) setGitOpen(true) } }, "Review in Git")),
     el("ul", { class: "turn-file-list" }, ...files.slice(0, SHOWN).map(row),
       rest > 0 ? el("li", { class: "turn-file more" }, el("details", {}, el("summary", { text: `${rest} more` }), el("ul", { class: "turn-file-list" }, ...files.slice(SHOWN).map(row)))) : null))
+}
+/** Bring an item of the open thread into view, drawing earlier entries until it's there, and mark it a moment. */
+function jumpTo(itemId) {
+  if (!feed || !S.open?.items.some((i) => i.id === itemId)) return
+  for (let n = 0; n < 50 && !feed.cache.get(itemId)?.node.isConnected && feed.hidden; n++) {
+    feed.shown += TURNS_SHOWN
+    renderFeed()
+  }
+  const node = feed.cache.get(itemId)?.node
+  if (!node?.isConnected) return
+  feed.stick = false
+  node.scrollIntoView({ block: "center" })
+  node.classList.add("jumped")
+  setTimeout(() => node.classList.remove("jumped"), 1600)
 }
 /** How many of a thread's latest entries (messages, runs of tool calls) are drawn when it opens, and how many more each time you scroll up to the rest. */
 const TURNS_SHOWN = 60

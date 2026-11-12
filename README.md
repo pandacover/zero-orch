@@ -196,10 +196,13 @@ sends), the keyboard never covers the composer, and the model picker opens as
 a sheet.
 
 Keys: `Ctrl+K` (`Cmd+K`) go to any thread, project or place, `Alt+N` new thread,
-`Alt+G` Git panel, `Enter` send (`Shift+Enter` new line), `↑`/`↓` in an empty box
-bring back earlier prompts, `Esc` stop.
+`Alt+G` Git panel, `?` every shortcut, `Enter` send (`Shift+Enter` new line), `@` a file,
+`/` a command, `↑`/`↓` in an empty box bring back earlier prompts, `Esc` stop.
 
-Threads, projects and settings live in `~/.zero` (`ZERO_HOME` to move them).
+Threads, projects and settings live in `~/.zero` (`ZERO_HOME` to move them). Threads are in
+SQLite (`zero.db`, through Node's built-in `node:sqlite`, so nothing native to build), with an FTS5
+index the sidebar's search reads: a thread's messages, not just its title. Threads from before it
+were `threads/*.json`: those files stay as they are, and each start brings in any that changed.
 The backend (`src/app/Api.ts`) runs in Electron's main process. The page
 reaches it only over IPC through `src/desktop/preload.cjs`, runs sandboxed with
 no Node, and gets its files from the `zero://` scheme, so the window opens no

@@ -1635,3 +1635,12 @@ button.turn-file-path { border: 0; background: none; padding: 0; text-align: lef
 /* the turns above those drawn */
 .feed-earlier { align-self: center; margin: 4px auto 10px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 99px; background: none; color: var(--muted); font: 500 12px var(--body); cursor: pointer; }
 @media (hover: hover) { .feed-earlier:hover { color: var(--ink); border-color: var(--line-strong); } }
+
+/* the sidebar's "In messages": threads whose messages match the search, with the words around it */
+.hit-link { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; height: auto; padding-top: 6px; padding-bottom: 6px; }
+.hit-link .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hit-snippet { font-size: 12px; line-height: 1.4; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: normal; }
+.hit-snippet mark { background: var(--accent-soft); color: var(--accent-text); border-radius: 3px; padding: 0 2px; }
+/* a message a search hit opened to: lit a moment */
+.jumped { animation: jumped 1.6s ease both; border-radius: 10px; }
+@keyframes jumped { 0%, 30% { box-shadow: 0 0 0 3px var(--accent-line); background: var(--accent-soft); } 100% { box-shadow: 0 0 0 3px transparent; } }

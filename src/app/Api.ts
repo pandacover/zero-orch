@@ -104,6 +104,8 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
 
   const route = async (m: string, parts: ReadonlyArray<string>, body: Record<string, unknown>): Promise<Reply> => {
     // --- everything a page needs to start ---
+    // Threads whose title or messages match: GET search/<the words, URI-encoded>.
+    if (m === "GET" && parts[0] === "search") return reply(200, store.search(decodeURIComponent(parts[1] ?? "")))
     if (m === "GET" && parts[0] === "bootstrap") {
       return reply(200, { settings: store.settings(), projects: store.projects(), threads: store.threads(), providers: await providers(), home: store.home, zeroRoot: root, limits: threads.limits() })
     }
@@ -149,12 +151,10 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         if (typeof switched !== "string") return switched
         // The threads working in the project's folder are on this branch now: their Git panels follow.
         for (const meta of store.threads()) {
-          const t = meta.projectId === project.id && !meta.cwd ? store.thread(meta.id) : undefined
-          if (!t || t.branch === switched) continue
-          // Not activity: each keeps its place in the sidebar.
-          t.branch = switched
-          hub.send("thread", metaOf(t))
-          store.saveThread(t, true)
+          if (meta.projectId !== project.id || meta.cwd || meta.branch === switched) continue
+          // Not activity: each keeps its place in the sidebar. Its items aren't read for it.
+          const next = store.patchThread(meta.id, { branch: switched })
+          if (next) hub.send("thread", next)
         }
         return reply(200, { branch: switched })
       }
