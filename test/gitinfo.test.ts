@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { commandsFor, type Exec, gitView, parseAction, parseCounts, parseLog, parseStatus, pullRequest, type Run, runAction, runIdOf, toCheck, toPullRequest } from "../src/app/GitInfo.ts"
+import { commandsFor, type Exec, gitView, listFiles, parseAction, parseCounts, parseLog, parseStatus, pullRequest, type Run, runAction, runIdOf, toCheck, toPullRequest } from "../src/app/GitInfo.ts"
 
 const ok = (stdout = ""): Exec => ({ ok: true, stdout, stderr: "", missing: false })
 const no = (stderr = ""): Exec => ({ ok: false, stdout: "", stderr, missing: false })
@@ -180,5 +180,15 @@ describe("actions", () => {
     ])
     expect(commandsFor({ kind: "update", number: 3, rebase: true })).toEqual([{ cmd: "gh", args: ["pr", "update-branch", "3", "--rebase"] }])
     expect(commandsFor({ kind: "reviewers", number: 3, reviewers: ["ada", "bob"] })).toEqual([{ cmd: "gh", args: ["pr", "edit", "3", "--add-reviewer=ada,bob"] }])
+  })
+})
+
+describe("files for @", () => {
+  it("lists tracked and new files, not ignored ones, once each, and says when it isn't a repository", async () => {
+    const calls: Array<string> = []
+    const r = await listFiles(".", fake([["git ls-files --cached --others --exclude-standard", ok("src/a.ts\0README.md\0src/a.ts\0")]], calls))
+    expect(r).toEqual({ files: ["src/a.ts", "README.md"], truncated: false, git: true })
+    expect(calls).toEqual(["git ls-files -z --cached --others --exclude-standard"])
+    expect(await listFiles(".", fake([]))).toEqual({ files: [], truncated: false, git: false })
   })
 })

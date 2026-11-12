@@ -7,7 +7,7 @@
  * those into the items a thread shows; it never sees an SDK's own types.
  */
 import { Schema, Stream } from "effect"
-import type { Access, ProviderId, Settings } from "../Model.ts"
+import type { Access, ProviderId, Settings, UsageLimit } from "../Model.ts"
 
 export type TurnEvent =
   | { readonly type: "session"; readonly resume: string }
@@ -35,6 +35,8 @@ export type TurnEvent =
   }
   /** How full the session's context is: `used` tokens of `limit`, where the provider compacts on its own. */
   | { readonly type: "context"; readonly used: number; readonly limit: number }
+  /** Where the account stands against one of its plan's usage windows (Claude's five-hour or weekly limits). */
+  | { readonly type: "limit"; readonly limit: UsageLimit }
   | {
     readonly type: "usage"
     readonly costUsd: number | null

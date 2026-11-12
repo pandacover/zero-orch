@@ -91,6 +91,22 @@ else {
     else win?.webContents.downloadURL(url)
   }
 
+  /**
+   * On Windows and Linux the page is the whole window: no system title bar or menu bar (the menu's
+   * shortcuts still work), and the minimize, maximize and close buttons drawn over its top right, as
+   * tall as the page's header row (app.css keeps its own buttons clear of them, and drags by its headers).
+   * macOS keeps its own title bar.
+   */
+  const OVERLAY_HEIGHT = 54
+  const overlay = () => nativeTheme.shouldUseDarkColors
+    ? { color: "#0d0d0d", symbolColor: "#a3a3a3", height: OVERLAY_HEIGHT }
+    : { color: "#ffffff", symbolColor: "#666666", height: OVERLAY_HEIGHT }
+  const frame = () => process.platform === "darwin" ? {} : { titleBarStyle: "hidden" as const, titleBarOverlay: overlay() }
+  // The buttons follow the system's light or dark, as the page does.
+  nativeTheme.on("updated", () => {
+    if (process.platform !== "darwin" && win && !win.isDestroyed()) win.setTitleBarOverlay(overlay())
+  })
+
   /** zero's window, opened if it was closed, on `threadId` if given. */
   const openWindow = (threadId?: string) => {
     if (!win) return createWindow(threadId)
@@ -112,6 +128,7 @@ else {
       // Shown once painted, on the page's own background: no white flash.
       show: false,
       backgroundColor: nativeTheme.shouldUseDarkColors ? "#0d0d0d" : "#ffffff",
+      ...frame(),
       webPreferences: { preload: join(import.meta.dirname, "preload.cjs"), sandbox: true, contextIsolation: true }
     })
     win.once("ready-to-show", () => win?.show())

@@ -11,7 +11,7 @@ import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
 import { createBranch, createWorktree, initRepo, listBranches, samePath, switchBranch, worktreeOf } from "./Branches.ts"
-import { fileDiff, gitView, parseAction, pendingChange, runAction } from "./GitInfo.ts"
+import { fileDiff, gitView, listFiles, parseAction, pendingChange, runAction } from "./GitInfo.ts"
 import { commitMessage, loadClaudeModels } from "./providers/Claude.ts"
 import { type Access, ACCESSES, compactionOffered, metaOf, type Project, type ProviderId, type Settings } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
@@ -105,7 +105,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
   const route = async (m: string, parts: ReadonlyArray<string>, body: Record<string, unknown>): Promise<Reply> => {
     // --- everything a page needs to start ---
     if (m === "GET" && parts[0] === "bootstrap") {
-      return reply(200, { settings: store.settings(), projects: store.projects(), threads: store.threads(), providers: await providers(), home: store.home, zeroRoot: root })
+      return reply(200, { settings: store.settings(), projects: store.projects(), threads: store.threads(), providers: await providers(), home: store.home, zeroRoot: root, limits: threads.limits() })
     }
     if (m === "GET" && parts[0] === "providers") return reply(200, await providers())
 
@@ -142,6 +142,8 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
       // The project folder's branches, for a new thread's branch menu; switching one switches the folder.
       const project = id ? store.project(id) : undefined
       if (project && m === "GET" && parts[2] === "branches") return reply(200, await listBranches(project.path))
+      // The project's files, for @ in a new thread's composer.
+      if (project && m === "GET" && parts[2] === "files") return reply(200, await listFiles(project.path))
       if (project && m === "POST" && parts[2] === "branch") {
         const switched = await switchIn(project, project.path, body)
         if (typeof switched !== "string") return switched
@@ -187,6 +189,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         threads.update(thread, {
           ...(typeof body["title"] === "string" ? { title: body["title"] } : {}),
           ...(typeof body["pinned"] === "boolean" ? { pinned: body["pinned"] } : {}),
+          ...(body["seen"] === true ? { seen: true } : {}),
           ...choices(body)
         })
         return reply(200, metaOf(thread))
@@ -218,6 +221,12 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         const compactFirst = body["compact"] === true && compactionOffered(thread)
         runtime.runFork(threads.turn(thread, project, text, attachments, { compactFirst }))
         return reply(202, { started: true })
+      }
+      // The files where the thread works, for @ in its composer.
+      if (m === "GET" && parts[2] === "files") {
+        const project = store.project(thread.projectId)
+        if (!project) return error(409, "this thread's project was removed")
+        return reply(200, await listFiles(dirOf(thread, project)))
       }
       // --- the thread's git: its branch, working tree, commits, and its pull request ---
       // --- the thread's branch, from its composer: switch it, or move the thread to a new worktree ---

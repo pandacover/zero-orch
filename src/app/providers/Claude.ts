@@ -13,7 +13,7 @@ import { memoryHooks } from "../../Claude.ts"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
-import { type Access, ACCESSES, type Effort, isCompact } from "../Model.ts"
+import { type Access, ACCESSES, type Effort, isCompact, type UsageLimit } from "../Model.ts"
 import type { ModelLabel, Provider, ThreadTools, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
 import { keepOutput, notRun, short } from "./Provider.ts"
 
@@ -305,6 +305,11 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       }
       continue
     }
+    if (m.type === "rate_limit_event") {
+      const limit = limitOf(m.rate_limit_info)
+      if (limit) yield { type: "limit", limit }
+      continue
+    }
     if (m.type === "system" && m.subtype === "compact_boundary") {
       compacting = false
       const c = m.compact_metadata
@@ -391,6 +396,19 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   } finally {
     release()
   }
+}
+
+/**
+ * One of the plan's usage windows as Claude Code reported it, or undefined for one that names no
+ * window. `utilization` arrives as a share (0–1) or a percentage (0–100): it's kept as a share.
+ */
+export const limitOf = (info: { status?: string; rateLimitType?: string; utilization?: number; resetsAt?: number } | undefined): UsageLimit | undefined => {
+  if (!info?.rateLimitType || !info.status) return undefined
+  const u = typeof info.utilization === "number" && Number.isFinite(info.utilization) ? info.utilization : null
+  const used = u === null ? null : Math.min(1, Math.max(0, u > 1 ? u / 100 : u))
+  // resetsAt is in seconds since the epoch.
+  const resetsAt = typeof info.resetsAt === "number" && info.resetsAt > 0 ? new Date(info.resetsAt * (info.resetsAt < 1e12 ? 1000 : 1)).toISOString() : null
+  return { kind: info.rateLimitType, status: info.status, used, resetsAt, at: new Date().toISOString() }
 }
 
 /** A compaction summary as a person reads it: its <summary> part when it has one, without the model's <analysis>. */

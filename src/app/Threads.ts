@@ -17,7 +17,7 @@ import { createWorktree, listBranches, slug } from "./Branches.ts"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
 import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "../Singularity.ts"
-import type { Access, Item, Project, ProviderId, Settings, Thread } from "./Model.ts"
+import type { Access, Item, Project, ProviderId, Settings, Thread, UsageLimit } from "./Model.ts"
 import { atMost, isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
 import { type Provider, type ThreadTools, turnStream, type Verdict } from "./providers/Provider.ts"
 import { claude, claudeModels, nameThread } from "./providers/Claude.ts"
@@ -213,6 +213,8 @@ export const makeThreads = (options: {
     }
     const { hub } = options
     const name = options.nameThread ?? nameThread
+    /** The plan's usage windows as the provider last reported them, by kind: the composer's meter shows them. */
+    const limits = new Map<string, UsageLimit>()
 
     const touch = (t: Thread) => {
       t.updatedAt = now()
@@ -256,7 +258,7 @@ export const makeThreads = (options: {
 
     /** Change a thread's provider, model, access or effort. A new provider starts a new session. */
     /** `effort: ""` goes back to following the settings. */
-    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean }) => {
+    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean; seen?: boolean }) => {
       if (patch.provider && patch.provider !== t.provider) {
         t.provider = patch.provider
         t.resume = null
@@ -283,8 +285,10 @@ export const makeThreads = (options: {
       if (patch.title?.trim()) t.title = patch.title.trim().slice(0, 120)
       if (patch.pinned === true) t.pinned = true
       else if (patch.pinned === false) delete t.pinned
-      // Pinning isn't activity: the thread keeps its age, so unpinning puts it back where it was.
-      const onlyPin = Object.keys(patch).every((k) => k === "pinned")
+      // The person opened the thread: the turn that ended is seen.
+      if (patch.seen === true) delete t.unseen
+      // Pinning and looking aren't activity: the thread keeps its age, so unpinning puts it back where it was.
+      const onlyPin = Object.keys(patch).every((k) => k === "pinned" || k === "seen")
       if (onlyPin) hub.send("thread", metaOf(t))
       else touch(t)
       store.saveThread(t)
@@ -451,6 +455,9 @@ export const makeThreads = (options: {
                   // not the other way round: its card says so.
                   const output = e.status === "failed" && l.abort.signal.aborted ? cutShort(e.output ?? "") : e.output ?? ""
                   put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output })
+                } else if (e.type === "limit") {
+                  limits.set(e.limit.kind, e.limit)
+                  hub.send("limits", [...limits.values()])
                 } else if (e.type === "context") {
                   t.context = { used: e.used, limit: e.limit }
                   hub.send("thread", metaOf(t))
@@ -474,6 +481,7 @@ export const makeThreads = (options: {
           // The message waits, shown as queued, while the session compacts.
           t.queued = words.trim() || "Your message"
           t.status = "running"
+          delete t.unseen
           touch(t)
           startCompaction()
           yield* run("/compact", "", false)
@@ -491,6 +499,7 @@ export const makeThreads = (options: {
           : ""
         if (refused) {
           put(t, { kind: "turn", id: newId("end"), at: now(), provider: t.provider, model: t.model, durationMs: 0, costUsd: null, tokens: null, outcome: "failed", error: refused }, false)
+          t.unseen = "failed"
           live.delete(t.id)
           touch(t)
           store.saveThread(t)
@@ -513,6 +522,7 @@ export const makeThreads = (options: {
           }
         }
         t.status = "running"
+        delete t.unseen
         touch(t)
 
         const before = yield* head(cwd).pipe(Effect.option)
@@ -617,6 +627,9 @@ export const makeThreads = (options: {
         if (branch) t.branch = branch
         live.delete(t.id)
         t.status = "idle"
+        // A turn the person stopped is one they saw end; one that finished or failed waits for them to look.
+        if (result.outcome === "stopped") delete t.unseen
+        else t.unseen = result.outcome
         touch(t)
         store.saveThread(t)
         settle(t.id)
@@ -773,6 +786,8 @@ export const makeThreads = (options: {
       /** A thread was deleted: anyone waiting for it hears so now. */
       forget: (id: string) => settle(id),
       isRunning: busy,
+      /** The plan's usage windows as the provider last reported them. */
+      limits: () => [...limits.values()],
       /** How many threads have a turn going. */
       running: () => live.size,
       stop: (id: string) => {

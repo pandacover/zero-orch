@@ -103,6 +103,8 @@ describe("tool failures", () => {
       for (const i of tools) expect(i.output).toContain(STOPPED_NOTE)
       expect(tools[0]!.output).toContain("Stream closed")
       expect(t.items.at(-1)).toMatchObject({ kind: "turn", outcome: "stopped" })
+      // The person stopped it: it isn't waiting for them to look.
+      expect(t.unseen).toBeUndefined()
       expect(t.items.some((i) => i.kind === "followup")).toBe(false)
       expect(turns).toBe(1)
       expect(cutShort(cutShort("x"))).toBe(cutShort("x"))
@@ -844,6 +846,57 @@ describe("titles and compaction", () => {
     expect(codex.given).toEqual([])
     expect(codex.t.items.at(-1)).toMatchObject({ outcome: "failed", error: expect.stringContaining("compacts its context on its own") })
     expect(codex.t.status).toBe("idle")
+  })
+
+  it("marks a finished or failed turn unseen until the person looks, without making the thread newer", async () => {
+    const done = await thread({ messages: ["refactor the parser"], script: async function*() { yield { type: "text", key: "a", delta: "Done.\n" } } })
+    expect(done.t.unseen).toBe("done")
+    const failed = await thread({ messages: ["/compact"] })
+    expect(failed.t.unseen).toBe("failed")
+    // A new turn clears it while it runs: the thread is working, not waiting on the person.
+    const states: Array<[string, string | undefined]> = []
+    await thread({
+      messages: ["one", "two"],
+      script: async function*() { yield { type: "text", key: "a", delta: "ok\n" } },
+      hub: (event, data) => event === "thread" && states.push([data.status, data.unseen])
+    })
+    const second = states.findLastIndex(([s]) => s === "running")
+    expect(states.slice(0, second).some(([s, u]) => s === "idle" && u === "done")).toBe(true)
+    expect(states.filter(([s]) => s === "running").every(([, u]) => u === undefined)).toBe(true)
+    expect(states.at(-1)).toEqual(["idle", "done"])
+
+    const home = mkdtempSync(join(tmpdir(), "zero-home-"))
+    const proj = mkdtempSync(join(tmpdir(), "zero-proj-"))
+    dirs.push(home, proj)
+    const layer = Layer.mergeAll(Singularity.empty, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
+    const seen = await Effect.gen(function*() {
+      const store = yield* Store
+      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: () => {} }, nameThread: async () => "" })
+      const project = yield* store.addProject(proj)
+      const t = threads.create(project, {})
+      t.unseen = "done"
+      t.updatedAt = "2026-01-01T00:00:00.000Z"
+      threads.update(t, { seen: true })
+      return store.thread(t.id)!
+    }).pipe(Effect.provide(layer), Effect.runPromise)
+    expect(seen.unseen).toBeUndefined()
+    expect(seen.updatedAt).toBe("2026-01-01T00:00:00.000Z")
+  })
+
+  it("keeps the plan's usage windows the provider reports, the latest of each kind, and tells the page", async () => {
+    const sent: Array<{ event: string; data: any }> = []
+    const at = "2026-11-12T00:00:00.000Z"
+    await thread({
+      messages: ["refactor the parser"],
+      hub: (event, data) => sent.push({ event, data }),
+      script: async function*() {
+        yield { type: "limit", limit: { kind: "five_hour", status: "allowed", used: 0.1, resetsAt: null, at } }
+        yield { type: "limit", limit: { kind: "seven_day", status: "allowed", used: 0.5, resetsAt: null, at } }
+        yield { type: "limit", limit: { kind: "five_hour", status: "allowed_warning", used: 0.8, resetsAt: null, at } }
+      }
+    })
+    const last = sent.filter((s) => s.event === "limits").at(-1)!.data
+    expect(last.map((l: any) => [l.kind, l.used])).toEqual([["five_hour", 0.8], ["seven_day", 0.5]])
   })
 
   it("keeps how full the context is, as the provider reports it", async () => {

@@ -16,7 +16,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   }
 }))
 
-const { claude, earlyDetail, partialFields } = await import("../src/app/providers/Claude.ts")
+const { claude, earlyDetail, limitOf, partialFields } = await import("../src/app/providers/Claude.ts")
 
 const input = (): TurnInput => ({
   cwd: process.cwd(),
@@ -86,5 +86,25 @@ describe("Claude's tool cards", () => {
     const cards: Array<[string, string]> = []
     for await (const e of claude.turn(input())) if (e.type === "tool") cards.push([e.status, e.detail])
     expect(cards).toEqual([["running", "ls"], ["done", "ls"]])
+  })
+})
+
+describe("Claude's usage limits", () => {
+  it("passes the plan's usage windows on as they're reported, as a share and a time", async () => {
+    script = [
+      { type: "rate_limit_event", session_id: "s1", uuid: "u1", rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.82, resetsAt: 1794000000 } },
+      { type: "rate_limit_event", session_id: "s1", uuid: "u2", rate_limit_info: { status: "allowed" } },
+      { type: "result", subtype: "success", session_id: "s1", total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1 } }
+    ]
+    const limits: Array<unknown> = []
+    for await (const e of claude.turn(input())) if (e.type === "limit") limits.push(e.limit)
+    // One that names no window says nothing to show.
+    expect(limits).toEqual([{ kind: "five_hour", status: "allowed_warning", used: 0.82, resetsAt: new Date(1794000000 * 1000).toISOString(), at: expect.any(String) }])
+  })
+
+  it("reads a percentage as a share, and keeps an unknown share unknown", () => {
+    expect(limitOf({ status: "allowed", rateLimitType: "seven_day", utilization: 57 })?.used).toBe(0.57)
+    expect(limitOf({ status: "allowed", rateLimitType: "seven_day" })).toMatchObject({ used: null, resetsAt: null })
+    expect(limitOf(undefined)).toBeUndefined()
   })
 })

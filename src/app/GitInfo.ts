@@ -349,6 +349,20 @@ export const fileDiff = async (cwd: string, path: string, exec: Run = run): Prom
   return (diff ?? "").slice(0, MAX_DIFF)
 }
 
+/** The most files @ in the composer offers to pick from. */
+export const MAX_FILES = 20_000
+
+/**
+ * The files in a folder that git tracks or would (ignored ones left out), relative and with forward
+ * slashes, for @ in the composer to pick from. `truncated` says some were left out; `git` false: not a repository.
+ */
+export const listFiles = async (cwd: string, exec: Run = run): Promise<{ files: Array<string>; truncated: boolean; git: boolean }> => {
+  const out = await text(exec, cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], true)
+  if (out === null) return { files: [], truncated: false, git: false }
+  const all = [...new Set(out.split("\0").filter(Boolean))]
+  return { files: all.slice(0, MAX_FILES), truncated: all.length > MAX_FILES, git: true }
+}
+
 /** Everything uncommitted, for a model to describe: the stat, then the diff, cut to `limit` characters, and new files' names. */
 export const pendingChange = async (cwd: string, limit = 12_000, exec: Run = run): Promise<string> => {
   const status = await text(exec, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], true)
