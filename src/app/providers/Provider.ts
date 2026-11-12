@@ -84,6 +84,11 @@ export const notRun = (why: Exclude<Verdict, "allowed"> | { readonly failure: st
     : "The person stopped this turn; the call did not run."
 
 export interface TurnInput {
+  /**
+   * The thread the turn is in: a provider that keeps a session alive between turns keeps one per
+   * thread. Without it, the turn's session ends with the turn.
+   */
+  readonly threadId?: string | undefined
   readonly cwd: string
   readonly prompt: string
   /** The thread so far, for providers that keep no session of their own. */
@@ -158,6 +163,10 @@ export interface Provider {
   /** The model a new thread gets when none is chosen. */
   defaultModel(settings: Settings): string
   turn(input: TurnInput): AsyncGenerator<TurnEvent>
+  /** End the session a provider keeps alive for a thread, if it keeps one; its next turn resumes it. */
+  close?(threadId: string): void
+  /** End every session it keeps alive (the app is quitting). */
+  closeAll?(): void
   /**
    * How its context is compacted: `manual` takes `/compact` as a message and also compacts
    * on its own when the context fills; `auto` compacts on its own only; `none` doesn't.

@@ -1,12 +1,15 @@
 /**
  * Claude, through the Claude Agent SDK: Claude Code's own agent loop and
- * tools, streamed token by token, continued across turns with `resume`.
+ * tools, streamed token by token. A thread keeps one Claude Code session
+ * running across its turns, each message going into its open input; one
+ * that has ended (idle, a change it can't take, a crash) is resumed.
  *
  * Every tool call goes through `canUseTool`, which follows the thread's
  * access: reads run, edits inside the project run under `auto-edit`,
  * everything runs under `full-access`, and anything else waits for the
  * person to allow it in the thread.
  */
+import { randomUUID } from "node:crypto"
 import { type CanUseTool, createSdkMcpServer, type ModelInfo, type Query, query, type SDKMessage, type SDKUserMessage, tool } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod"
 import { memoryHooks } from "../../Claude.ts"
@@ -79,8 +82,14 @@ export const effortFor = (model: string, effort: string): string | undefined => 
   return ["high", "medium", "low"].find((e) => known.efforts!.includes(e))
 }
 
-const TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch"]
-const READS = new Set(["Read", "Glob", "Grep", "WebSearch", "WebFetch"])
+/**
+ * The built-in tools a thread gets. ToolSearch lets Claude Code defer MCP tools (the person's
+ * claude.ai connectors) as bare names, loaded when needed: without it every connector's full
+ * definition goes in each turn, as ~80 blocks that miss the prompt cache back to the system prompt.
+ */
+export const TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch", "ToolSearch"]
+/** Loading a deferred tool's definition is a read; calling the tool is gated as itself. */
+const READS = new Set(["Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch"])
 const EDITS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
 
 const detailOf = (_tool: string, input: Record<string, unknown>): string =>
@@ -256,34 +265,124 @@ export const threadServer = (threads: ThreadTools) =>
     ]
   })
 
-async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
-  const abort = new AbortController()
-  input.signal.addEventListener("abort", () => abort.abort(), { once: true })
-  const canUseTool: CanUseTool = async (tool, toolInput) => {
-    // Read the access now, not at the turn's start: the person may have changed it since.
-    const now = () => gate(input.access(), input.cwd, tool, toolInput)
-    const verdict = now()
-    if (verdict === "allow") return { behavior: "allow", updatedInput: toolInput }
-    if (verdict === "deny") return { behavior: "deny", message: "This thread is read-only. Say what you'd change instead." }
-    // The agent hears why a call didn't run: only the person's Deny reads as a no.
-    let answer: Verdict
-    try {
-      answer = await input.ask(tool, detailOf(tool, toolInput), now)
-    } catch (e) {
-      return { behavior: "deny", message: notRun({ failure: e instanceof Error ? e.message : String(e) }) }
+/** How long a thread's Claude Code session stays up with no turn running; the next turn resumes it. */
+export const IDLE_MS = 15 * 60_000
+/** How long a stopped turn waits for Claude Code to say it stopped before its session is ended instead. */
+export const STOP_GRACE_MS = 10_000
+
+/** Values handed over in order, to one reader; `end` ends the reading, with an error or without. */
+const channel = <T>() => {
+  const items: Array<T> = []
+  let wake: (() => void) | undefined
+  let over: { readonly error: unknown } | undefined
+  return {
+    push: (v: T) => {
+      if (over) return
+      items.push(v)
+      wake?.()
+    },
+    end: (error?: unknown) => {
+      over ??= { error }
+      wake?.()
+    },
+    /** The next value; undefined once it has ended without an error. */
+    next: async (): Promise<T | undefined> => {
+      for (;;) {
+        if (items.length) return items.shift()
+        if (over) {
+          if (over.error !== undefined) throw over.error
+          return undefined
+        }
+        await new Promise<void>((resolve) => (wake = resolve))
+        wake = undefined
+      }
     }
-    return answer === "allowed" ? { behavior: "allow", updatedInput: toolInput } : { behavior: "deny", message: notRun(answer) }
   }
-  // The message goes in as a stream held open until the turn's result, so the session can
-  // still be asked how full its context is (a plain string prompt closes it at the result).
-  let release = () => {}
-  const held = new Promise<void>((resolve) => (release = resolve))
-  input.signal.addEventListener("abort", () => release(), { once: true })
+}
+
+/** The turn a live session is running now: what reaches it, and what the session's callbacks act for. */
+interface Reader {
+  readonly input: TurnInput
+  /** The uuid its message went in with: its result carries it back. */
+  readonly uuid: ReturnType<typeof randomUUID>
+  readonly inbox: ReturnType<typeof channel<SDKMessage>>
+  /** The summary of a compaction in this turn, from Claude Code's PostCompact hook. */
+  summary: string
+}
+
+/**
+ * One Claude Code process, kept for a thread's turns: each message goes into its open input,
+ * and each turn reads what comes out until its own result. A frame that comes out between
+ * turns reaches no one.
+ */
+interface Session {
+  readonly q: Query
+  /** What it started with, but the model: a turn that needs otherwise starts a new session. */
+  readonly config: string
+  readonly cwd: string
+  model: string
+  /** Claude Code's session id, once it has said. */
+  id: string | undefined
+  readonly send: (m: SDKUserMessage) => void
+  reader: Reader | undefined
+  closed: boolean
+  idle: ReturnType<typeof setTimeout> | undefined
+  /** Its slash commands, once Claude Code has said which it takes. */
+  commands: Array<SlashCommandInfo> | undefined
+  commandsAsked: boolean
+}
+
+/** The live sessions, by thread. */
+const sessions = new Map<string, Session>()
+
+/** End a session: its process, its input, and whatever turn is reading it. */
+const end = (s: Session) => {
+  if (s.closed) return
+  s.closed = true
+  clearTimeout(s.idle)
+  for (const [k, v] of sessions) if (v === s) sessions.delete(k)
+  s.q.close()
+  s.reader?.inbox.end(new Error("Claude Code's session ended"))
+}
+
+/** The part of a turn's options a running session can't change: a change starts a new one. */
+const configOf = (input: TurnInput): string =>
+  JSON.stringify([effortFor(input.model, input.settings.claude.effort) ?? null, input.instructions, input.threads !== undefined])
+
+/** Whether a call may run, by the thread's access, asking the person when it says to. */
+const permit = (input: TurnInput): CanUseTool => async (tool, toolInput) => {
+  // Read the access now, not at the turn's start: the person may have changed it since.
+  const now = () => gate(input.access(), input.cwd, tool, toolInput)
+  const verdict = now()
+  if (verdict === "allow") return { behavior: "allow", updatedInput: toolInput }
+  if (verdict === "deny") return { behavior: "deny", message: "This thread is read-only. Say what you'd change instead." }
+  // The agent hears why a call didn't run: only the person's Deny reads as a no.
+  let answer: Verdict
+  try {
+    answer = await input.ask(tool, detailOf(tool, toolInput), now)
+  } catch (e) {
+    return { behavior: "deny", message: notRun({ failure: e instanceof Error ? e.message : String(e) }) }
+  }
+  return answer === "allowed" ? { behavior: "allow", updatedInput: toolInput } : { behavior: "deny", message: notRun(answer) }
+}
+
+/**
+ * Start a Claude Code session for a thread, resuming its last one. Its callbacks are fixed when
+ * it starts, so each acts for whichever turn is running: that turn's access, approvals, memory
+ * and thread tools.
+ */
+const open = (input: TurnInput, config: string): Session => {
+  const inbox = channel<SDKUserMessage>()
   async function* prompt(): AsyncGenerator<SDKUserMessage> {
-    yield { type: "user", message: { role: "user", content: input.prompt }, parent_tool_use_id: null, session_id: "" }
-    await held
+    for (let m = await inbox.next(); m; m = await inbox.next()) yield m
   }
-  const messages = query({
+  const current = () => s.reader?.input
+  const threads = (): ThreadTools => {
+    const t = current()?.threads
+    if (!t) throw new Error("This thread's tools aren't available in this turn.")
+    return t
+  }
+  const q = query({
     prompt: prompt(),
     options: {
       cwd: input.cwd,
@@ -291,27 +390,105 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       ...(effortFor(input.model, input.settings.claude.effort) ? { effort: effortFor(input.model, input.settings.claude.effort) as Effort } : {}),
       systemPrompt: { type: "preset", preset: "claude_code", append: input.instructions },
       tools: TOOLS,
-      ...(input.threads ? { mcpServers: { zero: threadServer(input.threads) } } : {}),
+      ...(input.threads
+        ? { mcpServers: { zero: threadServer({ start: (a) => threads().start(a), message: (a) => threads().message(a), wait: (a) => threads().wait(a), list: () => threads().list() }) } }
+        : {}),
       // The project's own CLAUDE.md and settings, as Claude Code would read them there.
       settingSources: ["project"],
       permissionMode: "default",
-      canUseTool,
+      canUseTool: (tool, toolInput, o) => {
+        const now = current()
+        return now ? permit(now)(tool, toolInput, o) : Promise.resolve({ behavior: "deny", message: "No turn is running in this thread." })
+      },
       includePartialMessages: true,
-      abortController: abort,
       // Native compaction stays on whatever the machine's settings or environment say:
       // a long thread compacts itself when its context fills, and `/compact` always works.
       settings: { autoCompactEnabled: true },
       hooks: {
         PostCompact: [{ hooks: [async (h) => {
-          if (h.hook_event_name === "PostCompact") summary = summaryOf(h.compact_summary)
+          if (h.hook_event_name === "PostCompact" && s.reader) s.reader.summary = summaryOf(h.compact_summary)
           return {}
         }] }],
-        ...memoryHooks(input.afterTool)
+        ...memoryHooks(async (h) => current()?.afterTool?.(h))
       },
-      env: cleanEnv({ DISABLE_AUTO_COMPACT: undefined, DISABLE_COMPACT: undefined }),
+      // No background tasks: one would run on between turns, and its news start a turn no one reads.
+      env: cleanEnv({ DISABLE_AUTO_COMPACT: undefined, DISABLE_COMPACT: undefined, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }),
       ...(input.resume ? { resume: input.resume } : {})
     }
   })
+  const s: Session = { q, config, cwd: input.cwd, model: input.model, id: undefined, send: inbox.push, reader: undefined, closed: false, idle: undefined, commands: undefined, commandsAsked: false }
+  void (async () => {
+    let error: unknown = new Error("Claude Code's session ended")
+    try {
+      for (let r = await q.next(); !r.done; r = await q.next()) s.reader?.inbox.push(r.value)
+    } catch (e) {
+      error = e
+    }
+    // The process ended (or crashed): the turn reading hears why, and the next turn starts another.
+    s.reader?.inbox.end(error)
+    s.closed = true
+    clearTimeout(s.idle)
+    inbox.end()
+    for (const [k, v] of sessions) if (v === s) sessions.delete(k)
+  })()
+  return s
+}
+
+/**
+ * The session a turn runs on: the thread's live one when it fits (a new model is switched to on
+ * it), else a new one that resumes the thread's last. A compaction runs on the live one as it is.
+ */
+const sessionFor = async (input: TurnInput): Promise<Session> => {
+  const config = configOf(input)
+  const live = input.threadId ? sessions.get(input.threadId) : undefined
+  if (live?.reader) throw new Error("This thread's Claude session is already running a turn.")
+  const fits = live && !live.closed && live.cwd === input.cwd && live.id === (input.resume ?? undefined) &&
+    (live.config === config || isCompact(input.prompt))
+  if (live && fits) {
+    clearTimeout(live.idle)
+    if (live.model === input.model) return live
+    try {
+      await live.q.setModel(input.model)
+      live.model = input.model
+      return live
+    } catch {
+      // It can't switch: a new session resumes with the model.
+    }
+  }
+  if (live) end(live)
+  const s = open(input, config)
+  if (input.threadId) sessions.set(input.threadId, s)
+  return s
+}
+
+/** End a thread's live session; its next turn resumes it in a new one. */
+export const closeSession = (threadId: string) => {
+  const s = sessions.get(threadId)
+  if (s) end(s)
+}
+
+/** End every live session. */
+export const closeSessions = () => {
+  for (const s of [...sessions.values()]) end(s)
+}
+
+async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
+  if (input.signal.aborted) return
+  const s = await sessionFor(input)
+  const reader: Reader = { input, uuid: randomUUID(), inbox: channel<SDKMessage>(), summary: "" }
+  s.reader = reader
+  s.send({ type: "user", message: { role: "user", content: input.prompt }, parent_tool_use_id: null, session_id: "", uuid: reader.uuid })
+  // Stop interrupts the turn and leaves the session up; one that doesn't stop in time is ended.
+  let grace: ReturnType<typeof setTimeout> | undefined
+  const stop = () => {
+    s.q.interrupt().catch(() => {})
+    grace = setTimeout(() => end(s), STOP_GRACE_MS)
+  }
+  input.signal.addEventListener("abort", stop, { once: true })
+  // Stopped while its session was being got ready (a model switch): the message went in, so stop it.
+  if (input.signal.aborted) stop()
+  /** The turn's own result came: the session is between turns, ready for the next. */
+  let finished = false
 
   let session: string | undefined
   let messageId = ""
@@ -325,20 +502,18 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   // Compaction the person asked for with `/compact`; any other is Claude Code's own, as the context filled.
   const asked = isCompact(input.prompt)
   let compacting = false
-  // The summary arrives through Claude Code's PostCompact hook, just before the compaction's boundary message.
-  let summary = ""
   // The session's slash commands: asked once it has started, sent with the next message after they arrive.
   // The turn never waits for them.
-  let commands: Array<SlashCommandInfo> | undefined
   let commandsSent = false
   try {
-  for await (const m of messages as AsyncIterable<SDKMessage>) {
-    if (commands && !commandsSent) {
+  for (let m = await reader.inbox.next(); m; m = await reader.inbox.next()) {
+    if (s.commands && !commandsSent) {
       commandsSent = true
-      yield { type: "commands", commands }
+      yield { type: "commands", commands: s.commands }
     }
-    if (session === undefined && "session_id" in m && typeof m.session_id === "string") {
+    if (session === undefined && "session_id" in m && typeof m.session_id === "string" && m.session_id) {
       session = m.session_id
+      s.id = session
       yield { type: "session", resume: session }
     }
     if (m.type === "system" && m.subtype === "status") {
@@ -354,7 +529,11 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
     }
     if (m.type === "system" && m.subtype === "init") {
       const terminal = (m as { terminal_slash_commands?: Array<string> }).terminal_slash_commands ?? []
-      messages.supportedCommands().then((list) => { commands = usableCommands(list, terminal) }, () => {})
+      // Every turn starts with an init; the session is asked once.
+      if (!s.commandsAsked) {
+        s.commandsAsked = true
+        s.q.supportedCommands().then((list) => { s.commands = usableCommands(list, terminal) }, () => {})
+      }
       continue
     }
     if (m.type === "rate_limit_event") {
@@ -365,8 +544,9 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
     if (m.type === "system" && m.subtype === "compact_boundary") {
       compacting = false
       const c = m.compact_metadata
-      yield { type: "compact", trigger: c.trigger, state: "done", preTokens: c.pre_tokens, postTokens: c.post_tokens, durationMs: c.duration_ms, summary }
-      summary = ""
+      // The summary arrives through Claude Code's PostCompact hook, just before the compaction's boundary message.
+      yield { type: "compact", trigger: c.trigger, state: "done", preTokens: c.pre_tokens, postTokens: c.post_tokens, durationMs: c.duration_ms, summary: reader.summary }
+      reader.summary = ""
       continue
     }
     if (m.type === "stream_event") {
@@ -438,16 +618,27 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       }
       continue
     }
-    if (m.type === "result") {
-      const context = await contextOf(messages)
-      release()
+    // Another message's result (a turn Claude Code started on its own) isn't this turn's end.
+    if (m.type === "result" && (m.user_message_uuid === undefined || m.user_message_uuid === reader.uuid || m.user_message_uuids?.includes(reader.uuid))) {
+      finished = true
+      const context = await contextOf(s.q)
       if (context) yield { type: "context", ...context }
       yield { type: "usage", costUsd: m.total_cost_usd, tokens: m.usage.input_tokens + m.usage.output_tokens, cumulative: true }
-      if (m.subtype !== "success" && !abort.signal.aborted) throw new Error(`Claude stopped: ${m.subtype.replace(/_/g, " ")}${m.errors?.length ? `: ${m.errors.join("; ")}` : ""}`)
+      if (m.subtype !== "success" && !input.signal.aborted) throw new Error(`Claude stopped: ${m.subtype.replace(/_/g, " ")}${m.errors?.length ? `: ${m.errors.join("; ")}` : ""}`)
+      return
     }
   }
+  throw new Error("Claude Code's session ended before the turn did")
   } finally {
-    release()
+    input.signal.removeEventListener("abort", stop)
+    clearTimeout(grace)
+    if (s.reader === reader) s.reader = undefined
+    // A turn left before its result leaves the session mid-turn: it ends, and the next turn resumes.
+    if (!finished || !input.threadId || sessions.get(input.threadId) !== s) end(s)
+    else {
+      s.idle = setTimeout(() => end(s), IDLE_MS)
+      s.idle.unref?.()
+    }
   }
 }
 
@@ -553,5 +744,7 @@ export const claude: Provider = {
     asks: true,
     tools: true
   }),
-  turn
+  turn,
+  close: closeSession,
+  closeAll: closeSessions
 }
