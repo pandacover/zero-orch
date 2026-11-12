@@ -426,11 +426,15 @@ function toggleProject(id) {
 async function addProject() {
   const body = el("div", {},
     el("label", { class: "field" }, "Folder", el("input", { name: "path", placeholder: "C:\\Users\\you\\code\\app", required: true, autocomplete: "off", spellcheck: "false" })),
-    el("label", { class: "field" }, "Name (optional)", el("input", { name: "name", placeholder: "The folder's name", autocomplete: "off" })))
+    el("label", { class: "field" }, "Name (optional)", el("input", { name: "name", placeholder: "The folder's name", autocomplete: "off" })),
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "create", checked: true }), "Create the folder if it doesn't exist"),
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "git" }), "Initialize a git repository there, with an empty first commit (skipped if it's already in one)"))
   if (!(await dialog({ title: "Add a project", text: "Paste the full path of a folder on this machine. Threads in it work there.", ok: "Add project", body }))) return
+  const field = (n) => body.querySelector(`[name=${n}]`)
   try {
-    const p = await api("POST", "projects", { path: body.querySelector("[name=path]").value, name: body.querySelector("[name=name]").value })
-    toast(`Added ${p.name}.`)
+    const p = await api("POST", "projects", { path: field("path").value, name: field("name").value, create: field("create").checked, git: field("git").checked })
+    if (p.git?.error) toast(`Added ${p.name}, but ${p.git.error}`)
+    else toast(p.git === "initialized" ? `Added ${p.name} as a new git repository.` : p.git === "already" ? `Added ${p.name}; it's already in a git repository.` : `Added ${p.name}.`)
     go(`#/new/${p.id}`)
   } catch (e) { fail(e) }
 }

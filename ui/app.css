@@ -62,6 +62,9 @@
 }
 
 * { box-sizing: border-box; }
+/* Scrollbars stay out of the way: thin, no track, and the thumb only while the pointer is over what scrolls. */
+* { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+*:hover, *:focus-visible { scrollbar-color: color-mix(in srgb, var(--ink) 22%, transparent) transparent; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 400 15px/1.55 var(--body); -webkit-font-smoothing: antialiased; }
@@ -511,10 +514,13 @@ button.title-project { cursor: pointer; }
 .composer:focus-within { border-color: var(--accent-line); }
 .composer.drop { border-color: var(--accent); box-shadow: 0 0 0 7px var(--accent-soft); }
 .composer .input {
-  position: relative; min-height: 26px; max-height: 280px; overflow-y: auto; outline: none; padding: 2px 2px 2px 0;
+  /* At least one whole line (its line-height plus padding): any shorter and an empty input overflows, and shows a scrollbar. */
+  position: relative; min-height: calc(1.65em + 4px); max-height: 280px; overflow-y: auto; outline: none; padding: 2px 2px 2px 0;
   font-size: 15px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; cursor: text;
 }
 .composer .input[contenteditable="false"] { cursor: not-allowed; }
+/* Nothing to scroll in an empty box: no scrollbar, whatever its placeholder or a rounding pixel does. */
+.composer .input.empty { overflow: hidden; }
 .composer .input.empty::before { content: attr(data-placeholder); position: absolute; left: 0; top: 2px; color: var(--faint); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .composer-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .composer-controls { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; min-width: 0; margin-left: -4px; flex-wrap: wrap; }

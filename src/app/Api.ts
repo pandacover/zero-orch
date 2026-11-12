@@ -10,7 +10,7 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
-import { createBranch, createWorktree, listBranches, samePath, switchBranch, worktreeOf } from "./Branches.ts"
+import { createBranch, createWorktree, initRepo, listBranches, samePath, switchBranch, worktreeOf } from "./Branches.ts"
 import { fileDiff, gitView, parseAction, pendingChange, runAction } from "./GitInfo.ts"
 import { commitMessage, loadClaudeModels } from "./providers/Claude.ts"
 import { type Access, ACCESSES, compactionOffered, metaOf, type Project, type ProviderId, type Settings } from "./Model.ts"
@@ -121,10 +121,14 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
     if (parts[0] === "projects") {
       if (m === "POST" && parts.length === 1) {
         if (typeof body["path"] !== "string" || !body["path"].trim()) return error(400, "give the project's folder path")
-        const added = await runtime.runPromise(store.addProject(body["path"], typeof body["name"] === "string" ? body["name"] : undefined).pipe(Effect.result))
+        const name = typeof body["name"] === "string" ? body["name"] : undefined
+        const added = await runtime.runPromise(store.addProject(body["path"], name, body["create"] === true).pipe(Effect.result))
         if (added._tag === "Failure") return error(400, added.failure.message)
         hub.send("projects", store.projects())
-        return reply(201, added.success)
+        if (body["git"] !== true) return reply(201, added.success)
+        // The project stands either way; a failed `git init` is said, not a reason to take it back.
+        const git = await initRepo(added.success.path)
+        return reply(201, { ...added.success, git: git.ok ? (git.made ? "initialized" : "already") : { error: git.error } })
       }
       const id = parts[1]
       if (m === "DELETE" && id) {
