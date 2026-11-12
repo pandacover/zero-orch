@@ -225,6 +225,13 @@ export interface ThreadMeta {
   branch?: string | undefined
   /** A git worktree of the project this thread works in, instead of the project's own folder. */
   cwd?: string | undefined
+  /**
+   * The worktree the thread's agent moved its work to on its own (one it made, or edited and committed
+   * in), while its session still runs in `cwd`: the thread's branch, Git panel and pull request follow it.
+   */
+  workTree?: string | undefined
+  /** The thread's pull request: linked when it's opened from the thread, or found for the thread's branch. */
+  pr?: { number: number; url: string; branch: string; state: string } | undefined
   /** The thread whose agent started this one: it talks to it and waits for its answers. */
   parentId?: string | undefined
   /** A turn ended that the person hasn't looked at yet, and how: the sidebar lists the thread under Needs you. */

@@ -153,6 +153,10 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 @media (hover: hover) { .thread-link:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); } }
 .thread-link.active { background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink); }
 .thread-link .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the thread's pull request: its number, coloured by how it stands */
+.pr-mark { flex: none; font-family: var(--mono); font-size: 10.5px; line-height: 16px; padding: 0 5px; border-radius: 8px; color: var(--accent-text); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.pr-mark[data-state="draft"], .pr-mark[data-state="closed"] { color: var(--faint); background: color-mix(in srgb, var(--faint) 14%, transparent); }
+.pr-mark[data-state="merged"] { color: var(--ink); background: color-mix(in srgb, var(--ink) 10%, transparent); }
 .thread-link .age { color: var(--faint); font-size: 11px; font-family: var(--mono); transition: opacity .15s ease; }
 /* a row's delete button takes the age's place on hover */
 .thread-row { position: relative; }

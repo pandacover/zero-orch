@@ -287,8 +287,11 @@ const text = async (exec: Run, cwd: string, args: ReadonlyArray<string>, raw = f
   return r.ok ? (raw ? r.stdout : r.stdout.trim()) : null
 }
 
-/** Everything the Git panel shows for a thread whose project is `cwd`, about `branch` (else the checked-out one). */
-export const gitView = async (cwd: string, branch: string | undefined, exec: Run = run): Promise<GitView> => {
+/**
+ * Everything the Git panel shows for a thread whose project is `cwd`, about `branch` (else the checked-out one).
+ * `linked` is the URL of the pull request the thread is linked to, for `branch`: looked up by itself, not by the branch.
+ */
+export const gitView = async (cwd: string, branch: string | undefined, exec: Run = run, linked?: string): Promise<GitView> => {
   const inside = await text(exec, cwd, ["rev-parse", "--is-inside-work-tree"])
   const empty: GitView = { repo: false, branch: "", current: "", upstream: null, ahead: 0, behind: 0, base: null, changes: [], commits: [], gh: { ok: false, detail: "" }, pr: null }
   if (inside !== "true") return empty
@@ -301,7 +304,7 @@ export const gitView = async (cwd: string, branch: string | undefined, exec: Run
     name ? text(exec, cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", `${name}@{upstream}`]) : Promise.resolve(null),
     text(exec, cwd, ["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"]),
     text(exec, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], true),
-    name ? pullRequest(cwd, name, exec) : Promise.resolve({ gh: { ok: false, detail: "HEAD is detached: no branch to look up." }, pr: null })
+    name ? pullRequest(cwd, linked && known ? linked : name, exec) : Promise.resolve({ gh: { ok: false, detail: "HEAD is detached: no branch to look up." }, pr: null })
   ])
   const [ahead, behind] = upstream ? parseCounts((await text(exec, cwd, ["rev-list", "--left-right", "--count", `${ref}...${upstream}`])) ?? "") : [0, 0]
   // A branch's own commits are those past the PR's base, else past the remote's default branch.

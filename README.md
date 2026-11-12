@@ -142,6 +142,14 @@ A desktop chat app, instead of the CLI:
   git worktree of its own under `~/.zero/worktrees/`, where the thread works from then on with
   a new session, and its Git panel follows. On a new thread's page, a switch or a new branch
   acts on the project folder at once, and a worktree is made (or joined) when you send.
+- **A thread follows its agent's worktree and pull request:** when the agent makes a worktree
+  itself (`git worktree add`, Claude Code's EnterWorktree) or edits, commits or pushes in
+  another worktree of the repository, the thread follows it when the turn ends. Its branch
+  chip, Git panel, `@` files and singularity's commits are about that worktree, while the session
+  carries on where it runs. Reading the project folder to compare doesn't move it back. A pull
+  request the agent opens with `gh pr create`, or the Git panel finds for the thread's branch,
+  is linked to the thread: the sidebar shows its number after the title, coloured open, draft,
+  merged or closed.
 - **Every model Claude Code offers:** at startup zero asks Claude Code for its model list (a
   session that sends no message, so nothing is billed), and the model menu shows each one by
   name, with only the effort levels that model takes.

@@ -3,7 +3,7 @@ import { Effect, Layer, Option } from "effect"
 import { execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { type Access, atMost, compactionOffered, DEFAULT_SETTINGS, isCompact, type Item, needsCompaction, type Project, type Thread } from "../src/app/Model.ts"
 import { claudeModels, cleanTitle, effortFor, gate, summaryOf, toLabels } from "../src/app/providers/Claude.ts"
@@ -982,5 +982,62 @@ describe("titles and compaction", () => {
     expect(summaryOf("<analysis>\nthinking\n</analysis>\n<summary>\n1. Goal: spans\n</summary>")).toBe("1. Goal: spans")
     expect(summaryOf("<analysis>x</analysis> plain words")).toBe("plain words")
     expect(summaryOf(undefined)).toBe("")
+  })
+})
+
+describe("a thread whose agent makes a worktree of its own", () => {
+  const dirs: Array<string> = []
+  const real = PROVIDERS.claude
+  afterEach(() => {
+    PROVIDERS.claude = real
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+  })
+
+  it("follows it: its branch, its commits, and the pull request opened from it, in the same session", async () => {
+    const home = mkdtempSync(join(tmpdir(), "zero-home-"))
+    const proj = mkdtempSync(join(tmpdir(), "zero-proj-"))
+    const trees = mkdtempSync(join(tmpdir(), "zero-trees-"))
+    dirs.push(home, proj, trees)
+    const g = (cwd: string, ...args: Array<string>) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, stdio: "pipe" })
+    g(proj, "init", "-q", "-b", "main")
+    g(proj, "commit", "-q", "--allow-empty", "-m", "first")
+    const wt = join(trees, "fix")
+    const url = "https://github.com/me/repo/pull/42"
+    const cwds: Array<string> = []
+    PROVIDERS.claude = {
+      ...real,
+      turn: async function*(input: TurnInput) {
+        cwds.push(input.cwd)
+        yield { type: "session", resume: "s1" }
+        if (input.prompt !== "fix it") return
+        // The agent makes a worktree, edits and commits there, and opens a pull request from it.
+        g(input.cwd, "worktree", "add", "-q", "-b", "fix", wt)
+        yield { type: "tool", key: "b1", name: "Bash", detail: `git worktree add -b fix ${wt}`, status: "done", output: "" }
+        yield { type: "tool", key: "e1", name: "Edit", detail: join(wt, "a.ts"), status: "done", output: "" }
+        g(wt, "commit", "-q", "--allow-empty", "-m", "Fix it")
+        yield { type: "tool", key: "b2", name: "Bash", detail: `cd ${wt} && git commit -m "Fix it"`, status: "done", output: "" }
+        yield { type: "tool", key: "b3", name: "Bash", detail: `cd ${wt} && gh pr create --fill`, status: "done", output: `${url}\n` }
+        // Looking at the project's folder to compare doesn't move it back.
+        yield { type: "tool", key: "b4", name: "Bash", detail: `cd ${proj} && git log -1`, status: "done", output: "" }
+        yield { type: "text", key: "m:0", delta: "Opened the PR.\n" }
+      } as Provider["turn"]
+    }
+    const layer = Layer.mergeAll(Singularity.empty, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
+    const t = await Effect.gen(function*() {
+      const store = yield* Store
+      const threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub: { send: () => {} }, nameThread: async () => "" })
+      const project = yield* store.addProject(proj)
+      const t = threads.create(project, { access: "full-access" })
+      yield* threads.turn(t, project, "fix it")
+      // The next turn keeps the session where it ran: only the thread's git follows the worktree.
+      yield* threads.turn(t, project, "and then?")
+      return store.thread(t.id)!
+    }).pipe(Effect.provide(layer), Effect.runPromise)
+    expect(t.workTree && resolve(t.workTree)).toBe(resolve(wt))
+    expect(t.cwd).toBeUndefined()
+    expect(t.resume).toBe("s1")
+    expect(cwds.map((c) => resolve(c))).toEqual([resolve(proj), resolve(proj)])
+    expect(t.branch).toBe("fix")
+    expect(t.pr).toEqual({ number: 42, url, branch: "fix", state: "OPEN" })
   })
 })

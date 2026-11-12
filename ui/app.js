@@ -363,6 +363,7 @@ function threadRow(t, where = "") {
       t.depth ? el("span", { class: "child-mark", "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${CHILD_PATHS}</svg>` }) : null,
       ...threadMarks(t),
       el("span", { class: "t", text: t.title }),
+      prMark(t.pr),
       where ? el("span", { class: "t-where", text: where }) : null,
       el("span", { class: "age", text: ago(t.updatedAt) })),
     // Pinning and deleting live here, on the row's hover, rather than in the thread's header (a long press, by touch).
@@ -444,6 +445,10 @@ const DOTS = {
   done: ["done-dot", "Finished: your turn"],
   failed: ["fail-dot", "Stopped on an error"]
 }
+/** The thread's pull request after its title, coloured by how it stands: open, draft, merged or closed. */
+const prMark = (pr) => pr
+  ? el("span", { class: "pr-mark", "data-state": String(pr.state).toLowerCase(), title: `PR #${pr.number} · ${PR_STATE_LABEL[String(pr.state).toLowerCase()] ?? pr.state} · ${pr.branch}`, text: `#${pr.number}` })
+  : null
 const threadMarks = (t) => {
   const dot = DOTS[inboxState(t)]
   return [
@@ -1980,7 +1985,7 @@ function threadView(t) {
   // The thread's branch: switch it, or move the thread to a new worktree from a base you pick.
   const branched = (meta, words) => {
     Object.assign(S.open ?? {}, meta)
-    if (!("cwd" in meta) && S.open) delete S.open.cwd
+    for (const k of ["cwd", "workTree", "pr"]) if (!(k in meta) && S.open) delete S.open[k]
     toast(words)
     if (gitPanel?.threadId === t.id) loadGit()
   }
@@ -3045,8 +3050,11 @@ const diffStat = ({ add, del }) => el("span", { class: "diff-stat", "aria-label"
 const DESKTOP = location.protocol === "zero:"
 const CODE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.5 4.5-3.5 3.5 3.5 3.5M10.5 4.5l3.5 3.5-3.5 3.5M9 2.5 7 13.5"/></svg>'
 const FOLDER_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/></svg>'
-/** Where a thread works: its worktree, else its project's folder. */
-const threadDir = (t, project) => S.open?.id === t.id && S.open.cwd ? S.open.cwd : t.cwd || project?.path || ""
+/** Where a thread's work is: the worktree its agent moved to, else its worktree, else its project's folder. */
+const threadDir = (t, project) => {
+  const m = S.open?.id === t.id ? S.open : t
+  return m.workTree || m.cwd || project?.path || ""
+}
 const slashes = (p) => p.replace(/\\/g, "/").replace(/^\/+/, "")
 const vscodeUrl = (path) => path ? `vscode://file/${encodeURI(slashes(path))}` : ""
 const folderUrl = (path) => path ? `file:///${encodeURI(slashes(path))}` : ""
@@ -4315,9 +4323,9 @@ function connect() {
       // A turn that just ended may have committed, pushed or opened a PR: the Git panel looks again.
       const ended = S.open.status === "running" && meta.status !== "running"
       // A new branch or folder (the thread moved to a worktree, or back): the chip and Git panel read it again.
-      const moved = S.open.branch !== meta.branch || S.open.cwd !== meta.cwd
+      const moved = S.open.branch !== meta.branch || S.open.cwd !== meta.cwd || S.open.workTree !== meta.workTree
       Object.assign(S.open, meta)
-      if (!("cwd" in meta)) delete S.open.cwd
+      for (const k of ["cwd", "workTree", "pr"]) if (!(k in meta)) delete S.open[k]
       if ((ended || moved) && gitPanel?.threadId === meta.id) loadGit()
       if ((ended || moved) && feed?.branch) feed.branch.refresh()
       if (!("effort" in meta)) delete S.open.effort // cleared: back to the provider's default
