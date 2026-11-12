@@ -3180,94 +3180,449 @@ function paintSettings() {
 }
 
 // ---------- evolution ----------
+// zero improving itself: what the loop is, where it stands, what it tried, and the runs that move it.
 let evoMode = load("evoMode", "generation")
 let evoReps = load("evoReps", 1)
+let evoGens = load("evoGens", 3)
+/** Evolve's budget, as more to spend from here; the CLI wants the ledger's total, so it's added to what's spent. */
+let evoMore = load("evoMore", 5)
+/** The chart's measure: "score" or "cost"; null picks whichever has moved. */
+let evoMetric = load("evoMetric", null)
+let evoFilter = "all"
+let evoFile = "genome/solver.md"
+const evoOpen = new Set()
+let evoClock = 0
+
+const EVO_KINDS = {
+  bench: { label: "Benchmark", verb: "Run benchmark", what: "Score the current genome on every task. Nothing changes but the ledger." },
+  generation: { label: "Generation", verb: "Run one generation", what: "The improver proposes one change, the benchmark judges it, and zero keeps it only if it wins." },
+  evolve: { label: "Evolve", verb: "Start evolving", what: "Generations back to back, each starting from what the last one kept, until the count or the money runs out." }
+}
+const EVO_STEPS = [
+  ["measure", "Measure", "The solver works each benchmark task; hidden tests it never sees score the result."],
+  ["propose", "Propose", "The improver reads the scores and earlier attempts, recalls the most similar past win, and edits genome/."],
+  ["judge", "Judge", "The new genome is benchmarked. It wins with a higher score, or the same score for at least 15% less."],
+  ["keep", "Keep", "A win is committed and stored in memory for the next improver. A loss is put back and logged."]
+]
+const EVO_FILES = [
+  ["genome/solver.md", "solver.md", "The instructions every solver agent starts with."],
+  ["genome/lessons.md", "lessons.md", "What earlier generations learned, passed on to the solver."],
+  ["genome/improver.md", "improver.md", "How the improver goes about changing the genome, which it may rewrite too."]
+]
+const EVO_KNOBS = [
+  ["solverModel", "Solver model", "Works each benchmark task", modelName],
+  ["solverEffort", "Solver effort", "How hard it thinks each turn"],
+  ["maxTurns", "Turn limit", "Most turns on one task"],
+  ["improverModel", "Improver model", "Rewrites the genome", modelName],
+  ["improverEffort", "Improver effort", "How hard it thinks each turn"]
+]
+
+const EVO_LEDE = "zero rewrites its own genome, the instructions and settings its agents run with, and keeps a change only when a benchmark with hidden tests shows it's better."
 function evolutionView() {
-  const page = el("div", { class: "page" }, el("div", { class: "page-inner wide", id: "evo" }, el("p", { class: "hint", text: "Loading…" })))
+  const page = el("div", { class: "page" }, el("div", { class: "page-inner wide evo", id: "evo" }, S.evo ? null : evoSkeleton()))
+  // Seen before: what was there shows at once (the page is in place by the microtask), and the fresh state follows.
+  if (S.evo) queueMicrotask(paintEvo)
   loadEvo()
   return page
 }
-async function loadEvo() {
-  try { S.evo = await api("GET", "zero/state") } catch (e) { return fail(e) }
-  if (S.route.name === "evolution") paintEvo()
+let evoLoading = null
+let evoSeen = ""
+/** Fetch the state, and paint it if it changed. Calls while one is out share it. */
+function loadEvo() {
+  evoLoading ??= api("GET", "zero/state").then((E) => {
+    const text = JSON.stringify(E)
+    const changed = text !== evoSeen
+    evoSeen = text
+    S.evo = E
+    if (changed && S.route.name === "evolution") paintEvo()
+  }, (e) => { if (S.route.name === "evolution") fail(e) }).finally(() => { evoLoading = null })
+  return evoLoading
 }
+/** Before the first answer: the page's shape, so nothing jumps when it arrives. */
+function evoSkeleton() {
+  const bar = (w, h = 12) => el("span", { class: "skel", style: `width:${w};height:${h}px` })
+  const tile = (label) => el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, bar("55%", 26)), el("div", { class: "kpi-sub" }, bar("80%", 10)))
+  return [
+    el("header", { class: "evo-head" },
+      el("div", {}, el("h1", { text: "Evolution" }), el("p", { class: "lede", text: EVO_LEDE })),
+      el("span", { class: "evo-status" }, el("i"), "Loading…")),
+    evoLoop({ job: null, log: [] }),
+    el("section", { class: "kpis", "aria-busy": "true" }, ["Score", "Cost per task", "Generations", "Spent"].map(tile)),
+    el("section", { class: "card", "aria-busy": "true" }, el("h2", { text: "Lineage" }), bar("60%", 10), el("div", { class: "chart" }, bar("100%", 240))),
+    el("div", { class: "evo-grid" }, el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Run" })), el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Output" })))
+  ]
+}
+/** Rebuild one section in place, leaving the rest of the page (and where it's scrolled) alone. */
+function swapEvo(id, build) {
+  const n = $(id)
+  if (!n || !S.evo) return null
+  const fresh = build(S.evo)
+  n.replaceWith(fresh)
+  return fresh
+}
+
+const evoRunning = (E) => E.job && (E.job.state === "running" || E.job.state === "stopping")
+/** The current genome's latest score on the whole benchmark. */
+const evoNow = (E) => E.measures.filter((m) => m.genomeId === E.genome?.id && m.results.length === E.tasks.length).at(-1)
+const perTask = (m) => m.costUsd / Math.max(1, m.tasks * (m.reps ?? 1))
+const share = (from, to) => (from > 0 ? Math.round((1 - to / from) * 100) : 0)
+
+/** Where a run is in the loop, from its output: the last line that says. */
+function evoStage(E) {
+  if (!evoRunning(E)) return null
+  if (E.job.request.kind === "bench") return "measure"
+  for (let i = E.log.length - 1; i >= 0; i--) {
+    const l = E.log[i].line
+    if (/^gen \d+: (accepted|committed)/.test(l)) return "keep"
+    if (/^gen \d+: (rejected|measuring the child)/.test(l)) return "judge"
+    if (/^gen \d+: improver|^\[improver\]|^singularity/.test(l)) return "propose"
+    if (/^gen \d+: (measuring the current|parent)|^=== generation/.test(l)) return "measure"
+  }
+  return "measure"
+}
+
+/** What the chosen run should cost, from the last measurement and what improvers have cost lately. */
+function evoEstimate(E) {
+  const now = evoNow(E)
+  if (!now) return null
+  const bench = (now.costUsd / (now.reps ?? 1)) * evoReps
+  if (evoMode === "bench") return bench
+  const recent = E.attempts.slice(-5).map((a) => a.improverCostUsd)
+  const improver = recent.length ? recent.reduce((s, x) => s + x, 0) / recent.length : 0.7
+  // The parent is measured first when it has no score with these reps; after that each child is.
+  const measured = E.measures.some((m) => m.genomeId === E.genome.id && m.results.length === E.tasks.length && (m.reps ?? 1) === evoReps)
+  const one = improver + bench
+  const first = one + (measured ? 0 : bench)
+  return evoMode === "generation" ? first : Math.min(first + one * (evoGens - 1), evoMore)
+}
+
 function paintEvo() {
   const root = $("evo")
   if (!root || !S.evo) return
   const E = S.evo
-  const running = E.job && (E.job.state === "running" || E.job.state === "stopping")
-  const full = E.measures.filter((m) => m.genomeId === E.genome?.id && m.results.length === E.tasks.length)
-  const now = full[full.length - 1]
-  const chart = el("div", { class: "chart", role: "img", "aria-label": "Score by generation" })
-  const fields = el("div", { class: "evo-fields", hidden: evoMode !== "evolve" },
-    el("label", {}, "Generations", el("input", { id: "evo-gens", type: "number", min: 1, max: 50, value: 3 })),
-    el("label", {}, "Stop after spending $", el("input", { id: "evo-budget", type: "number", min: 1, max: 1000, value: 25 })))
-  const repsInput = el("input", { id: "evo-reps", type: "number", min: 1, max: 5, step: 1, value: evoReps })
-  repsInput.addEventListener("change", () => { evoReps = Number(repsInput.value) || 1; save("evoReps", evoReps) })
-  const reps = el("div", { class: "evo-fields" },
-    el("label", {}, "Reps per task", repsInput),
-    el("p", { class: "hint", text: "More reps average out noise in the score, and multiply the cost." }))
-  const desc = {
-    bench: "Score the current genome on the hidden tests. Changes nothing but the ledger.",
-    generation: "Recall a past improvement, let the improver change the genome, score it, keep it only if it wins.",
-    evolve: "Run generations back to back until the count or the budget runs out."
-  }[evoMode]
-  const blocked = evoMode !== "bench" && E.tree.length > 0
-  const log = el("div", { class: "log", id: "evo-log" }, E.log.length ? E.log.map((l) => logLine(l.line)) : el("span", { text: "Output from the next run streams here." }))
+  const running = evoRunning(E)
+  clearInterval(evoClock)
+  if (running) evoClock = setInterval(() => { const n = $("evo-elapsed"); if (n && S.evo?.job) n.textContent = elapsed(S.evo.job.startedAt); else clearInterval(evoClock) }, 1000)
   root.replaceChildren(
-    el("div", {}, el("h1", { text: "Evolution" }), el("p", { class: "lede", text: `zero rewrites its own genome and keeps a change only when the benchmark says it's better. Spent so far: ${usd(E.spentUsd)}.` })),
-    el("section", { class: "card" },
-      el("div", { class: "lineage-head" },
-        el("div", {}, el("h2", { text: "Lineage" }), el("p", { class: "hint", text: "The line moves only when a generation is kept. Turned-down attempts hang below it; × marks one a guard stopped." })),
-        now ? el("div", {}, el("div", { class: "score" }, pct(now.score), el("small", { text: "%" })), el("div", { class: "score-of", text: `${now.solved} of ${now.tasks} tasks solved${now.reps > 1 ? ` · averaged over ${now.reps} reps` : ""}` })) : null),
-      chart),
-    el("div", { class: "evo-grid" },
-      el("section", { class: "card evo-run" },
-        el("h2", { text: "Run" }),
-        el("div", { class: "seg", role: "radiogroup", "aria-label": "What to run" },
-          [["bench", "Benchmark"], ["generation", "Generation"], ["evolve", "Evolve"]].map(([m, l]) =>
-            el("button", { type: "button", role: "radio", "aria-checked": String(m === evoMode), onclick: () => { evoMode = m; save("evoMode", m); paintEvo() } }, l))),
-        el("p", { class: "hint", text: desc }),
-        reps,
-        fields,
-        blocked ? el("div", { class: "warnbox" }, el("b", { text: "Uncommitted changes in zero. " }), "A generation puts back what it doesn't keep, so commit or stash them first: ", E.tree.slice(0, 4).join(", "), E.tree.length > 4 ? "…" : "") : null,
-        running
-          ? el("button", { class: "btn btn-ink", type: "button", onclick: () => api("POST", "zero/jobs/stop", {}).catch(fail) }, E.job.state === "stopping" ? "Stopping…" : "Stop run")
-          : el("button", { class: "btn btn-primary", type: "button", disabled: blocked || !E.genome, onclick: startEvo }, { bench: "Run benchmark", generation: "Run generation", evolve: "Evolve" }[evoMode])),
-      el("section", { class: "card" },
-        el("div", { class: "lineage-head" }, el("h2", { text: "Output" }), el("span", { class: "hint", text: E.job ? `${E.job.request.kind} · ${E.job.state}` : "" })),
-        log)),
-    el("section", { class: "card" },
-      el("h2", { text: "Attempts" }),
-      E.attempts.length === 0
-        ? el("p", { class: "hint", text: "No generations yet. The first one measures the genome, then tries to beat it." })
-        : el("ol", { class: "attempts", reversed: true }, E.attempts.slice().reverse().map((a) => {
-          const cost = a.childScore === null ? null : judgedCost(E, a.childId, a.at)
-          return el("li", { class: `attempt${a.accepted ? " kept" : ""}` },
-            el("span", { class: "gen", text: `gen ${a.generation}` }),
-            el("span", {}, el("span", { class: "v", text: a.accepted ? "Kept" : "Turned down" }), a.summary),
-            el("span", { class: "delta", text: `${pct(a.parentScore)} → ${a.childScore === null ? "—" : pct(a.childScore)}${cost === null ? "" : ` · ${usd(cost)}`}` }),
-            el("span", { class: "why", text: a.reason }))
-        })))
+    evoHeader(E),
+    evoLoop(E),
+    evoStats(E),
+    evoChart(E),
+    el("div", { class: "evo-grid" }, evoRun(E), evoOutput(E)),
+    evoHistory(E),
+    el("div", { class: "evo-grid evo-grid-wide" }, evoGenome(E), el("div", { class: "evo-stack" }, evoBench(E), evoMemory(E)))
   )
-  drawLineage(chart, E, running && E.job.request.kind !== "bench")
-  log.scrollTop = log.scrollHeight
+  const log = $("evo-log")
+  if (log) log.scrollTop = log.scrollHeight
 }
+
+function evoStatus(E) {
+  const j = E.job
+  if (evoRunning(E)) {
+    return el("span", { class: "evo-status live" }, el("i"),
+      j.state === "stopping" ? "Stopping…" : `${EVO_KINDS[j.request.kind].label} running`,
+      el("span", { class: "mono", id: "evo-elapsed", text: elapsed(j.startedAt) }))
+  }
+  if (!j) return el("span", { class: "evo-status" }, el("i"), "Idle")
+  const when = ago(j.endedAt ?? j.startedAt)
+  const said = { done: "Last run finished", failed: "Last run failed", stopped: "Last run stopped" }[j.state] ?? "Idle"
+  return el("span", { class: `evo-status ${j.state}` }, el("i"), said, el("span", { class: "mono", text: when === "now" ? "just now" : `${when} ago` }))
+}
+
+function evoHeader(E) {
+  return el("header", { class: "evo-head" },
+    el("div", {},
+      el("h1", { text: "Evolution" }),
+      el("p", { class: "lede", text: EVO_LEDE })),
+    evoStatus(E))
+}
+
+function evoLoop(E) {
+  const stage = evoStage(E)
+  const at = EVO_STEPS.findIndex(([k]) => k === stage)
+  return el("section", { class: `evo-loop${stage ? " live" : ""}`, "aria-label": "How a generation works" },
+    EVO_STEPS.map(([key, title, text], i) =>
+      el("div", { class: `evo-step${key === stage ? " active" : ""}${at > i ? " done" : ""}`, "data-step": key, "aria-current": key === stage ? "step" : null },
+        el("div", { class: "evo-step-top" }, el("span", { class: "evo-step-n", text: String(i + 1) }), el("b", { text: title }),
+          key === stage ? el("span", { class: "evo-step-now", text: "now" }) : null),
+        el("p", { text }))))
+}
+
+function evoStats(E) {
+  const now = evoNow(E)
+  const first = E.measures[0]
+  const kept = E.attempts.filter((a) => a.accepted).length
+  const benchUsd = E.measures.reduce((s, m) => s + m.costUsd, 0)
+  const tile = (label, value, sub, good = null) =>
+    el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, value),
+      el("div", { class: "kpi-sub" }, good ? el("span", { class: "kpi-good", text: good }) : null, sub))
+  const saved = now && first ? share(perTask(first), perTask(now)) : 0
+  return el("section", { class: "kpis", "aria-label": "Where zero stands" },
+    tile("Score", now ? [pct(now.score), el("small", { text: "%" })] : "—",
+      now ? `${now.solved} of ${now.tasks} tasks fully solved${(now.reps ?? 1) > 1 ? ` · ${now.reps} reps` : ""}` : "Run a benchmark to score this genome"),
+    tile("Cost per task", now ? usd(perTask(now)) : "—",
+      now && first ? (saved > 0 ? `from ${usd(perTask(first))} at the start` : `${usd(perTask(first))} at the start`) : "What one solver run costs, on average",
+      saved > 0 ? `${saved}% less` : null),
+    tile("Generations", String(E.attempts.length),
+      E.attempts.length ? `${kept} kept · ${E.attempts.length - kept} turned down` : "None yet"),
+    tile("Spent", usd(E.spentUsd), `${usd(benchUsd)} benchmarks · ${usd(E.spentUsd - benchUsd)} improvers`))
+}
+
+function evoChart(E) {
+  const scores = [...E.attempts.map((a) => a.parentScore), ...E.attempts.map((a) => a.childScore).filter((s) => s !== null)]
+  const flat = scores.length > 0 && Math.max(...scores) - Math.min(...scores) < 0.005
+  const metric = evoMetric ?? (flat ? "cost" : "score")
+  const chart = el("div", { class: "chart", role: "img", "aria-label": metric === "cost" ? "Benchmark cost by generation" : "Score by generation" })
+  const seg = el("div", { class: "seg seg-sm", role: "radiogroup", "aria-label": "Chart shows" },
+    [["score", "Score"], ["cost", "Cost"]].map(([m, l]) =>
+      el("button", { type: "button", role: "radio", "aria-checked": String(m === metric), onclick: () => { evoMetric = m; save("evoMetric", m); swapEvo("evo-chart", evoChart)?.querySelector("[aria-checked=true]")?.focus() } }, l)))
+  const key = (cls, text) => el("span", { class: "legend-item" }, el("span", { class: `legend-mark ${cls}` }), text)
+  const card = el("section", { class: "card", id: "evo-chart" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Lineage" }),
+        el("p", { class: "hint hint-2", text: metric === "cost"
+          ? "What a full benchmark run cost the genome each generation started from. Lower is better; the line drops when a cheaper genome is kept."
+          : "The genome's score, generation by generation. The line moves only when a change is kept." })),
+      seg),
+    chart,
+    E.attempts.length === 0 && !evoNow(E) ? null : el("div", { class: "legend" }, key("lm-start", "First measured"), key("lm-kept", "Kept"), key("lm-down", "Turned down"), key("lm-guard", "Stopped by a guard"),
+      flat && metric === "score" ? el("span", { class: "legend-note", text: "Every genome scores the same here, so Cost tells more." }) : null))
+  drawLineage(chart, E, evoRunning(E) && E.job.request.kind !== "bench", metric)
+  return card
+}
+
+function evoRun(E) {
+  const running = evoRunning(E)
+  const dirty = E.tree.length > 0
+  const blocked = evoMode !== "bench" && dirty
+  const notEvolve = evoMode !== "evolve"
+  const onlyGenome = dirty && E.tree.every((p) => p.startsWith("genome/"))
+  const est = evoEstimate(E)
+  const stepper = (id, value, min, max, set, off = false) => {
+    const input = el("input", { id, type: "number", min, max, step: 1, value, inputmode: "numeric", disabled: off })
+    const put = (v) => { const n = Math.min(max, Math.max(min, Math.round(Number(v) || min))); input.value = n; set(n); paintEvoEstimate() }
+    input.addEventListener("change", () => put(input.value))
+    return el("div", { class: "stepper" },
+      el("button", { type: "button", "aria-label": "Less", disabled: off, onclick: () => put(Number(input.value) - 1) }, "−"),
+      input,
+      el("button", { type: "button", "aria-label": "More", disabled: off, onclick: () => put(Number(input.value) + 1) }, "+"))
+  }
+  const field = (label, help, control, off = false) =>
+    el("div", { class: `evo-field${off ? " off" : ""}` },
+      el("div", {}, el("div", { class: "evo-field-label" }, label, el("span", { class: "only", text: "Evolve only" })), el("div", { class: "row-help", text: help })), control)
+  const more = el("input", { id: "evo-more", type: "number", min: 1, max: 500, step: 1, value: evoMore, inputmode: "decimal", disabled: notEvolve })
+  more.addEventListener("change", () => { evoMore = Math.min(500, Math.max(1, Number(more.value) || 5)); more.value = evoMore; save("evoMore", evoMore); paintEvoEstimate() })
+  const modes = el("div", { class: "modes", role: "radiogroup", "aria-label": "What to run" },
+    Object.entries(EVO_KINDS).map(([m, k]) =>
+      el("button", {
+        class: "mode", type: "button", role: "radio", "aria-checked": String(m === evoMode), tabindex: m === evoMode ? 0 : -1,
+        onclick: () => { evoMode = m; save("evoMode", m); paintRun() },
+        onkeydown: (e) => {
+          if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key)) return
+          e.preventDefault()
+          const ks = Object.keys(EVO_KINDS)
+          evoMode = ks[(ks.indexOf(m) + (e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : ks.length - 1)) % ks.length]
+          save("evoMode", evoMode)
+          paintRun()
+        }
+      }, el("span", { class: "mode-dot" }), el("span", {}, el("b", { text: k.label }), el("span", { text: k.what })))))
+  return el("section", { class: "card evo-run", id: "evo-run" },
+    el("h2", { text: "Run" }),
+    el("p", { class: "hint", text: "Runs use real agent sessions and cost real money." }),
+    modes,
+    el("div", { class: "evo-fields" },
+      field("Reps per task", "Run each task more than once to average out luck. Multiplies the benchmark's cost.", stepper("evo-reps", evoReps, 1, 5, (n) => { evoReps = n; save("evoReps", n) })),
+      field("Generations", "At most this many in a row.", stepper("evo-gens", evoGens, 1, 50, (n) => { evoGens = n; save("evoGens", n) }, notEvolve), notEvolve),
+      field("Spend up to", `More from here, on top of the ${usd(E.spentUsd)} spent so far. Checked before each generation, so the last one can go a little over.`,
+        el("label", { class: "money" }, el("span", { text: "$" }), more), notEvolve)),
+    // Whatever the mode: the same note, so choosing one doesn't move the page.
+    dirty
+      ? el("div", { class: "warnbox" },
+        el("b", { text: "zero has uncommitted changes. " }),
+        "A benchmark can still run, but Generation and Evolve put back every change they don't keep, so commit or stash these first: ",
+        el("span", { class: "mono", text: E.tree.slice(0, 4).join(", ") + (E.tree.length > 4 ? ` and ${E.tree.length - 4} more` : "") }),
+        onlyGenome && !running ? el("div", {}, el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: discardGenome }, "Put back the genome/ changes")) : null)
+      : null,
+    el("div", { class: "evo-go" },
+      el("div", { class: "evo-est", id: "evo-est" }, evoEstimateText(E, est)),
+      running
+        ? el("button", { class: "btn btn-ink", type: "button", disabled: E.job.state === "stopping", onclick: stopEvo }, E.job.state === "stopping" ? "Stopping…" : "Stop the run")
+        : el("button", { class: "btn btn-primary", type: "button", disabled: blocked || !E.genome, onclick: startEvo }, EVO_KINDS[evoMode].verb)))
+}
+/** The Run card alone, after a choice in it: same size in every mode, focus kept on the chosen one. */
+function paintRun() {
+  const had = document.activeElement?.closest?.(".modes")
+  const fresh = swapEvo("evo-run", evoRun)
+  if (had) fresh?.querySelector(".mode[aria-checked=true]")?.focus()
+}
+function evoEstimateText(E, est) {
+  if (est === null) return [el("span", { class: "hint", text: "The cost shows once the genome has a score." })]
+  return [el("span", { class: "hint", text: evoMode === "evolve" ? "Up to about" : "About" }), el("b", { class: "mono", text: usd(est) })]
+}
+function paintEvoEstimate() {
+  const n = $("evo-est")
+  if (n && S.evo) n.replaceChildren(...evoEstimateText(S.evo, evoEstimate(S.evo)))
+}
+
+function evoOutput(E) {
+  const j = E.job
+  const running = evoRunning(E)
+  const args = j ? ["zero", ...(j.request.kind === "bench" ? ["bench"] : [j.request.kind])].join(" ") : ""
+  const log = el("div", { class: "log", id: "evo-log", role: "log", "aria-live": "off" },
+    E.log.length ? E.log.map((l) => logLine(l.line))
+      : el("div", { class: "log-empty" }, el("b", { text: "Nothing has run since zero started." }), "Start a run and its output streams here, line by line."))
+  return el("section", { class: "card evo-out" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Output" }), el("p", { class: "hint", text: j ? `${EVO_KINDS[j.request.kind].label} · ${{ running: "running", stopping: "stopping", done: "finished", failed: "failed", stopped: "stopped" }[j.state]} · ${args}` : "The live output of the current or last run." })),
+      running ? el("button", { class: "btn btn-quiet btn-xs", type: "button", disabled: j.state === "stopping", onclick: stopEvo }, j.state === "stopping" ? "Stopping…" : "Stop") : null),
+    log)
+}
+
+function evoHistory(E) {
+  const all = E.attempts.slice().reverse()
+  const kept = all.filter((a) => a.accepted).length
+  const list = all.filter((a) => evoFilter === "all" || (evoFilter === "kept") === a.accepted)
+  const seg = el("div", { class: "seg seg-sm seg-3", role: "radiogroup", "aria-label": "Show" },
+    [["all", `All ${all.length}`], ["kept", `Kept ${kept}`], ["down", `Turned down ${all.length - kept}`]].map(([f, l]) =>
+      el("button", { type: "button", role: "radio", "aria-checked": String(f === evoFilter), onclick: () => { evoFilter = f; swapEvo("evo-history", evoHistory)?.querySelector(".seg [aria-checked=true]")?.focus() } }, l)))
+  return el("section", { class: "card", id: "evo-history" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "History" }), el("p", { class: "hint", text: "Every generation, kept or not. Open one to see what the improver tried, why, and what the benchmark said." })),
+      all.length ? seg : null),
+    all.length === 0
+      ? el("div", { class: "evo-empty" }, el("b", { text: "No generations yet." }), "Run one: the first measures the genome as it is, then tries to beat it.")
+      : list.length === 0 ? el("div", { class: "evo-empty", text: "None here." })
+      : el("ol", { class: "attempts" }, list.map((a) => evoAttempt(E, a))))
+}
+function evoAttempt(E, a) {
+  const guard = a.childScore === null
+  const verdict = a.accepted ? "Kept" : guard ? "Stopped by a guard" : "Turned down"
+  const pc = judgedCost(E, a.parentId, a.at)
+  const cc = guard ? null : judgedCost(E, a.childId, a.at)
+  const dScore = guard ? null : a.childScore - a.parentScore
+  const dCost = pc !== null && cc !== null ? -share(pc, cc) : null
+  const delta = (v, text, better) => el("span", { class: `delta ${v === 0 ? "" : better ? "up" : "down"}`, text })
+  const d = el("details", { class: `attempt ${a.accepted ? "kept" : guard ? "guard" : "down"}`, id: `evo-att-${a.generation}`, open: evoOpen.has(a.generation) },
+    el("summary", {},
+      el("span", { class: "gen", text: `#${a.generation}` }),
+      el("span", { class: "att-main" }, el("span", { class: "verdict", text: verdict }), el("span", { class: "att-sum", text: a.summary || "No summary." })),
+      el("span", { class: "att-nums" },
+        guard ? el("span", { class: "delta", text: "not measured" })
+          : [Math.abs(dScore) < 0.0005 ? delta(0, "score =") : delta(dScore, `${dScore > 0 ? "+" : ""}${(dScore * 100).toFixed(1)} pts`, dScore > 0),
+            dCost === null ? null : delta(dCost, dCost === 0 ? "cost =" : `${dCost > 0 ? "+" : ""}${dCost}% cost`, dCost < 0)],
+        el("span", { class: "when", text: `${ago(a.at)} ago`.replace("now ago", "just now"), title: new Date(a.at).toLocaleString() }))),
+    el("div", { class: "att-body" },
+      el("dl", {},
+        a.hypothesis ? [el("dt", { text: "Why it tried this" }), el("dd", { text: a.hypothesis })] : null,
+        el("dt", { text: "Verdict" }), el("dd", { text: a.reason }),
+        el("dt", { text: "Score" }), el("dd", { class: "mono", text: `${pct(a.parentScore)}% → ${guard ? "—" : `${pct(a.childScore)}%`}` }),
+        el("dt", { text: "Benchmark cost" }), el("dd", { class: "mono", text: `${pc === null ? "—" : usd(pc)} → ${cc === null ? "—" : usd(cc)}` }),
+        el("dt", { text: "Files" }), el("dd", {}, a.files.length ? a.files.map((f) => el("code", { class: "file-chip", text: f })) : el("span", { class: "hint", text: "None" })),
+        el("dt", { text: "Improver cost" }), el("dd", { class: "mono", text: usd(a.improverCostUsd) }),
+        a.commit ? [el("dt", { text: "Commit" }), el("dd", {}, el("code", { class: "file-chip", text: a.commit.slice(0, 10), title: a.commit }))] : null)))
+  d.addEventListener("toggle", () => (d.open ? evoOpen.add(a.generation) : evoOpen.delete(a.generation)))
+  return d
+}
+/** Open a generation's entry in History, from the chart. */
+function openAttempt(gen) {
+  evoOpen.add(gen)
+  evoFilter = "all"
+  paintEvo()
+  const n = $(`evo-att-${gen}`)
+  n?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" })
+  n?.querySelector("summary")?.focus({ preventScroll: true })
+}
+
+function evoGenome(E) {
+  const g = E.genome
+  if (!g) return el("section", { class: "card", id: "evo-genome" }, el("h2", { text: "Current genome" }), el("div", { class: "evo-empty" }, el("b", { text: "The genome doesn't load." }), "Check genome/genome.json; runs stay off until it parses."))
+  const on = S.settings?.useGenome !== false
+  const file = EVO_FILES.find(([f]) => f === evoFile) ?? EVO_FILES[0]
+  const text = g.files[file[0]] ?? ""
+  return el("section", { class: "card evo-genome", id: "evo-genome" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Current genome" }),
+        el("p", { class: "hint", text: "What generations change: the settings below and three instruction files, all in genome/ and versioned in git." })),
+      el("code", { class: "file-chip", text: g.id, title: "The genome's id: a hash of all four files" })),
+    el("dl", { class: "knobs" }, EVO_KNOBS.map(([k, label, help, show]) =>
+      el("div", { class: "knob" }, el("dt", { text: label }), el("dd", { text: show ? show(g.knobs[k]) : String(g.knobs[k]) }), el("div", { class: "row-help", text: help })))),
+    el("div", { class: "files" },
+      el("div", { class: "file-tabs", role: "tablist", "aria-label": "Genome files" },
+        EVO_FILES.map(([f, name]) => el("button", { type: "button", role: "tab", "aria-selected": String(f === file[0]), onclick: () => { evoFile = f; swapEvo("evo-genome", evoGenome)?.querySelector("[aria-selected=true]")?.focus() } }, name))),
+      el("p", { class: "hint", text: `${file[2]} ${text.trim().split("\n").length} lines.` }),
+      el("pre", { class: "file-text", tabindex: 0, text: text.trim() || "(empty)" })),
+    el("p", { class: "hint evo-uses" }, el("span", { class: `pill${on ? "" : " off"}` }, el("i"), on ? "In your threads" : "Off for threads"),
+      on ? " Your threads get solver.md and lessons.md too, so what evolution learns reaches your work." : " Turned off in Settings, so threads don't get these instructions."))
+}
+
+function evoBench(E) {
+  const now = evoNow(E)
+  const res = new Map((now?.results ?? []).map((r) => [r.id, r]))
+  const firstLine = (p) => p.split(/\n\s*\n/)[0].replace(/`/g, "").replace(/\s+/g, " ").trim()
+  return el("section", { class: "card" },
+    el("h2", { text: "Benchmark" }),
+    el("p", { class: "hint", text: `${E.tasks.length} small programming tasks. Each has hidden tests the solver never sees; the score is the share of them passed.` }),
+    el("ul", { class: "tasks" }, E.tasks.map((t) => {
+      const r = res.get(t.id)
+      const full = r && r.passed === r.total
+      return el("li", {},
+        el("details", {},
+          el("summary", {},
+            el("span", { class: "task-id mono", text: t.id }),
+            r ? el("span", { class: "task-bar", title: `${r.passed} of ${r.total} hidden cases passed` }, el("span", { style: `width:${(r.passed / Math.max(1, r.total)) * 100}%`, class: full ? "full" : "" })) : el("span", { class: "task-bar" }),
+            el("span", { class: "task-nums mono", text: r ? `${r.passed}/${r.total} · ${usd(r.costUsd / (now.reps ?? 1))}` : "not run" })),
+          el("p", { class: "task-prompt", text: firstLine(t.prompt) })))
+    })))
+}
+
+function evoMemory(E) {
+  if (E.memory === null) {
+    return el("section", { class: "card", "aria-busy": "true" },
+      el("h2", { text: "Memory" }),
+      el("p", { class: "hint", text: "Asking singularity what it stored…" }),
+      el("ul", { class: "memory" }, [0, 1].map(() => el("li", {}, el("span", { class: "skel", style: "width:70%;height:10px" })))))
+  }
+  const live = E.memory.filter((m) => !m.retired)
+  return el("section", { class: "card" },
+    el("h2", { text: "Memory" }),
+    el("p", { class: "hint", text: "Kept changes singularity stored. Before each generation it hands the improver the one most like the job at hand." }),
+    E.memory.length === 0
+      ? el("div", { class: "evo-empty" }, "Nothing stored yet. Each kept generation is stored here.")
+      : el("ul", { class: "memory" }, E.memory.map((m) =>
+        el("li", { class: m.retired ? "retired" : "" },
+          el("span", { class: "mem-title", text: m.title || m.task }),
+          el("code", { class: "file-chip", text: m.commit.slice(0, 7), title: m.commit }),
+          m.retired ? el("span", { class: "hint", text: "retired" }) : null))),
+    E.memory.length ? el("p", { class: "hint", text: `${live.length} in use${E.memory.length > live.length ? `, ${E.memory.length - live.length} retired` : ""}.` }) : null)
+}
+
 async function startEvo() {
+  const E = S.evo
   try {
-    await api("POST", "zero/jobs", { kind: evoMode, generations: Number($("evo-gens")?.value) || 3, budgetUsd: Number($("evo-budget")?.value) || 25, reps: Number($("evo-reps")?.value) || 1 })
-    toast(`${{ bench: "Benchmark", generation: "Generation", evolve: "Evolve" }[evoMode]} started.`)
+    await api("POST", "zero/jobs", { kind: evoMode, generations: evoGens, budgetUsd: Math.min(1000, Math.round((E.spentUsd + evoMore) * 100) / 100), reps: evoReps })
+    toast(`${EVO_KINDS[evoMode].label} started.`)
+    loadEvo()
+  } catch (e) { fail(e) }
+}
+function stopEvo() { api("POST", "zero/jobs/stop", {}).catch(fail) }
+async function discardGenome() {
+  const files = S.evo.tree
+  if (!(await dialog({ title: "Put back the genome/ changes?", text: `This throws away the uncommitted changes in ${files.join(", ")}, most likely left by a run that was stopped.`, ok: "Put back" }))) return
+  try {
+    const r = await api("POST", "zero/discard", {})
+    toast(`Put back ${r.discarded.length} file${r.discarded.length === 1 ? "" : "s"}.`)
     loadEvo()
   } catch (e) { fail(e) }
 }
 function logLine(text) {
   const m = /^\[([\w-]+)\](.*)$/.exec(text)
-  const cls = text.startsWith("$ ") ? "l-cmd" : /accepted|committed/.test(text) ? "l-kept" : /^(gen \d+|genome |benchmark:|===)/.test(text) ? "l-gen" : ""
+  const cls = text.startsWith("$ ") ? "l-cmd"
+    : /accepted|committed/.test(text) ? "l-kept"
+    : /rejected|failed|stopping|error/i.test(text) ? "l-bad"
+    : /^(gen \d+|genome |benchmark:|===)/.test(text) ? "l-gen" : ""
   return el("div", { class: cls }, m ? el("span", { class: "tag", text: m[1] }) : null, m ? m[2].trim() : text)
 }
 
-// Cost of a genome's benchmark run, from the ledger. Prefers the latest measurement
-// over the current tasks with the current reps, then over the current tasks, then any.
 /**
  * What a genome cost in the measurement a verdict was made on: its latest
  * measurement up to that attempt. Later re-measurements (a bigger benchmark,
@@ -3278,69 +3633,94 @@ function judgedCost(E, id, at) {
   return m ? m.costUsd : null
 }
 
-function genomeCost(E, id) {
-  const ms = E.measures.filter((m) => m.genomeId === id)
-  if (!ms.length) return null
-  const ids = E.tasks.map((t) => t.id).sort().join("\n")
-  const same = (m) => m.results.map((r) => r.id).sort().join("\n") === ids
-  const pick = ms.filter((m) => same(m) && (m.reps ?? 1) === evoReps).at(-1) ?? ms.filter(same).at(-1) ?? ms.at(-1)
-  return pick.costUsd
-}
-
 const NS = "http://www.w3.org/2000/svg"
 const svg = (tag, attrs = {}) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n }
-function drawLineage(box, E, live) {
+/**
+ * The lineage: a step line through the genome each generation started from, moving only on a kept
+ * change; turned-down children hang off it, and × marks one a guard stopped before it was measured.
+ * `metric` is "score" (0–1) or "cost" (a full benchmark run, in dollars).
+ */
+function drawLineage(box, E, live, metric) {
   const atts = E.attempts
-  const full = E.measures.filter((m) => m.genomeId === E.genome?.id && m.results.length === E.tasks.length)
-  const start = atts.length ? atts[0].parentScore : full.length ? full[full.length - 1].score : null
-  if (start === null) return box.append(el("div", { class: "chart-empty", text: "No score yet. A benchmark places the first point." }))
+  const cost = metric === "cost"
+  const parentOf = (a) => (cost ? judgedCost(E, a.parentId, a.at) : a.parentScore)
+  const childOf = (a) => (a.childScore === null ? null : cost ? judgedCost(E, a.childId, a.at) : a.childScore)
+  const now = evoNow(E)
+  const start = atts.length ? parentOf(atts[0]) : now ? (cost ? now.costUsd : now.score) : null
+  if (start === null) return box.append(el("div", { class: "chart-empty" }, el("b", { text: "No score yet." }), "Run a benchmark to place the first point."))
   requestAnimationFrame(() => {
     const W = Math.max(box.clientWidth, 300), H = box.clientHeight
     const n = atts.length + (live ? 1 : 0)
-    // Cost labels for the start and each kept generation; turned-down and guard-stopped points stay quiet.
-    const labels = [{ i: 0, s: start, c: atts.length ? judgedCost(E, atts[0].parentId, atts[0].at) : genomeCost(E, E.genome?.id) }]
-    atts.forEach((a, k) => { if (a.accepted && a.childScore !== null) labels.push({ i: k + 1, s: a.childScore, c: judgedCost(E, a.childId, a.at) }) })
-    const shown = labels.filter((l) => l.c !== null)
-    const pad = { l: 36, r: 20, t: shown.length ? 26 : 12, b: 24 }
-    const scores = [start, ...atts.flatMap((a) => (a.childScore === null ? [] : [a.childScore]))]
-    const lo = Math.max(0, Math.floor((Math.min(...scores) - 0.02) * 10) / 10)
-    const tick = 1 - lo <= 0.2 ? 0.05 : 1 - lo <= 0.5 ? 0.1 : 0.25
+    const values = [start, ...atts.flatMap((a) => [parentOf(a), childOf(a)]).filter((v) => v !== null)]
+    let lo, hi, tick
+    if (cost) {
+      const max = Math.max(...values) * 1.12 || 1
+      const raw = max / 4, mag = 10 ** Math.floor(Math.log10(raw)), f = raw / mag
+      tick = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag
+      lo = 0; hi = Math.ceil(max / tick) * tick
+    } else {
+      lo = Math.max(0, Math.floor((Math.min(...values) - 0.02) * 10) / 10); hi = 1
+      tick = hi - lo <= 0.2 ? 0.05 : hi - lo <= 0.5 ? 0.1 : 0.25
+    }
+    const fmt = (v) => (cost ? (v === 0 ? "$0" : `$${v < 1 ? v.toFixed(2) : v.toFixed(v % 1 ? 1 : 0)}`) : String(Math.round(v * 100)))
+    const pad = { l: cost ? 44 : 36, r: 22, t: 26, b: 26 }
     const x = (i) => pad.l + (n === 0 ? (W - pad.l - pad.r) / 2 : (i / n) * (W - pad.l - pad.r))
-    const y = (s) => pad.t + (1 - (s - lo) / (1 - lo || 1)) * (H - pad.t - pad.b)
+    const y = (v) => pad.t + (1 - (v - lo) / (hi - lo || 1)) * (H - pad.t - pad.b)
     const root = svg("svg", { viewBox: `0 0 ${W} ${H}` })
-    for (let s = 1; s >= lo - 1e-9; s -= tick) {
-      root.append(svg("line", { class: "grid-line", x1: pad.l, x2: W - pad.r, y1: y(s), y2: y(s) }))
-      const t = svg("text", { class: "axis", x: pad.l - 8, y: y(s) + 3, "text-anchor": "end" }); t.textContent = Math.round(s * 100); root.append(t)
+    for (let v = hi; v >= lo - 1e-9; v -= tick) {
+      root.append(svg("line", { class: "grid-line", x1: pad.l, x2: W - pad.r, y1: y(v), y2: y(v) }))
+      const t = svg("text", { class: "axis", x: pad.l - 8, y: y(v) + 3, "text-anchor": "end" }); t.textContent = fmt(v); root.append(t)
     }
     const step = Math.max(1, Math.ceil(n / Math.max(1, Math.floor((W - pad.l - pad.r) / 56))))
-    for (let i = step; i <= atts.length; i += step) { const t = svg("text", { class: "axis", x: x(i), y: H - 4, "text-anchor": "middle" }); t.textContent = W < 560 ? i : `gen ${i}`; root.append(t) }
+    const t0 = svg("text", { class: "axis", x: x(0), y: H - 4, "text-anchor": "start" }); t0.textContent = "start"; root.append(t0)
+    for (let i = step; i <= atts.length; i += step) { const t = svg("text", { class: "axis", x: x(i), y: H - 4, "text-anchor": i === n ? "end" : "middle" }); t.textContent = W < 560 ? `#${i}` : `gen ${i}`; root.append(t) }
+    // The line: flat while generations are turned down, a step at each kept one. A parent re-measured
+    // (a bigger benchmark, more reps) moves it halfway between generations.
     let cur = start
     const pts = [[x(0), y(cur)]]
     const marks = []
     atts.forEach((a, k) => {
       const i = k + 1
-      if (a.accepted && a.childScore !== null) { pts.push([x(i), y(cur)], [x(i), y(a.childScore)]); cur = a.childScore; marks.push({ i, kind: "kept", s: cur }) }
-      else { pts.push([x(i), y(cur)]); marks.push({ i, kind: a.childScore === null ? "guard" : "down", s: a.childScore, from: cur }) }
+      const p = parentOf(a)
+      if (p !== null && Math.abs(p - cur) > 1e-9) { pts.push([x(i - 0.5), y(cur)], [x(i - 0.5), y(p)]); cur = p }
+      const c = childOf(a)
+      if (a.accepted && c !== null) { pts.push([x(i), y(cur)], [x(i), y(c)]); marks.push({ i, a, kind: "kept", v: c, from: cur }); cur = c }
+      else { pts.push([x(i), y(cur)]); marks.push({ i, a, kind: c === null ? "guard" : "down", v: c, from: cur }) }
     })
-    root.append(svg("path", { class: "lineage-path", d: pts.map(([a, b], j) => `${j ? "L" : "M"}${a},${b}`).join("") }))
-    if (live) { const [lx, ly] = pts[pts.length - 1]; root.append(svg("line", { class: "next-path", x1: lx, y1: ly, x2: x(n), y2: y(cur) }), svg("circle", { class: "next", cx: x(n), cy: y(cur), r: 6 })) }
+    if (live) pts.push([x(n), y(cur)])
+    const last = live ? pts.length - 2 : pts.length - 1
+    root.append(svg("path", { class: "lineage-area", d: `${pts.slice(0, last + 1).map(([a, b], j) => `${j ? "L" : "M"}${a},${b}`).join("")}L${pts[last][0]},${H - pad.b}L${x(0)},${H - pad.b}Z` }))
+    root.append(svg("path", { class: "lineage-path", d: pts.slice(0, last + 1).map(([a, b], j) => `${j ? "L" : "M"}${a},${b}`).join("") }))
+    if (live) root.append(svg("line", { class: "next-path", x1: pts[last][0], y1: pts[last][1], x2: x(n), y2: y(cur) }), svg("circle", { class: "next", cx: x(n), cy: y(cur), r: 6 }))
     root.append(svg("circle", { class: "node-start", cx: x(0), cy: y(start), r: 4.5 }))
     for (const m of marks) {
       const cx = x(m.i)
-      if (m.kind === "kept") root.append(svg("circle", { class: "node-kept", cx, cy: y(m.s), r: 5.5 }))
-      else if (m.kind === "down") root.append(svg("line", { class: "stub", x1: cx, x2: cx, y1: y(m.from), y2: y(m.s) }), svg("circle", { class: "node-down", cx, cy: y(m.s), r: 4 }))
-      else { const gy = y(m.from) + 14; root.append(svg("line", { class: "guard", x1: cx - 3.5, y1: gy - 3.5, x2: cx + 3.5, y2: gy + 3.5 }), svg("line", { class: "guard", x1: cx - 3.5, y1: gy + 3.5, x2: cx + 3.5, y2: gy - 3.5 })) }
+      if (m.kind === "kept") root.append(svg("circle", { class: "node-kept", cx, cy: y(m.v), r: 5.5 }))
+      else if (m.kind === "down") root.append(svg("line", { class: "stub", x1: cx, x2: cx, y1: y(m.from), y2: y(m.v) }), svg("circle", { class: "node-down", cx, cy: y(m.v), r: 4 }))
+      else { const gy = y(m.from) + (cost ? -14 : 14); root.append(svg("line", { class: "guard", x1: cx - 3.5, y1: gy - 3.5, x2: cx + 3.5, y2: gy + 3.5 }), svg("line", { class: "guard", x1: cx - 3.5, y1: gy + 3.5, x2: cx + 3.5, y2: gy - 3.5 })) }
     }
-    // Centered above the point, but clamped between the y-axis labels (which end at pad.l - 8)
-    // and the right edge; a label that would collide with the previous one is skipped.
+    // Values for the start and each kept generation, above the point; one that would collide with the last is skipped.
     let prev = null
-    for (const l of shown) {
-      const text = usd(l.c), half = text.length * 3.1 // 10px mono ≈ 6.2px per character
-      const lx = Math.min(Math.max(x(l.i), pad.l + half), W - 2 - half)
-      const ly = y(l.s) - 10
-      if (prev && lx - half < prev.right + 4 && Math.abs(ly - prev.y) < 12) continue
-      const t = svg("text", { class: "axis", x: lx, y: ly, "text-anchor": "middle" }); t.textContent = text; root.append(t)
-      prev = { right: lx + half, y: ly }
+    for (const l of [{ i: 0, v: start }, ...marks.filter((m) => m.kind === "kept").map((m) => ({ i: m.i, v: m.v }))]) {
+      // To the right of the point, clear of the step that rises into it; pulled left at the right edge.
+      const text = cost ? usd(l.v) : `${pct(l.v)}%`, w = text.length * 6.2
+      const lx = Math.min(x(l.i) + 8, W - 2 - w)
+      const ly = y(l.v) - 9
+      if (prev && lx < prev.right + 4 && Math.abs(ly - prev.y) < 12) continue
+      const t = svg("text", { class: "axis value", x: lx, y: ly, "text-anchor": "start" }); t.textContent = text; root.append(t)
+      prev = { right: lx + w, y: ly }
+    }
+    // Hover and click targets, bigger than the dots: a generation's point opens it in History.
+    const fv = (v) => (v === null ? "—" : cost ? usd(v) : `${pct(v)}%`)
+    root.append(svg("circle", { class: "hit", cx: x(0), cy: y(start), r: 11, title: `Start: the genome as first measured · ${fv(start)}` }))
+    for (const m of marks) {
+      const verdict = { kept: "Kept", down: "Turned down", guard: "Stopped by a guard" }[m.kind]
+      const sum = m.a.summary.length > 90 ? `${m.a.summary.slice(0, 88)}…` : m.a.summary
+      const hit = svg("circle", { class: "hit", cx: x(m.i), cy: m.kind === "guard" ? y(m.from) : y(m.v), r: 11, tabindex: 0, role: "button",
+        title: `Gen ${m.a.generation} · ${verdict} · ${fv(m.from)} → ${fv(m.v)} · ${sum}` })
+      hit.addEventListener("click", () => openAttempt(m.a.generation))
+      hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openAttempt(m.a.generation) } })
+      root.append(hit)
     }
     box.replaceChildren(root)
   })
@@ -3436,11 +3816,21 @@ function connect() {
     S.evo.log.push(entry)
     const log = $("evo-log")
     if (log) {
-      if (S.evo.log.length === 1) log.replaceChildren()
+      log.querySelector(".log-empty")?.remove()
       const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40
       log.append(logLine(entry.line))
       if (stick) log.scrollTop = log.scrollHeight
     }
+    // The loop strip shows which step the run is on.
+    const stage = evoStage(S.evo)
+    const steps = [...document.querySelectorAll(".evo-step")]
+    const at = steps.findIndex((n) => n.dataset.step === stage)
+    steps.forEach((n, i) => {
+      n.classList.toggle("active", i === at)
+      n.classList.toggle("done", at > i)
+      n.querySelector(".evo-step-now")?.remove()
+      if (i === at) n.querySelector(".evo-step-top").append(el("span", { class: "evo-step-now", text: "now" }))
+    })
   }
   const evoRefresh = () => { clearTimeout(evoTimer); evoTimer = setTimeout(() => S.route.name === "evolution" && loadEvo(), 300) }
   on["zero-job"] = (j) => {

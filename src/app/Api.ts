@@ -77,6 +77,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
     if (store.projects().length === 0) yield* store.addProject(root, "zero")
     return { store, threads: yield* makeThreads({ zeroRoot: root, hub }) }
   }))
+  runtime.runFork(evolution.warm)
 
   const providers = async () => {
     const s = store.settings()

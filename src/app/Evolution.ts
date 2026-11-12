@@ -126,16 +126,39 @@ export const makeEvolution = (options: {
     return true
   }
 
+  /**
+   * What singularity stored, served from here: `singularity changes` takes about a second, which the page
+   * shouldn't wait on. A stale (or missing) list is refreshed in the background, and the page hears
+   * `zero-state` when what came back differs, so it asks again.
+   */
   let memoryCache: { at: number; value: ReadonlyArray<StoredChange> } | undefined
+  let memoryFetching = false
+  const refreshMemory = Effect.gen(function*() {
+    if (memoryFetching || (memoryCache && Date.now() - memoryCache.at < 15_000)) return
+    memoryFetching = true
+    const memory = yield* Memory
+    yield* memory.changes(root).pipe(
+      Effect.orElseSucceed(() => memoryCache?.value ?? []),
+      Effect.tap((value) =>
+        Effect.sync(() => {
+          const changed = !memoryCache || JSON.stringify(memoryCache.value) !== JSON.stringify(value)
+          memoryCache = { at: Date.now(), value }
+          if (changed) hub.send("zero-state", {})
+        })
+      ),
+      Effect.ensuring(Effect.sync(() => { memoryFetching = false })),
+      Effect.forkDetach
+    )
+  })
+
   const state = Effect.gen(function*() {
-    const genome = yield* loadGenome(root).pipe(Effect.option)
-    const tasks = yield* loadTasks(join(root, "bench")).pipe(Effect.orElseSucceed(() => []))
-    const ledger = yield* readLedger(root)
-    const tree = yield* changes(root).pipe(Effect.orElseSucceed(() => []))
-    if (!memoryCache || Date.now() - memoryCache.at > 15_000) {
-      const memory = yield* Memory
-      memoryCache = { at: Date.now(), value: yield* memory.changes(root).pipe(Effect.orElseSucceed(() => [])) }
-    }
+    yield* refreshMemory
+    const { genome, tasks, ledger, tree } = yield* Effect.all({
+      genome: loadGenome(root).pipe(Effect.option),
+      tasks: loadTasks(join(root, "bench")).pipe(Effect.orElseSucceed(() => [])),
+      ledger: readLedger(root),
+      tree: changes(root).pipe(Effect.orElseSucceed(() => []))
+    }, { concurrency: "unbounded" })
     return {
       root,
       genome: genome._tag === "Some"
@@ -155,7 +178,8 @@ export const makeEvolution = (options: {
       attempts: attempts(ledger),
       spentUsd: totalCost(ledger),
       tree: tree.map((c) => c.path),
-      memory: memoryCache.value,
+      /** null until singularity has answered once. */
+      memory: memoryCache?.value ?? null,
       job: job ?? null,
       log,
       workDir: BENCH_WORK_DIR
@@ -189,5 +213,8 @@ export const makeEvolution = (options: {
     return { status: 200, body: { discarded: dirty.map((c) => c.path) } }
   })
 
-  return { state, request, stop, discard, running }
+  /** Start asking singularity now, so the list is there by the time Evolution first opens. */
+  const warm = Effect.ignore(refreshMemory)
+
+  return { state, request, stop, discard, running, warm }
 }

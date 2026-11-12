@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest"
-import { jobArgs, parseJobRequest } from "../src/app/Evolution.ts"
+import * as NodeServices from "@effect/platform-node/NodeServices"
+import { Effect, Layer, Option } from "effect"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { describe, expect, it, vi } from "vitest"
+import { jobArgs, makeEvolution, parseJobRequest } from "../src/app/Evolution.ts"
+import { Memory } from "../src/Singularity.ts"
 
 const tasks = ["csv", "lru"]
 
@@ -34,5 +40,40 @@ describe("control plane jobs", () => {
     for (const reps of [0, 6, 2.5, -1, "3", null, Number.NaN]) {
       expect(parseJobRequest({ kind: "bench", reps }, tasks)).toMatch(/reps/)
     }
+  })
+})
+
+describe("control plane state", () => {
+  it("answers without waiting on singularity, and says when its list arrives", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zero-evo-"))
+    const events: Array<string> = []
+    const gate = Promise.withResolvers<void>()
+    let asked = 0
+    const memory = Layer.succeed(Memory, Memory.of({
+      recall: () => Effect.succeedNone,
+      handOver: () => Effect.succeed({ handOver: Option.none(), searched: false }),
+      afterTool: () => Effect.succeedNone,
+      store: () => Effect.void,
+      changes: () =>
+        Effect.sync(() => void asked++).pipe(
+          Effect.andThen(Effect.promise(() => gate.promise)),
+          Effect.as([{ id: "c1", commit: "abc1234567", title: "genome: cheaper solver", task: "", retired: false }])
+        )
+    }))
+    const run = <A, E>(effect: Effect.Effect<A, E, Memory | NodeServices.NodeServices>) =>
+      Effect.runPromise(effect.pipe(Effect.provide(Layer.mergeAll(memory, NodeServices.layer))))
+    const evolution = makeEvolution({ root, cli: "cli.ts", hub: { send: (event) => void events.push(event) } })
+
+    // singularity hasn't answered: the page gets everything else now, and no list yet.
+    const first = await run(evolution.state)
+    expect(first.memory).toBeNull()
+    expect(asked).toBe(1)
+
+    gate.resolve()
+    await vi.waitFor(() => expect(events).toContain("zero-state"))
+    const second = await run(evolution.state)
+    expect(second.memory).toEqual([{ id: "c1", commit: "abc1234567", title: "genome: cheaper solver", task: "", retired: false }])
+    // A fresh list isn't asked for again.
+    expect(asked).toBe(1)
   })
 })
