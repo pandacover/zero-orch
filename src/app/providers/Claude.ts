@@ -79,8 +79,14 @@ export const effortFor = (model: string, effort: string): string | undefined => 
   return ["high", "medium", "low"].find((e) => known.efforts!.includes(e))
 }
 
-const TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch"]
-const READS = new Set(["Read", "Glob", "Grep", "WebSearch", "WebFetch"])
+/**
+ * The built-in tools a thread gets. ToolSearch lets Claude Code defer MCP tools (the person's
+ * claude.ai connectors) as bare names, loaded when needed: without it every connector's full
+ * definition goes in each turn, as ~80 blocks that miss the prompt cache back to the system prompt.
+ */
+export const TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch", "ToolSearch"]
+/** Loading a deferred tool's definition is a read; calling the tool is gated as itself. */
+const READS = new Set(["Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch"])
 const EDITS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
 
 const detailOf = (_tool: string, input: Record<string, unknown>): string =>
