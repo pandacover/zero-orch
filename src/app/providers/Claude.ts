@@ -16,8 +16,8 @@ import { memoryHooks } from "../../Claude.ts"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
-import { type Access, ACCESSES, type Effort, isCompact } from "../Model.ts"
-import type { ModelLabel, Provider, ThreadTools, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
+import { type Access, ACCESSES, type Effort, isCompact, type UsageLimit } from "../Model.ts"
+import type { ModelLabel, Provider, SlashCommandInfo, ThreadTools, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
 import { keepOutput, notRun, short } from "./Provider.ts"
 
 /** The models a thread can pick before Claude Code has said which it offers (or when it can't). */
@@ -96,6 +96,45 @@ const detailOf = (_tool: string, input: Record<string, unknown>): string =>
   short(input["command"] ?? input["file_path"] ?? input["pattern"] ?? input["url"] ?? input["query"] ?? input, 400)
 
 const DETAIL_KEYS = ["command", "file_path", "pattern", "url", "query"]
+
+/**
+ * Claude Code's own commands that make sense from zero's composer; the rest (/clear, /model, /config…) are
+ * the terminal's or are zero's to do. Every command of the person's, a project's, a plugin's or a skill stays.
+ */
+const BUILTIN_COMMANDS = new Set(["init", "review", "security-review", "pr-comments", "release-notes"])
+
+/** The slash commands a composer offers, from what Claude Code says it takes (/compact is zero's own toggle). */
+export const usableCommands = (
+  list: ReadonlyArray<{ name: string; description: string; argumentHint?: string; builtin?: boolean }>,
+  terminal: ReadonlyArray<string> = []
+): Array<SlashCommandInfo> => {
+  const seen = new Set<string>()
+  return list.flatMap((c) => {
+    if (seen.has(c.name) || c.name === "compact" || terminal.includes(c.name) || (c.builtin && !BUILTIN_COMMANDS.has(c.name))) return []
+    seen.add(c.name)
+    return [{ name: c.name, description: c.description, hint: c.argumentHint ?? "" }]
+  }).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** Lines of a diff kept on a tool card: enough to read the change, not a whole file. */
+const DIFF_LINES = 300
+
+/**
+ * What an Edit, MultiEdit or Write changed, as a unified-diff-like text the page colours: removed lines
+ * with "-", added with "+", an edit's pieces apart by "@@". A Write shows the file it wrote, all added.
+ * Undefined for any other tool, or an input without the strings.
+ */
+export const editDiff = (tool: string, input: Record<string, unknown>): string | undefined => {
+  const lines = (s: unknown, mark: string) => typeof s === "string" && s !== "" ? s.replace(/\n$/, "").split("\n").map((l) => mark + l) : []
+  const piece = (e: Record<string, unknown>) => ["@@", ...lines(e["old_string"], "-"), ...lines(e["new_string"], "+")]
+  const out = tool === "Edit" ? piece(input)
+    : tool === "MultiEdit" && Array.isArray(input["edits"]) ? (input["edits"] as Array<Record<string, unknown>>).flatMap(piece)
+    : tool === "Write" ? ["@@ new content", ...lines(input["content"], "+")]
+    : []
+  if (out.length <= 1) return undefined
+  const more = out.length - DIFF_LINES
+  return (more > 0 ? [...out.slice(0, DIFF_LINES), `@@ ${more} more line${more === 1 ? "" : "s"}`] : out).join("\n")
+}
 
 /**
  * The top-level string fields of a tool call's input that has only partly streamed in, those
@@ -288,6 +327,9 @@ interface Session {
   reader: Reader | undefined
   closed: boolean
   idle: ReturnType<typeof setTimeout> | undefined
+  /** Its slash commands, once Claude Code has said which it takes. */
+  commands: Array<SlashCommandInfo> | undefined
+  commandsAsked: boolean
 }
 
 /** The live sessions, by thread. */
@@ -374,7 +416,7 @@ const open = (input: TurnInput, config: string): Session => {
       ...(input.resume ? { resume: input.resume } : {})
     }
   })
-  const s: Session = { q, config, cwd: input.cwd, model: input.model, id: undefined, send: inbox.push, reader: undefined, closed: false, idle: undefined }
+  const s: Session = { q, config, cwd: input.cwd, model: input.model, id: undefined, send: inbox.push, reader: undefined, closed: false, idle: undefined, commands: undefined, commandsAsked: false }
   void (async () => {
     let error: unknown = new Error("Claude Code's session ended")
     try {
@@ -451,7 +493,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   let session: string | undefined
   let messageId = ""
   const streamed = new Set<string>()
-  const tools = new Map<string, { name: string; detail: string }>()
+  const tools = new Map<string, { name: string; detail: string; diff?: string | undefined }>()
   /** What each tool card shows now: a card goes up as the model starts writing its call, not once it has. */
   const announced = new Map<string, string>()
   /** Tool calls still streaming in the current message, by content block index: their input so far. */
@@ -460,8 +502,15 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   // Compaction the person asked for with `/compact`; any other is Claude Code's own, as the context filled.
   const asked = isCompact(input.prompt)
   let compacting = false
+  // The session's slash commands: asked once it has started, sent with the next message after they arrive.
+  // The turn never waits for them.
+  let commandsSent = false
   try {
   for (let m = await reader.inbox.next(); m; m = await reader.inbox.next()) {
+    if (s.commands && !commandsSent) {
+      commandsSent = true
+      yield { type: "commands", commands: s.commands }
+    }
     if (session === undefined && "session_id" in m && typeof m.session_id === "string" && m.session_id) {
       session = m.session_id
       s.id = session
@@ -476,6 +525,20 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
         compacting = false
         yield { type: "compact", trigger: asked ? "manual" : "auto", state: "failed", error: m.compact_error ?? "" }
       }
+      continue
+    }
+    if (m.type === "system" && m.subtype === "init") {
+      const terminal = (m as { terminal_slash_commands?: Array<string> }).terminal_slash_commands ?? []
+      // Every turn starts with an init; the session is asked once.
+      if (!s.commandsAsked) {
+        s.commandsAsked = true
+        s.q.supportedCommands().then((list) => { s.commands = usableCommands(list, terminal) }, () => {})
+      }
+      continue
+    }
+    if (m.type === "rate_limit_event") {
+      const limit = limitOf(m.rate_limit_info)
+      if (limit) yield { type: "limit", limit }
       continue
     }
     if (m.type === "system" && m.subtype === "compact_boundary") {
@@ -524,7 +587,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       if (m.parent_tool_use_id) continue
       m.message.content.forEach((block, i) => {
         if (block.type === "tool_use") {
-          tools.set(block.id, { name: block.name, detail: detailOf(block.name, block.input as Record<string, unknown>) })
+          tools.set(block.id, { name: block.name, detail: detailOf(block.name, block.input as Record<string, unknown>), diff: editDiff(block.name, block.input as Record<string, unknown>) })
         }
         // Text that didn't arrive as deltas (a provider without partial messages) arrives whole.
         if (block.type === "text" && !streamed.has(m.message.id)) pending.push({ type: "text", key: `${m.message.id}:${i}`, delta: block.text })
@@ -533,7 +596,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       for (const [id, t] of tools) {
         if (announced.get(id) === t.detail) continue
         announced.set(id, t.detail)
-        pending.push({ type: "tool", key: id, name: t.name, detail: t.detail, status: "running" })
+        pending.push({ type: "tool", key: id, name: t.name, detail: t.detail, status: "running", ...(t.diff ? { diff: t.diff } : {}) })
       }
       yield* pending.splice(0)
       continue
@@ -549,7 +612,8 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
           name: t.name,
           detail: t.detail,
           status: block.is_error ? "failed" : "done",
-          output: keepOutput(resultText(block.content))
+          output: keepOutput(resultText(block.content)),
+          ...(t.diff ? { diff: t.diff } : {})
         }
       }
       continue
@@ -576,6 +640,19 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       s.idle.unref?.()
     }
   }
+}
+
+/**
+ * One of the plan's usage windows as Claude Code reported it, or undefined for one that names no
+ * window. `utilization` arrives as a share (0–1) or a percentage (0–100): it's kept as a share.
+ */
+export const limitOf = (info: { status?: string; rateLimitType?: string; utilization?: number; resetsAt?: number } | undefined): UsageLimit | undefined => {
+  if (!info?.rateLimitType || !info.status) return undefined
+  const u = typeof info.utilization === "number" && Number.isFinite(info.utilization) ? info.utilization : null
+  const used = u === null ? null : Math.min(1, Math.max(0, u > 1 ? u / 100 : u))
+  // resetsAt is in seconds since the epoch.
+  const resetsAt = typeof info.resetsAt === "number" && info.resetsAt > 0 ? new Date(info.resetsAt * (info.resetsAt < 1e12 ? 1000 : 1)).toISOString() : null
+  return { kind: info.rateLimitType, status: info.status, used, resetsAt, at: new Date().toISOString() }
 }
 
 /** A compaction summary as a person reads it: its <summary> part when it has one, without the model's <analysis>. */

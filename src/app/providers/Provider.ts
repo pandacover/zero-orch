@@ -7,7 +7,14 @@
  * those into the items a thread shows; it never sees an SDK's own types.
  */
 import { Schema, Stream } from "effect"
-import type { Access, ProviderId, Settings } from "../Model.ts"
+import type { Access, ProviderId, Settings, UsageLimit } from "../Model.ts"
+
+/** A slash command a provider's session runs when a message starts with it: /name, what it does, what to write after it. */
+export interface SlashCommandInfo {
+  readonly name: string
+  readonly description: string
+  readonly hint: string
+}
 
 export type TurnEvent =
   | { readonly type: "session"; readonly resume: string }
@@ -20,6 +27,8 @@ export type TurnEvent =
     readonly detail: string
     readonly status: "running" | "done" | "failed"
     readonly output?: string | undefined
+    /** What an edit changed, as diff lines (Edit, MultiEdit, Write). */
+    readonly diff?: string | undefined
   }
   /** The provider's own context compaction: started, finished, or failed. */
   | {
@@ -35,6 +44,10 @@ export type TurnEvent =
   }
   /** How full the session's context is: `used` tokens of `limit`, where the provider compacts on its own. */
   | { readonly type: "context"; readonly used: number; readonly limit: number }
+  /** Where the account stands against one of its plan's usage windows (Claude's five-hour or weekly limits). */
+  | { readonly type: "limit"; readonly limit: UsageLimit }
+  /** The slash commands the provider's session takes, as a composer offers them after / (its own come first). */
+  | { readonly type: "commands"; readonly commands: ReadonlyArray<SlashCommandInfo> }
   | {
     readonly type: "usage"
     readonly costUsd: number | null

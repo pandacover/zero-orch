@@ -28,6 +28,10 @@ class FakeSession {
     this.wake?.()
   })
   onInterrupt: (() => void) | undefined
+  readonly supportedCommands = vi.fn(async () => [
+    { name: "review", description: "Review a pull request", argumentHint: "<pr>", builtin: true },
+    { name: "clear", description: "Clear the conversation", builtin: true }
+  ])
   readonly q: Record<string | symbol, unknown>
   readonly options: Record<string, any>
   constructor(options: Record<string, any>, prompt: AsyncIterable<Sent>) {
@@ -45,7 +49,8 @@ class FakeSession {
       interrupt: this.interrupt,
       setModel: this.setModel,
       close: this.close,
-      getContextUsage: async () => ({ totalTokens: 100 * this.sent.length, maxTokens: 1000 })
+      getContextUsage: async () => ({ totalTokens: 100 * this.sent.length, maxTokens: 1000 }),
+      supportedCommands: this.supportedCommands
     }
     void (async () => {
       for await (const m of prompt) {
@@ -119,6 +124,17 @@ afterEach(() => {
 })
 
 describe("a thread's live Claude session", () => {
+  it("asks the live session its slash commands once, and offers them on its later turns", async () => {
+    const one = await run(input({ prompt: "one" }))
+    await settled()
+    const two = await run(input({ prompt: "two", resume: one.resume }))
+    const three = await run(input({ prompt: "three", resume: two.resume }))
+    expect(fakes).toHaveLength(1)
+    expect(fakes[0]!.supportedCommands).toHaveBeenCalledTimes(1)
+    const offered = [{ name: "review", description: "Review a pull request", hint: "<pr>" }]
+    for (const t of [two, three]) expect(t.events.filter((e) => e.type === "commands")).toEqual([{ type: "commands", commands: offered }])
+  })
+
   it("runs every turn of a thread in one Claude Code process", async () => {
     const one = await run(input({ prompt: "one" }))
     const two = await run(input({ prompt: "two", resume: one.resume }))

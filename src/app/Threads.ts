@@ -13,13 +13,14 @@ import { ChildProcessSpawner } from "effect/process"
 import { existsSync } from "node:fs"
 import { basename, join } from "node:path"
 import { type Attachment, plainText, promptText } from "./Attachments.ts"
-import { createWorktree, listBranches, slug } from "./Branches.ts"
+import { createWorktree, listBranches, samePath, slug } from "./Branches.ts"
+import { lastWorktree, openedPr, toolPlaces } from "./WorkPlace.ts"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
 import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "../Singularity.ts"
-import type { Access, Item, Project, ProviderId, Settings, Thread } from "./Model.ts"
+import type { Access, Item, Project, ProviderId, Settings, Thread, UsageLimit } from "./Model.ts"
 import { atMost, isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
-import { type Provider, type ThreadTools, turnStream, type Verdict } from "./providers/Provider.ts"
+import { type Provider, type SlashCommandInfo, type ThreadTools, turnStream, type Verdict } from "./providers/Provider.ts"
 import { claude, claudeModels, nameThread } from "./providers/Claude.ts"
 import { codex } from "./providers/Codex.ts"
 import { ollama } from "./providers/Ollama.ts"
@@ -147,6 +148,10 @@ export const followUp = (tool: Item & { kind: "tool" }): string => {
 /** The folder a thread works in: its worktree, else its project's. */
 export const dirOf = (t: { readonly cwd?: string | undefined }, project: Project): string => t.cwd ?? project.path
 
+/** The folder whose git a thread follows: the worktree its agent moved its work to, else where it works. */
+export const gitDirOf = (t: { readonly cwd?: string | undefined; readonly workTree?: string | undefined }, project: Project): string =>
+  t.workTree && existsSync(t.workTree) ? t.workTree : dirOf(t, project)
+
 /** Where the worktrees of a project's threads go: `<root>/<project>-<id>/<branch>`. */
 export const worktreeRoot = (home: string, project: Project): string => join(home, "worktrees", `${slug(project.name)}-${project.id.slice(-6)}`)
 
@@ -213,6 +218,10 @@ export const makeThreads = (options: {
     }
     const { hub } = options
     const name = options.nameThread ?? nameThread
+    /** The plan's usage windows as the provider last reported them, by kind: the composer's meter shows them. */
+    const limits = new Map<string, UsageLimit>()
+    /** The slash commands each thread's session takes, as its provider last said: the composer offers them after /. */
+    const commands = new Map<string, ReadonlyArray<SlashCommandInfo>>()
 
     const touch = (t: Thread) => {
       t.updatedAt = now()
@@ -223,7 +232,8 @@ export const makeThreads = (options: {
       if (i >= 0) t.items[i] = item
       else t.items.push(item)
       hub.send("item", { threadId: t.id, item })
-      store.saveThread(t, soon)
+      // Named: it may be the same object, changed (an approval answered).
+      store.saveThread(t, soon, item)
     }
 
     const create = (
@@ -256,7 +266,7 @@ export const makeThreads = (options: {
 
     /** Change a thread's provider, model, access or effort. A new provider starts a new session. */
     /** `effort: ""` goes back to following the settings. */
-    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean }) => {
+    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean; seen?: boolean }) => {
       if (patch.provider && patch.provider !== t.provider) {
         // The old provider's live session, if it keeps one, has no more turns coming.
         PROVIDERS[t.provider].close?.(t.id)
@@ -285,8 +295,10 @@ export const makeThreads = (options: {
       if (patch.title?.trim()) t.title = patch.title.trim().slice(0, 120)
       if (patch.pinned === true) t.pinned = true
       else if (patch.pinned === false) delete t.pinned
-      // Pinning isn't activity: the thread keeps its age, so unpinning puts it back where it was.
-      const onlyPin = Object.keys(patch).every((k) => k === "pinned")
+      // The person opened the thread: the turn that ended is seen.
+      if (patch.seen === true) delete t.unseen
+      // Pinning and looking aren't activity: the thread keeps its age, so unpinning puts it back where it was.
+      const onlyPin = Object.keys(patch).every((k) => k === "pinned" || k === "seen")
       if (onlyPin) hub.send("thread", metaOf(t))
       else touch(t)
       store.saveThread(t)
@@ -297,7 +309,10 @@ export const makeThreads = (options: {
      * provider's session belongs to the folder it ran in (Claude Code keeps it under that path), so
      * the thread starts a new one there; its messages stay on the thread.
      */
-    const moveTo = (t: Thread, cwd: string | undefined, branch: string) => {
+    const moveTo = (t: Thread, cwd: string | undefined, branch: string, workTree?: string) => {
+      // Where the person put the thread wins over where its agent went.
+      if (workTree) t.workTree = workTree
+      else delete t.workTree
       if (cwd !== t.cwd) {
         if (!busy(t.id)) PROVIDERS[t.provider].close?.(t.id)
         if (cwd) t.cwd = cwd
@@ -309,6 +324,15 @@ export const makeThreads = (options: {
       }
       if (branch) t.branch = branch
       touch(t)
+      store.saveThread(t)
+    }
+
+    /** Link the thread to its pull request (or drop the link), as the Git panel found it; its age stays. */
+    const linkPr = (t: Thread, pr: Thread["pr"]) => {
+      if (JSON.stringify(t.pr ?? null) === JSON.stringify(pr ?? null)) return
+      if (pr) t.pr = pr
+      else delete t.pr
+      hub.send("thread", metaOf(t))
       store.saveThread(t)
     }
 
@@ -367,6 +391,9 @@ export const makeThreads = (options: {
         const compactFirst = opts.compactFirst === true && !compact && cantCompact(provider, t.resume) === ""
 
         let compaction: (Item & { kind: "compact" }) | undefined
+        /** Where the turn's calls changed something (oldest first), and a pull request one opened: the thread follows them. */
+        const places: Array<string> = []
+        let opened: { number: number; url: string } | undefined
         let costUsd: number | null = null
         let tokens: number | null = null
         const texts = new Map<string, Item & { kind: "assistant" }>()
@@ -378,7 +405,7 @@ export const makeThreads = (options: {
           if (known) {
             known.text += chunk
             hub.send("delta", { threadId: t.id, itemId: known.id, delta: chunk })
-            store.saveThread(t, true)
+            store.saveThread(t, true, known)
           } else {
             const item = { kind: "assistant" as const, id: newId("a"), at: now(), text: chunk }
             texts.set(key, item)
@@ -454,7 +481,15 @@ export const makeThreads = (options: {
                   // A call that fails once the turn is stopped failed because of the stop (Claude's "Stream closed"),
                   // not the other way round: its card says so.
                   const output = e.status === "failed" && l.abort.signal.aborted ? cutShort(e.output ?? "") : e.output ?? ""
-                  put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output })
+                  put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output, ...(e.diff ? { diff: e.diff } : {}) })
+                  if (e.status === "done") places.push(...toolPlaces({ name: e.name, detail: e.detail, output }, cwd))
+                  if (e.status !== "running") opened = openedPr({ name: e.name, detail: e.detail, output }) ?? opened
+                } else if (e.type === "commands") {
+                  commands.set(t.id, e.commands)
+                  hub.send("commands", { threadId: t.id, commands: e.commands })
+                } else if (e.type === "limit") {
+                  limits.set(e.limit.kind, e.limit)
+                  hub.send("limits", [...limits.values()])
                 } else if (e.type === "context") {
                   t.context = { used: e.used, limit: e.limit }
                   hub.send("thread", metaOf(t))
@@ -478,6 +513,7 @@ export const makeThreads = (options: {
           // The message waits, shown as queued, while the session compacts.
           t.queued = words.trim() || "Your message"
           t.status = "running"
+          delete t.unseen
           touch(t)
           startCompaction()
           yield* run("/compact", "", false)
@@ -495,6 +531,7 @@ export const makeThreads = (options: {
           : ""
         if (refused) {
           put(t, { kind: "turn", id: newId("end"), at: now(), provider: t.provider, model: t.model, durationMs: 0, costUsd: null, tokens: null, outcome: "failed", error: refused }, false)
+          t.unseen = "failed"
           live.delete(t.id)
           touch(t)
           store.saveThread(t)
@@ -517,9 +554,12 @@ export const makeThreads = (options: {
           }
         }
         t.status = "running"
+        delete t.unseen
         touch(t)
 
-        const before = yield* head(cwd).pipe(Effect.option)
+        // The checkout whose commits count: the worktree the agent works in, if it moved to one.
+        const gitDir = gitDirOf(t, project)
+        const before = yield* head(gitDir).pipe(Effect.option)
         // singularity keeps memory per git repo, and the person may turn recall off.
         const remembers = settings.memory.recall && Option.isSome(before) && !compact
         let prompt = compact ? text.trim() : promptText(text, attachments)
@@ -587,12 +627,24 @@ export const makeThreads = (options: {
         }
         if (compaction?.state === "running") put(t, { ...compaction, state: result.outcome === "done" ? "done" : "failed" })
 
-        // A commit this turn made: let singularity keep it.
-        const after = yield* head(cwd).pipe(Effect.option)
-        if (settings.memory.store && Option.isSome(before) && Option.isSome(after) && after.value !== before.value) {
-          yield* memory.store(cwd).pipe(Effect.ignore)
-          const stored = yield* memory.changes(cwd).pipe(Effect.orElseSucceed(() => []))
-          const subject = yield* git(cwd, ["log", "-1", "--format=%s"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
+        // The worktree the agent last changed something in, when it's another than the thread's: the thread follows it.
+        const went = yield* Effect.promise(() => lastWorktree(cwd, places))
+        if (went !== undefined) {
+          if (samePath(went, cwd)) delete t.workTree
+          else t.workTree = went
+        }
+        const workDir = gitDirOf(t, project)
+        const moved = !samePath(workDir, gitDir)
+        // A commit this turn made: let singularity keep it. In a worktree the agent moved to this turn, a
+        // commit made since the turn started.
+        const after = yield* head(workDir).pipe(Effect.option)
+        const committed = moved
+          ? Option.isSome(after) && (yield* git(workDir, ["log", "-1", "--format=%ct"]).pipe(Effect.map((s) => Number(s.trim()) * 1000 >= started - 1000), Effect.orElseSucceed(() => false)))
+          : Option.isSome(before) && Option.isSome(after) && after.value !== before.value
+        if (settings.memory.store && committed && Option.isSome(after)) {
+          yield* memory.store(workDir).pipe(Effect.ignore)
+          const stored = yield* memory.changes(workDir).pipe(Effect.orElseSucceed(() => []))
+          const subject = yield* git(workDir, ["log", "-1", "--format=%s"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
           const kept = stored.some((c) => c.commit === after.value)
           put(t, {
             kind: "memory",
@@ -616,11 +668,16 @@ export const makeThreads = (options: {
           outcome: result.outcome,
           error: result.error
         }, false)
-        // The branch the turn left the project on: the one the thread's Git panel follows (it may have made it).
-        const branch = yield* git(cwd, ["branch", "--show-current"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
+        // The branch the turn left the thread's checkout on: the one its Git panel follows (it may have made it).
+        const branch = yield* git(workDir, ["branch", "--show-current"]).pipe(Effect.map((s) => s.trim()), Effect.orElseSucceed(() => ""))
         if (branch) t.branch = branch
+        // A pull request the agent opened is the thread's, for the branch it's on.
+        if (opened) t.pr = { ...opened, branch: t.branch ?? "", state: "OPEN" }
         live.delete(t.id)
         t.status = "idle"
+        // A turn the person stopped is one they saw end; one that finished or failed waits for them to look.
+        if (result.outcome === "stopped") delete t.unseen
+        else t.unseen = result.outcome
         touch(t)
         store.saveThread(t)
         settle(t.id)
@@ -773,6 +830,7 @@ export const makeThreads = (options: {
       create,
       update,
       moveTo,
+      linkPr,
       turn,
       /** A thread was deleted: anyone waiting for it hears so now, and its live session ends. */
       forget: (id: string) => {
@@ -780,6 +838,10 @@ export const makeThreads = (options: {
         for (const p of Object.values(PROVIDERS)) p.close?.(id)
       },
       isRunning: busy,
+      /** The plan's usage windows as the provider last reported them. */
+      limits: () => [...limits.values()],
+      /** A thread's session's slash commands, once a turn of it has started. */
+      commands: (id: string) => commands.get(id) ?? [],
       /** How many threads have a turn going. */
       running: () => live.size,
       stop: (id: string) => {

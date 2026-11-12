@@ -138,6 +138,8 @@ export type Item =
     detail: string
     status: "running" | "done" | "failed"
     output: string
+    /** What an edit changed: "-" and "+" lines, "@@" between pieces (Edit, MultiEdit, Write). */
+    diff?: string | undefined
   }
   | {
     readonly kind: "permission"
@@ -223,14 +225,36 @@ export interface ThreadMeta {
   branch?: string | undefined
   /** A git worktree of the project this thread works in, instead of the project's own folder. */
   cwd?: string | undefined
+  /**
+   * The worktree the thread's agent moved its work to on its own (one it made, or edited and committed
+   * in), while its session still runs in `cwd`: the thread's branch, Git panel and pull request follow it.
+   */
+  workTree?: string | undefined
+  /** The thread's pull request: linked when it's opened from the thread, or found for the thread's branch. */
+  pr?: { number: number; url: string; branch: string; state: string } | undefined
   /** The thread whose agent started this one: it talks to it and waits for its answers. */
   parentId?: string | undefined
+  /** A turn ended that the person hasn't looked at yet, and how: the sidebar lists the thread under Needs you. */
+  unseen?: "done" | "failed" | undefined
   readonly createdAt: string
   updatedAt: string
 }
 
 export interface Thread extends ThreadMeta {
   items: Array<Item>
+}
+
+/** Where the account stands against one of its plan's usage windows, as the provider last said. */
+export interface UsageLimit {
+  /** Which window: "five_hour", "seven_day", "seven_day_opus"… */
+  readonly kind: string
+  /** "allowed", "allowed_warning" (getting close) or "rejected" (used up until it resets). */
+  readonly status: string
+  /** How much of the window is used, 0 to 1, when the provider says. */
+  readonly used: number | null
+  /** When the window resets (ISO), when the provider says. */
+  readonly resetsAt: string | null
+  readonly at: string
 }
 
 export const newId = (prefix: string): string =>

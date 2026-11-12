@@ -11,12 +11,12 @@ import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
 import { makeEvolution } from "./Evolution.ts"
 import { createBranch, createWorktree, initRepo, listBranches, samePath, switchBranch, worktreeOf } from "./Branches.ts"
-import { fileDiff, gitView, parseAction, pendingChange, runAction } from "./GitInfo.ts"
+import { fileDiff, gitView, listFiles, parseAction, pendingChange, runAction } from "./GitInfo.ts"
 import { commitMessage, loadClaudeModels } from "./providers/Claude.ts"
 import { type Access, ACCESSES, compactionOffered, metaOf, type Project, type ProviderId, type Settings } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
-import { dirOf, type Hub, makeThreads, PROVIDERS, worktreeRoot } from "./Threads.ts"
+import { dirOf, gitDirOf, type Hub, makeThreads, PROVIDERS, worktreeRoot } from "./Threads.ts"
 
 export interface ApiOptions {
   /** zero's own repo: its genome, benchmark and ledger. */
@@ -91,7 +91,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
 
   /** Whether a thread is working in `dir` now: a branch switch there would pull the floor from under it. */
   const workingIn = (project: Project, dir: string) =>
-    store.threads().some((m) => m.projectId === project.id && threads.isRunning(m.id) && samePath(dirOf(m, project), dir))
+    store.threads().some((m) => m.projectId === project.id && threads.isRunning(m.id) && (samePath(dirOf(m, project), dir) || samePath(gitDirOf(m, project), dir)))
   /** Switch the folder `dir` to the branch named in `body`, or create it when `body["create"]` is true; the thread (if any) follows it in its Git panel. */
   const switchIn = async (project: Project, dir: string, body: Record<string, unknown>): Promise<Reply | string> => {
     if (workingIn(project, dir)) return error(409, "a thread is working in this folder; wait for it, or stop it, before switching branches")
@@ -104,8 +104,10 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
 
   const route = async (m: string, parts: ReadonlyArray<string>, body: Record<string, unknown>): Promise<Reply> => {
     // --- everything a page needs to start ---
+    // Threads whose title or messages match: GET search/<the words, URI-encoded>.
+    if (m === "GET" && parts[0] === "search") return reply(200, store.search(decodeURIComponent(parts[1] ?? "")))
     if (m === "GET" && parts[0] === "bootstrap") {
-      return reply(200, { settings: store.settings(), projects: store.projects(), threads: store.threads(), providers: await providers(), home: store.home, zeroRoot: root })
+      return reply(200, { settings: store.settings(), projects: store.projects(), threads: store.threads(), providers: await providers(), home: store.home, zeroRoot: root, limits: threads.limits() })
     }
     if (m === "GET" && parts[0] === "providers") return reply(200, await providers())
 
@@ -142,17 +144,17 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
       // The project folder's branches, for a new thread's branch menu; switching one switches the folder.
       const project = id ? store.project(id) : undefined
       if (project && m === "GET" && parts[2] === "branches") return reply(200, await listBranches(project.path))
+      // The project's files, for @ in a new thread's composer.
+      if (project && m === "GET" && parts[2] === "files") return reply(200, await listFiles(project.path))
       if (project && m === "POST" && parts[2] === "branch") {
         const switched = await switchIn(project, project.path, body)
         if (typeof switched !== "string") return switched
         // The threads working in the project's folder are on this branch now: their Git panels follow.
         for (const meta of store.threads()) {
-          const t = meta.projectId === project.id && !meta.cwd ? store.thread(meta.id) : undefined
-          if (!t || t.branch === switched) continue
-          // Not activity: each keeps its place in the sidebar.
-          t.branch = switched
-          hub.send("thread", metaOf(t))
-          store.saveThread(t, true)
+          if (meta.projectId !== project.id || meta.cwd || meta.workTree || meta.branch === switched) continue
+          // Not activity: each keeps its place in the sidebar. Its items aren't read for it.
+          const next = store.patchThread(meta.id, { branch: switched })
+          if (next) hub.send("thread", next)
         }
         return reply(200, { branch: switched })
       }
@@ -187,6 +189,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         threads.update(thread, {
           ...(typeof body["title"] === "string" ? { title: body["title"] } : {}),
           ...(typeof body["pinned"] === "boolean" ? { pinned: body["pinned"] } : {}),
+          ...(body["seen"] === true ? { seen: true } : {}),
           ...choices(body)
         })
         return reply(200, metaOf(thread))
@@ -219,18 +222,27 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         runtime.runFork(threads.turn(thread, project, text, attachments, { compactFirst }))
         return reply(202, { started: true })
       }
+      // The slash commands its session takes, for / in its composer.
+      if (m === "GET" && parts[2] === "commands") return reply(200, threads.commands(thread.id))
+      // The files where the thread works, for @ in its composer.
+      if (m === "GET" && parts[2] === "files") {
+        const project = store.project(thread.projectId)
+        if (!project) return error(409, "this thread's project was removed")
+        return reply(200, await listFiles(gitDirOf(thread, project)))
+      }
       // --- the thread's git: its branch, working tree, commits, and its pull request ---
       // --- the thread's branch, from its composer: switch it, or move the thread to a new worktree ---
       if (parts[2] === "branches" || parts[2] === "branch" || parts[2] === "worktree") {
         const project = store.project(thread.projectId)
         if (!project) return error(409, "this thread's project was removed")
-        const dir = dirOf(thread, project)
+        // The checkout the thread follows: the worktree its agent moved to, else where it works.
+        const dir = gitDirOf(thread, project)
         if (m === "GET" && parts[2] === "branches") return reply(200, { ...(await listBranches(dir)), cwd: dir, project: project.path })
         if (threads.isRunning(thread.id)) return error(409, "wait for the turn to end before changing this thread's branch")
         if (m === "POST" && parts[2] === "branch") {
           const switched = await switchIn(project, dir, body)
           if (typeof switched !== "string") return switched
-          threads.moveTo(thread, thread.cwd, switched)
+          threads.moveTo(thread, thread.cwd, switched, thread.workTree)
           return reply(200, metaOf(thread))
         }
         if (m === "POST" && parts[2] === "worktree") {
@@ -260,8 +272,15 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
       if (parts[2] === "git") {
         const project = store.project(thread.projectId)
         if (!project) return error(409, "this thread's project was removed")
-        const dir = dirOf(thread, project)
-        if (m === "GET" && parts.length === 3) return reply(200, { ...(await gitView(dir, thread.branch)), cwd: dir, worktree: thread.cwd !== undefined })
+        const dir = gitDirOf(thread, project)
+        if (m === "GET" && parts.length === 3) {
+          // The thread's own pull request, by its URL, while the thread is on the branch it was opened from.
+          const linked = thread.pr && thread.pr.branch === thread.branch ? thread.pr.url : undefined
+          const view = await gitView(dir, thread.branch, undefined, linked)
+          // Found (or opened from the panel): the thread is linked to it, and the sidebar shows how it stands.
+          if (view.pr && view.gh.ok) threads.linkPr(thread, { number: view.pr.number, url: view.pr.url, branch: view.branch, state: view.pr.state === "OPEN" && view.pr.isDraft ? "DRAFT" : view.pr.state })
+          return reply(200, { ...view, cwd: dir, worktree: !samePath(dir, project.path) })
+        }
         // One changed file's diff, for the panel's file list.
         if (m === "GET" && parts[3] === "diff" && parts[4] && parts.length === 5) {
           const diff = await fileDiff(dir, decodeURIComponent(parts[4]))

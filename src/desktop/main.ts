@@ -12,6 +12,7 @@
  * notifications as before) and quits once it all ends. Quit from the tray stops it.
  */
 import { app, BrowserWindow, dialog, type IpcMainInvokeEvent, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, protocol, shell, Tray } from "electron"
+import { statSync } from "node:fs"
 import { enableCompileCache } from "node:module"
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -81,15 +82,41 @@ else {
   ipcMain.handle("upload", async (e, name: unknown, mime: unknown, bytes: unknown) =>
     trusted(e) && bytes instanceof Uint8Array ? (await api).upload(String(name), String(mime), bytes) : refused)
 
-  /** A link out of the page: the web opens in the browser, an image in the OS viewer, any other file is saved. */
+  /**
+   * A link out of the page: the web opens in the browser, an image in the OS viewer, any other file is saved.
+   * A thread's "Open in VS Code" opens VS Code's own link; its "Show folder" opens a folder (only a folder:
+   * a file would run, and a link in a page mustn't run anything).
+   */
   const open = async (url: string) => {
     if (/^https?:\/\//.test(url)) return void shell.openExternal(url)
+    if (/^vscode(-insiders)?:\/\/file\//.test(url)) return void shell.openExternal(url)
+    if (url.startsWith("file:")) {
+      const path = fileURLToPath(url)
+      if (statSync(path, { throwIfNoEntry: false })?.isDirectory()) void shell.openPath(path)
+      return
+    }
     const id = url.startsWith(`${PAGE}attachments/`) ? url.slice(`${PAGE}attachments/`.length) : ""
     const a = id ? (await api).attachment(id) : undefined
     if (!a) return
     if (isInlineImage(a.mime)) void shell.openPath(a.path)
     else win?.webContents.downloadURL(url)
   }
+
+  /**
+   * On Windows and Linux the page is the whole window: no system title bar or menu bar (the menu's
+   * shortcuts still work), and the minimize, maximize and close buttons drawn over its top right, as
+   * tall as the page's header row (app.css keeps its own buttons clear of them, and drags by its headers).
+   * macOS keeps its own title bar.
+   */
+  const OVERLAY_HEIGHT = 54
+  const overlay = () => nativeTheme.shouldUseDarkColors
+    ? { color: "#0d0d0d", symbolColor: "#a3a3a3", height: OVERLAY_HEIGHT }
+    : { color: "#ffffff", symbolColor: "#666666", height: OVERLAY_HEIGHT }
+  const frame = () => process.platform === "darwin" ? {} : { titleBarStyle: "hidden" as const, titleBarOverlay: overlay() }
+  // The buttons follow the system's light or dark, as the page does.
+  nativeTheme.on("updated", () => {
+    if (process.platform !== "darwin" && win && !win.isDestroyed()) win.setTitleBarOverlay(overlay())
+  })
 
   /** zero's window, opened if it was closed, on `threadId` if given. */
   const openWindow = (threadId?: string) => {
@@ -112,6 +139,7 @@ else {
       // Shown once painted, on the page's own background: no white flash.
       show: false,
       backgroundColor: nativeTheme.shouldUseDarkColors ? "#0d0d0d" : "#ffffff",
+      ...frame(),
       webPreferences: { preload: join(import.meta.dirname, "preload.cjs"), sandbox: true, contextIsolation: true }
     })
     win.once("ready-to-show", () => win?.show())

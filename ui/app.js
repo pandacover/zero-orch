@@ -54,7 +54,15 @@ const S = {
   expanded: new Set(), // tool items showing output
   query: "", // the sidebar's search
   route: { name: "home" },
-  evo: null
+  evo: null,
+  /** The plan's usage windows as Claude last reported them ({ kind, status, used, resetsAt }). */
+  limits: [],
+  /** Each thread's session's slash commands (thread id → [{ name, description, hint }]), as its provider last said. */
+  commands: new Map(),
+  /** What the sidebar's search found in threads' messages (zero.db's index): for the words `q`. */
+  hits: { q: "", list: [] },
+  /** An item to bring into view once its thread is open (a search hit's). */
+  jump: null
 }
 function load(key, fallback) {
   try { return JSON.parse(localStorage.getItem(`zero.${key}`)) ?? fallback } catch { return fallback }
@@ -222,6 +230,16 @@ function parseRoute() {
 }
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route() }
 addEventListener("hashchange", route)
+/** The thread on screen, with zero in front, has been seen: its ended turn leaves Needs you. */
+function markSeen() {
+  const t = S.open
+  if (!t?.unseen || !document.hasFocus()) return
+  delete t.unseen
+  const meta = S.threads.find((m) => m.id === t.id)
+  if (meta) delete meta.unseen
+  api("PATCH", `threads/${t.id}`, { seen: true }).catch(() => {})
+}
+addEventListener("focus", () => { markSeen(); renderSide() })
 
 async function route() {
   S.route = parseRoute()
@@ -237,6 +255,7 @@ async function route() {
       S.open = await api("GET", `threads/${S.route.id}`)
       save("last", S.route.id)
       clearThreadToasts(S.route.id)
+      markSeen()
     } catch {
       S.open = null
       return go("#/")
@@ -254,10 +273,16 @@ function renderSide() {
   // Searching shows only the threads whose title matches (or every thread of a project whose name does), all expanded.
   const q = S.query.trim().toLowerCase()
   const byProject = new Map(S.projects.map((p) => [p.id, []]))
-  // A thread with unsent words in its reply box moves up to Drafts, so it isn't listed twice.
-  const drafted = draftedThreadIds()
-  for (const t of S.threads) if (!drafted.has(t.id)) byProject.get(t.projectId)?.push(t)
+  // A thread that needs the person, or is working, moves up to those sections; one with unsent
+  // words in its reply box moves up to Drafts. Either way it isn't listed twice.
+  const inbox = inboxSections(q)
+  const drafted = draftedThreadIds(inbox.ids)
+  for (const t of S.threads) if (!drafted.has(t.id) && !inbox.ids.has(t.id)) byProject.get(t.projectId)?.push(t)
   shownDrafted = [...drafted].sort().join(" ")
+  shownInbox = inbox.key
+  // The window's title counts what needs you, so the taskbar says so while you're elsewhere.
+  const waiting = S.threads.filter((t) => { const st = inboxState(t); return st && st !== "working" }).length
+  document.title = waiting ? `(${waiting}) zero` : "zero"
   const hasThreads = new Set(S.threads.map((t) => t.projectId))
   // Pinned threads first, each group newest first as S.threads is; a thread another started sits under it.
   for (const [id, list] of byProject) byProject.set(id, nested(list.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))))
@@ -267,9 +292,15 @@ function renderSide() {
     const hits = all.filter((t) => t.title.toLowerCase().includes(q))
     return hits.length ? [[p, hits]] : []
   })
-  const draftsSec = draftsSection()
-  if (q && shown.length === 0 && !draftsSec) return tree.replaceChildren(el("p", { class: "tree-empty", text: `No threads match “${S.query.trim()}”.` }))
-  tree.replaceChildren(...(draftsSec ? [draftsSec] : []), ...shown.map(([p, threads]) => {
+  const draftsSec = draftsSection(inbox.ids)
+  // Threads whose messages match (not their titles: those are listed above it already).
+  const listed = new Set([...inbox.ids, ...shown.flatMap(([, ts]) => ts.map((t) => t.id))])
+  const found = hitsSection(q, listed)
+  if (q && shown.length === 0 && !draftsSec && !inbox.nodes.length && !found) {
+    const looking = q.length >= 2 && S.hits.q !== q
+    return tree.replaceChildren(el("p", { class: "tree-empty", text: looking ? "Searching messages…" : `No threads match “${S.query.trim()}”.` }))
+  }
+  tree.replaceChildren(...inbox.nodes, ...(draftsSec ? [draftsSec] : []), ...(found ? [found] : []), ...shown.map(([p, threads]) => {
     const closed = !q && S.collapsed.has(p.id)
     return el("section", { class: `proj${closed ? " closed" : ""}`, "data-id": p.id },
       held(el("div", { class: "proj-head" },
@@ -286,19 +317,96 @@ function renderSide() {
         threads.length === 0
           // Every thread of it is up in Drafts: it still has threads, just none to list here.
           ? (hasThreads.has(p.id) ? [] : el("li", { class: "none", text: "No threads yet" }))
-          : threads.map((t) => held(el("li", { class: `thread-row${t.pinned ? " pinned" : ""}${t.depth ? " child" : ""}`, style: t.depth ? `--depth: ${t.depth}` : null },
-            el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null,
-              title: t.depth ? `Started by “${threadMeta(t.parentId)?.title ?? "another thread"}”` : null },
-              t.depth ? el("span", { class: "child-mark", "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${CHILD_PATHS}</svg>` }) : null,
-              ...threadMarks(t),
-              el("span", { class: "t", text: t.title }),
-              el("span", { class: "age", text: ago(t.updatedAt) })),
-            // Pinning and deleting live here, on the row's hover, rather than in the thread's header (a long press, by touch).
-            el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => pinThread(t) }),
-            el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })),
-          () => threadSheet(t)))))
+          : threads.map((t) => threadRow(t))))
   }))
   for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
+}
+/** The sidebar's "In messages": threads whose messages match the search, each with the words around the match. */
+function hitsSection(q, listed) {
+  if (!q || S.hits.q !== q) return null
+  const rows = S.hits.list.filter((h) => h.itemId && !listed.has(h.threadId)).map((h) => ({ h, t: threadMeta(h.threadId) })).filter((x) => x.t)
+  if (!rows.length) return null
+  return el("section", { class: "proj inbox hits", "aria-label": "In messages" },
+    el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: "In messages" }), el("span", { class: "inbox-count", text: String(rows.length) })),
+    el("ul", { class: "threads" }, rows.map(({ h, t }) => el("li", { class: "thread-row hit-row" },
+      el("a", { class: `thread-link hit-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, onclick: () => { S.jump = h.itemId } },
+        el("span", { class: "t", text: t.title }),
+        el("span", { class: "hit-snippet" }, ...marked(h.snippet)))))))
+}
+/** A search snippet as text, its matched words (between \u0002 and \u0003) in <mark>: built as nodes, never as HTML. */
+function marked(snippet) {
+  return snippet.split("\u0002").flatMap((part, i) => {
+    if (i === 0) return [part]
+    const [hit, rest = ""] = part.split("\u0003")
+    return [el("mark", { text: hit }), rest]
+  })
+}
+/** Search the messages of every thread, a moment after the typing stops; the sidebar lists what's found. */
+let searching = 0
+function searchSoon() {
+  clearTimeout(searching)
+  const q = S.query.trim().toLowerCase()
+  if (q.length < 2) return
+  searching = setTimeout(async () => {
+    const list = await api("GET", `search/${encodeURIComponent(q)}`).catch(() => [])
+    if (S.query.trim().toLowerCase() !== q) return
+    S.hits = { q, list }
+    renderSide()
+  }, 140)
+}
+/** A thread's row in the sidebar: its marks, title and age; pin and delete on hover. `where` names its project (in Needs you and Working). */
+function threadRow(t, where = "") {
+  const started = t.parentId ? `Started by “${threadMeta(t.parentId)?.title ?? "another thread"}”` : ""
+  return held(el("li", { class: `thread-row${t.pinned ? " pinned" : ""}${t.depth ? " child" : ""}${where !== "" ? " inbox-row" : ""}`, style: t.depth ? `--depth: ${t.depth}` : null },
+    el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null,
+      title: [where ? `In ${where}` : "", started].filter(Boolean).join("\n") || null },
+      t.depth ? el("span", { class: "child-mark", "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${CHILD_PATHS}</svg>` }) : null,
+      ...threadMarks(t),
+      el("span", { class: "t", text: t.title }),
+      prMark(t.pr),
+      where ? el("span", { class: "t-where", text: where }) : null,
+      el("span", { class: "age", text: ago(t.updatedAt) })),
+    // Pinning and deleting live here, on the row's hover, rather than in the thread's header (a long press, by touch).
+    el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => pinThread(t) }),
+    el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })),
+  () => threadSheet(t))
+}
+/**
+ * Where a thread stands for the person: "ask" (waiting for their approval), "failed" or "done" (a turn
+ * ended that they haven't looked at), "working", or "" (nothing for them: it's listed under its project).
+ * The thread on screen is seen as it ends.
+ */
+const inboxState = (t) =>
+  t.status === "running" ? (S.asking.has(t.id) ? "ask" : "working") : t.unseen && S.open?.id !== t.id ? t.unseen : ""
+const NEEDS_ORDER = { ask: 0, failed: 1, done: 2 }
+/** The state each inbox section's rows were last drawn in: a thread changing section redraws the sidebar. */
+let shownInbox = ""
+/**
+ * Needs you (waiting for an approval, or a turn ended unseen) and Working, above Drafts and the projects,
+ * as an inbox: what to look at next is at the top. Each section shows only when it has threads.
+ */
+function inboxSections(q) {
+  const projectName = (t) => S.projects.find((p) => p.id === t.projectId)?.name ?? ""
+  const many = S.projects.length > 1
+  const needs = [], working = []
+  for (const t of S.threads) {
+    const state = inboxState(t)
+    if (!state) continue
+    if (q && !`${t.title} ${projectName(t)}`.toLowerCase().includes(q)) continue
+    ;(state === "working" ? working : needs).push({ t, state })
+  }
+  needs.sort((a, b) => NEEDS_ORDER[a.state] - NEEDS_ORDER[b.state] || b.t.updatedAt.localeCompare(a.t.updatedAt))
+  const section = (cls, label, rows) => rows.length
+    ? [el("section", { class: `proj inbox ${cls}`, "aria-label": label },
+      el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: label }), el("span", { class: "inbox-count", text: String(rows.length) })),
+      el("ul", { class: "threads" }, rows.map(({ t }) => threadRow(t, many ? projectName(t) : ""))))]
+    : []
+  const ids = new Set([...needs, ...working].map(({ t }) => t.id))
+  return {
+    ids,
+    key: [...needs, ...working].map(({ t, state }) => `${t.id}:${state}`).join(" "),
+    nodes: [...section("needs", "Needs you", needs), ...section("working-sec", "Working", working)]
+  }
 }
 /**
  * A project's threads in sidebar order, each thread another started right under it (newest first),
@@ -330,15 +438,28 @@ const threadSheet = (t, draftKey = "") => actionSheet(t.title, [
   { label: t.pinned ? "Unpin" : "Pin to the top", run: () => pinThread(t) },
   { label: "Delete thread", danger: true, run: () => deleteThread(t) }
 ])
-/** A thread's working or waiting dot and its pin, ahead of its title. */
-const threadMarks = (t) => [
-  t.status === "running" ? el("span", { class: S.asking.has(t.id) ? "ask-dot" : "run-dot", title: S.asking.has(t.id) ? "Waiting for your approval" : "Working" }) : null,
-  t.pinned ? el("span", { class: "pin-mark", title: "Pinned", html: PIN_ICON }) : null
-]
-/** The threads with words waiting in their reply box: listed under Drafts, not under their project. */
-function draftedThreadIds() {
+/** A thread's dot (working, waiting for an approval, or ended unseen) and its pin, ahead of its title. */
+const DOTS = {
+  working: ["run-dot", "Working"],
+  ask: ["ask-dot", "Waiting for your approval"],
+  done: ["done-dot", "Finished: your turn"],
+  failed: ["fail-dot", "Stopped on an error"]
+}
+/** The thread's pull request after its title, coloured by how it stands: open, draft, merged or closed. */
+const prMark = (pr) => pr
+  ? el("span", { class: "pr-mark", "data-state": String(pr.state).toLowerCase(), title: `PR #${pr.number} · ${PR_STATE_LABEL[String(pr.state).toLowerCase()] ?? pr.state} · ${pr.branch}`, text: `#${pr.number}` })
+  : null
+const threadMarks = (t) => {
+  const dot = DOTS[inboxState(t)]
+  return [
+    dot ? el("span", { class: dot[0], title: dot[1] }) : null,
+    t.pinned ? el("span", { class: "pin-mark", title: "Pinned", html: PIN_ICON }) : null
+  ]
+}
+/** The threads with words waiting in their reply box: listed under Drafts, not under their project (nor those in `inbox`). */
+function draftedThreadIds(inbox = new Set()) {
   const ids = new Set()
-  for (const key of drafts.keys()) if (key.startsWith("t:") && S.threads.some((t) => t.id === key.slice(2))) ids.add(key.slice(2))
+  for (const key of drafts.keys()) if (key.startsWith("t:") && !inbox.has(key.slice(2)) && S.threads.some((t) => t.id === key.slice(2))) ids.add(key.slice(2))
   return ids
 }
 /** The drafted threads the sidebar last left out of their projects, to know when to redraw it whole. */
@@ -348,7 +469,7 @@ let shownDrafted = ""
  * draft goes back to its project's start page, titled by its words. A reply's draft is its thread
  * itself, moved up out of its project (its title, its words on hover) until it's sent or emptied.
  */
-function draftsSection() {
+function draftsSection(inbox = new Set()) {
   const q = S.query.trim().toLowerCase()
   const rows = []
   for (const [key, d] of drafts) {
@@ -358,6 +479,8 @@ function draftsSection() {
     const project = S.projects.find((p) => p.id === (thread ? thread.projectId : id))
     // A draft whose thread or project was removed goes with it.
     if (!project || (kind === "t" && !thread)) { drafts.delete(key); continue }
+    // A thread that needs the person, or is working, is listed up there instead.
+    if (thread && inbox.has(thread.id)) continue
     const where = thread ? `Reply in “${thread.title}”` : `New thread in ${project.name}`
     if (q && !`${d.title} ${where} ${project.name}`.toLowerCase().includes(q)) continue
     rows.push({ key, d, where, thread, href: thread ? `#/t/${thread.id}` : `#/new/${project.id}` })
@@ -391,12 +514,14 @@ function paintDrafts() {
   const tree = $("tree")
   if (!tree) return
   // A thread moving into or out of Drafts changes its project's list too.
-  if (S.query.trim() || [...draftedThreadIds()].sort().join(" ") !== shownDrafted) return renderSide()
+  const inbox = inboxSections("")
+  if (S.query.trim() || inbox.key !== shownInbox || [...draftedThreadIds(inbox.ids)].sort().join(" ") !== shownDrafted) return renderSide()
   const old = tree.querySelector(":scope > .drafts")
-  const fresh = draftsSection()
+  const fresh = draftsSection(inbox.ids)
   if (old && fresh) old.replaceWith(fresh)
   else if (old) old.remove()
-  else if (fresh) tree.prepend(fresh)
+  // Drafts go below Needs you and Working, above the projects.
+  else if (fresh) tree.insertBefore(fresh, tree.querySelector(":scope > .proj:not(.inbox)"))
 }
 let draftsTimer = 0
 /** One repaint for a burst of keystrokes. */
@@ -448,7 +573,11 @@ async function removeProject(p) {
 function renderMain() {
   const main = $("main")
   const r = S.route
-  if (r.name === "thread" && S.open) return main.replaceChildren(...threadView(S.open))
+  if (r.name === "thread" && S.open) {
+    main.replaceChildren(...threadView(S.open))
+    if (S.jump) { const id = S.jump; S.jump = null; requestAnimationFrame(() => jumpTo(id)) }
+    return
+  }
   // Off a thread, its Git panel goes (and stops looking).
   if (gitPanel) { clearInterval(gitPanel.timer); gitPanel = null }
   if (r.name === "evolution") return main.replaceChildren(evolutionView())
@@ -483,7 +612,7 @@ narrow.addEventListener("change", paintToggle)
 paintToggle()
 // Narrow: a tap on a thread puts the sidebar away, the one already open too (that tap changes no route).
 $("tree").addEventListener("click", (e) => { if (narrow.matches && !e.defaultPrevented && e.target.closest("a[href]")) closeSide() })
-$("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide() })
+$("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide(); searchSoon() })
 $("search").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; S.query = ""; renderSide() } })
 
 // ---------- touch: the app fits what's visible above the keyboard ----------
@@ -1090,10 +1219,16 @@ const IDEAS = [
 let ideaKind = load("ideaKind", "Explore")
 const icon = (paths, cls = "") => el("span", { class: `ico ${cls}`, "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>` })
 
+/**
+ * In a header row that drags the window, the spot under the fixed sidebar toggle stays clickable. It has to be
+ * inside the row: Electron takes a no-drag box only from within a drag box, never from a box laid over it.
+ */
+const toggleSpot = () => el("span", { class: "toggle-spot", "aria-hidden": "true" })
+
 function startView(project) {
   if (!project) {
     return el("div", { class: "main-col" },
-      el("div", { class: "bar" }),
+      el("div", { class: "bar" }, toggleSpot()),
       el("div", { class: "start" }, el("div", { class: "start-inner" },
         el("h1", { text: "Add a project to start" }),
         el("p", { class: "lede", text: "A project is a folder on this machine. Threads in it can read, edit and run things there." }),
@@ -1124,6 +1259,7 @@ function startView(project) {
     controls: [models.node],
     tools: [branch.node],
     draftKey: `new:${project.id}`,
+    files: () => api("GET", `projects/${project.id}/files`),
     onSend: async (text) => {
       const projectId = project.id
       const { provider, model, effort, access } = models.value()
@@ -1136,7 +1272,7 @@ function startView(project) {
   })
   const readyFor = (p) => {
     box.setReady(status(p)?.available === true,
-      status(p)?.available ? `Ask ${providerLabel(p)} to do something in ${project.name}…` : `${providerLabel(p)} is turned off in Settings`)
+      status(p)?.available ? `Ask ${providerLabel(p)} to do something in ${project.name}. Type @ to point at a file.` : `${providerLabel(p)} is turned off in Settings`)
     box.setAttach(status(p)?.tools !== false, `${providerLabel(p)} can't open files`)
   }
   readyFor(first)
@@ -1155,7 +1291,7 @@ function startView(project) {
   }
   paintIdeas()
   return el("div", { class: "main-col" },
-    el("div", { class: "bar bar-quiet" }, el("div", { class: "title-wrap" })),
+    el("div", { class: "bar bar-quiet" }, toggleSpot(), el("div", { class: "title-wrap" })),
     el("div", { class: "start" }, el("div", { class: "start-inner" },
       el("h1", {}, "What should we do in ", el("em", { text: project.name }), "?"),
       el("p", { class: "lede", text: ready
@@ -1183,20 +1319,38 @@ function attChip(tag, { name, mime, src, attrs = {} }) {
     isRaster(mime) && src ? el("img", { class: "att-thumb", src, alt: "" }) : icon(FILE_PATHS, "att-icon"),
     el("span", { class: "att-name", text: name }))
 }
+/** Words with each @path in them (a file picked with @) as the chip the composer showed: its name, the path on hover. */
+function mentions(text) {
+  const out = []
+  let last = 0
+  for (const m of text.matchAll(/(^|\s)@([\w.-]+(?:[/\\][\w.-]+)*\.\w+)(?=\s|$|[,;:!?)])/g)) {
+    const at = m.index + m[1].length
+    if (at > last) out.push(text.slice(last, at))
+    const path = m[2]
+    out.push(el("span", { class: "mention", title: path }, el("span", { class: "mention-at", text: "@" }), path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1)))
+    last = at + 1 + path.length
+  }
+  if (last < text.length) out.push(text.slice(last))
+  return out
+}
 /** A sent message: its words, with each attached file as a chip where it was put. */
 function userNodes(item) {
   const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
   const out = []
   let last = 0
   for (const m of item.text.matchAll(ATT)) {
-    if (m.index > last) out.push(item.text.slice(last, m.index))
+    if (m.index > last) out.push(...mentions(item.text.slice(last, m.index)))
     const a = known.get(m[1])
-    out.push(a
-      ? attChip("a", { name: a.name, mime: a.mime, src: fileUrl(a.id), attrs: { href: fileUrl(a.id), target: "_blank", rel: "noopener", title: `${a.name} · ${bytes(a.size)}` } })
+    // A picture shows as itself, big enough to see what it is; any other file as a chip.
+    out.push(a && isRaster(a.mime)
+      ? el("a", { class: "att-pic", href: fileUrl(a.id), target: "_blank", rel: "noopener", title: `${a.name} · ${bytes(a.size)}` },
+        el("img", { src: fileUrl(a.id), alt: a.name }), el("span", { class: "att-pic-name", text: a.name }))
+      : a
+      ? attChip("a",{ name: a.name, mime: a.mime, src: fileUrl(a.id), attrs: { href: fileUrl(a.id), target: "_blank", rel: "noopener", title: `${a.name} · ${bytes(a.size)}` } })
       : el("span", { class: "att gone", text: "a file" }))
     last = m.index + m[0].length
   }
-  if (last < item.text.length) out.push(item.text.slice(last))
+  if (last < item.text.length) out.push(...mentions(item.text.slice(last)))
   return out
 }
 
@@ -1401,6 +1555,8 @@ function serialize(root) {
       if (c.nodeType === Node.TEXT_NODE) { out += c.nodeValue.replace(/​/g, ""); continue }
       if (c.nodeType !== Node.ELEMENT_NODE) continue
       if (c.classList.contains("att")) { if (c.dataset.att) out += `{{att:${c.dataset.att}}}`; continue }
+      // A file picked with @ goes as its path, the way Claude Code takes one.
+      if (c.classList.contains("mention")) { out += `@${c.dataset.path}`; continue }
       if (c.tagName === "BR") { out += "\n"; continue }
       // A block the browser made for a new line starts on one.
       if (/^(DIV|P|LI)$/.test(c.tagName) && out && !out.endsWith("\n")) out += "\n"
@@ -1436,7 +1592,119 @@ function discardDraft(key) {
  * it lands as a chip where the caret was. Each file uploads as it lands;
  * Send waits until they all have.
  */
-function composer({ onSend, onStop, controls = [], tools = [], running = false, disabled = false, draftKey = "" }) {
+/** How well a file's path matches what was typed after @: its name first, then anywhere in its path; -1 if not at all. */
+function fileScore(path, q) {
+  if (!q) return 1 / (1 + path.length)
+  const p = path.toLowerCase()
+  const base = p.slice(p.lastIndexOf("/") + 1)
+  const s = base.startsWith(q) ? 3 : base.includes(q) ? 2 : p.includes(q) ? 1 : -1
+  return s < 0 ? -1 : s + 1 / (1 + path.length)
+}
+
+/**
+ * The composer's menu for @ (a file in the project, put in as `@path`) and / (one of `commands`, at the
+ * start of the box). Arrows move, Enter or Tab picks, Esc closes.
+ */
+function mentionMenu(input, { files, commands = [] }) {
+  const pop = el("div", { class: "mention-pop", role: "listbox", hidden: true })
+  pop.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
+  let items = [], at = 0, match = null, list = null, asked = 0
+  /** zero's own commands, then the provider session's (a function: those arrive once a turn has started). */
+  const cmdList = () => typeof commands === "function" ? commands() : commands
+  const close = () => { pop.hidden = true; items = []; match = null }
+  /** What's typed just before the caret: an @word anywhere, or a /word that starts the box. */
+  const typed = () => {
+    const s = getSelection()
+    if (!s.rangeCount || !s.isCollapsed || !input.contains(s.anchorNode) || s.anchorNode.nodeType !== Node.TEXT_NODE) return null
+    const node = s.anchorNode, end = s.anchorOffset, before = node.nodeValue.slice(0, end)
+    const mention = files && /(?:^|\s)@([^\s@]*)$/.exec(before)
+    if (mention) return { kind: "file", node, start: end - mention[1].length - 1, end, q: mention[1].toLowerCase() }
+    const slash = cmdList().length && input.firstChild === node && /^\/([\w:.-]*)$/.exec(before)
+    if (slash) return { kind: "command", node, start: 0, end, q: slash[1].toLowerCase() }
+    return null
+  }
+  const paint = () => {
+    pop.replaceChildren(...items.map((it, i) => {
+      const b = el("button", { class: `mention-item${i === at ? " on" : ""}`, type: "button", role: "option", "aria-selected": String(i === at), tabindex: "-1", onclick: () => pick(i) }, ...it.view)
+      b.addEventListener("mousemove", () => { if (at !== i) { at = i; paint() } })
+      return b
+    }))
+    if (!items.length) pop.append(el("div", { class: "mention-none", text: match?.kind === "file" ? (list ? "No file matches." : "Looking for files…") : "No command matches." }))
+    pop.hidden = false
+    pop.querySelector(".on")?.scrollIntoView({ block: "nearest" })
+  }
+  const update = async () => {
+    match = typed()
+    if (!match) return close()
+    at = 0
+    if (match.kind === "command") {
+      const q = match.q
+      items = cmdList().filter((c) => (c.when?.() ?? true) && (c.name.startsWith(q) || (q.length > 1 && c.name.includes(q)))).slice(0, 40).map((c) => ({
+        value: c, view: [el("span", { class: "mention-main", text: `/${c.name}` }), c.args ? el("span", { class: "mention-args", text: c.args }) : null,
+          el("span", { class: "mention-sub", text: c.desc }), c.from ? el("span", { class: "mention-from", text: c.from }) : null]
+      }))
+      return paint()
+    }
+    const q = match.q, mine = ++asked
+    if (!list) {
+      items = []
+      paint()
+      try { list = await files() } catch { list = { files: [] } }
+      if (mine !== asked || !match) return
+    }
+    items = list.files.map((f) => [f, fileScore(f, q)]).filter(([, s]) => s >= 0).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([f]) => {
+      const cut = f.lastIndexOf("/")
+      return { value: f, view: [el("span", { class: "mention-main", text: f.slice(cut + 1) }), cut > 0 ? el("span", { class: "mention-sub", text: f.slice(0, cut) }) : null] }
+    })
+    paint()
+  }
+  /** Put the pick in place of what was typed: a file as `@path `; a command runs, or is put in to add words to. */
+  const pick = (i) => {
+    const it = items[i], m = match
+    if (!it || !m) return
+    const r = document.createRange()
+    r.setStart(m.node, m.start)
+    r.setEnd(m.node, m.end)
+    const s = getSelection()
+    s.removeAllRanges()
+    s.addRange(r)
+    close()
+    if (m.kind === "file") {
+      // The file goes in as a chip: its name, with the whole path on hover; it's sent as @path.
+      const cut = it.value.lastIndexOf("/")
+      const chip = el("span", { class: "mention", contenteditable: "false", "data-path": it.value, title: it.value }, el("span", { class: "mention-at", text: "@" }), it.value.slice(cut + 1))
+      const space = document.createTextNode(" ")
+      r.deleteContents()
+      r.insertNode(space)
+      r.insertNode(chip)
+      const after = document.createRange()
+      after.setStart(space, 1)
+      after.collapse(true)
+      s.removeAllRanges()
+      s.addRange(after)
+      input.dispatchEvent(new Event("input"))
+      return
+    }
+    if (it.value.run) { document.execCommand("delete"); return void it.value.run() }
+    document.execCommand("insertText", false, `/${it.value.name} `)
+  }
+  /** Keys while the menu is open; true when the key was its. */
+  const key = (e) => {
+    if (pop.hidden) return false
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (items.length) { at = (at + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length; paint() }
+    } else if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey && items.length) pick(at)
+    else if (e.key === "Escape") close()
+    else return false
+    e.preventDefault()
+    e.stopPropagation()
+    return true
+  }
+  input.addEventListener("blur", close)
+  return { pop, update, key, close }
+}
+
+function composer({ onSend, onStop, controls = [], tools = [], running = false, disabled = false, draftKey = "", files = null, commands = [] }) {
   const input = el("div", { class: "input empty", contenteditable: disabled ? "false" : "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message", "data-placeholder": "" })
   // What was written here before going elsewhere comes back, chips and all.
   const kept = draftKey && drafts.get(draftKey)?.nodes
@@ -1591,8 +1859,11 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     sync()
     return true
   }
-  input.addEventListener("input", () => { if (!recalling) recalled = -1; sync() })
+  const menu = mentionMenu(input, { files, commands })
+  input.addEventListener("input", () => { if (!recalling) recalled = -1; sync(); menu.update() })
+  input.addEventListener("click", () => menu.update())
   input.addEventListener("keydown", (e) => {
+    if (menu.key(e)) return
     // Shift+Enter is left to the browser: it breaks the line. So is Enter on a phone's keyboard,
     // where a message often runs to more than a line and Send is a thumb away.
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst.matches) { e.preventDefault(); enter(); return }
@@ -1636,12 +1907,14 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   send.addEventListener("mousedown", (e) => e.preventDefault())
   send.addEventListener("click", submit)
   // Attach on the left; the model picker sits on the right, beside Send.
-  node.append(input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach, tools), hint, el("div", { class: "composer-end" }, controls, send)), picker)
+  node.append(menu.pop, input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach, tools), hint, el("div", { class: "composer-end" }, controls, send)), picker)
   sync()
-  queueMicrotask(() => {
+  // Focus once the view is on screen, without scrolling: focusing while it's still being built laid the whole
+  // thread out an extra time (a long thread opened ~140ms slower for it).
+  requestAnimationFrame(() => {
     // On a phone, focus would put the keyboard over the thread just opened: a tap on the box asks for it.
-    if (disabled || touchFirst.matches) return
-    input.focus()
+    if (disabled || touchFirst.matches || !input.isConnected) return
+    input.focus({ preventScroll: true })
     // Back to a draft: the caret goes at its end, where you left off.
     if (kept) { const r = document.createRange(); r.selectNodeContents(input); r.collapse(false); caretTo(r) }
   })
@@ -1650,6 +1923,8 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     setBusy: (b) => { busy = b; paint() },
     /** Whether the thread's provider can take a message now, and what the empty box says. */
     setReady: (ready, text) => {
+      // Called on every change of the thread: touching contentEditable, even to what it is, costs a style pass.
+      if (disabled === !ready && input.dataset.placeholder === text) return
       disabled = !ready
       input.contentEditable = ready ? "true" : "false"
       input.dataset.placeholder = text
@@ -1699,7 +1974,8 @@ function threadView(t) {
     onAccess: (value) => api("PATCH", `threads/${t.id}`, { access: value }).catch((e) => { models.setAccess(t.access); fail(e) })
   })
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
-  const working = el("div", { class: "working", hidden: true }, el("i"), el("i"), el("i"), el("span", { text: "Working" }))
+  const working = el("div", { class: "working", hidden: true, role: "status" }, el("i"), el("i"), el("i"), el("span", { text: "Working" }),
+    el("span", { class: "working-time" }))
   const scroll = el("div", { class: "scroll" }, list)
   // Compact: shown when the context is filling. On, the next message waits while the session compacts first.
   const compact = el("button", { class: "pill-btn compact-toggle", type: "button", role: "switch", onclick: () => {
@@ -1709,7 +1985,7 @@ function threadView(t) {
   // The thread's branch: switch it, or move the thread to a new worktree from a base you pick.
   const branched = (meta, words) => {
     Object.assign(S.open ?? {}, meta)
-    if (!("cwd" in meta) && S.open) delete S.open.cwd
+    for (const k of ["cwd", "workTree", "pr"]) if (!(k in meta) && S.open) delete S.open[k]
     toast(words)
     if (gitPanel?.threadId === t.id) loadGit()
   }
@@ -1727,27 +2003,68 @@ function threadView(t) {
     },
     onLeave: async () => branched(await api("POST", `threads/${t.id}/worktree`, { leave: true }), "This thread works in the project folder again.")
   })
+  // How full the context is, and Claude's usage limits when one is getting close: a ring, words on hover.
+  const meter = el("span", { class: "meter", role: "img", tabindex: "0", hidden: true },
+    el("span", { class: "meter-ring", "aria-hidden": "true" }), el("span", { class: "meter-text" }))
   const box = composer({
     running: t.status === "running",
-    controls: [compact, models.node],
+    controls: [meter, compact, models.node],
     tools: [branch.node],
     draftKey: `t:${t.id}`,
+    files: () => api("GET", `threads/${t.id}/files`),
+    // What / offers: zero's own actions, the provider's /compact when its session takes it, then the
+    // session's own commands (the person's, the project's, skills, a few of Claude Code's) once a turn has told them.
+    commands: () => [
+      { name: "compact", args: "what to keep", desc: "Summarize the thread so far to free up context", when: () => status(S.open?.provider)?.compaction === "manual" && !!S.open?.resume },
+      { name: "git", desc: "Show or hide the Git panel", run: () => setGitOpen(!gitOpenNow()) },
+      { name: "rename", desc: "Rename this thread", run: () => { feed?.title.focus(); feed?.title.select() } },
+      ...(project ? [{ name: "new", desc: `Start a new thread in ${project.name}`, run: () => go(`#/new/${project.id}`) }] : []),
+      ...(S.commands.get(t.id) ?? []).map((c) => ({ name: c.name, args: c.hint, desc: c.description, from: providerLabel(t.provider) }))
+    ],
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
   const queued = el("div", { class: "queued", hidden: true })
   const links = linksNode(t)
-  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact, branch, links }
+  // The turns above the ones drawn: a button for them, which also loads them as it scrolls into view.
+  const earlier = el("button", { class: "feed-earlier", type: "button", onclick: () => showEarlier() }, el("span"))
+  feed?.io?.disconnect()
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact, meter, branch, links, shown: TURNS_SHOWN, hidden: 0, earlier }
+  feed.io = new IntersectionObserver((seen) => { if (seen.some((e) => e.isIntersecting) && feed?.earlier === earlier) showEarlier() }, { root: scroll, rootMargin: "600px 0px 0px 0px" })
+
   paintReady(t)
-  scroll.addEventListener("scroll", () => { feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60 })
+  // Scrolled up, a button brings you back to the latest; it says so when something new came in meanwhile.
+  const jump = el("button", { class: "jump-latest", type: "button", hidden: true, title: "Jump to the latest", "aria-label": "Jump to the latest",
+    html: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg><span>New</span>',
+    onclick: () => { feed.stick = true; scroll.scrollTo({ top: scroll.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }) } })
+  feed.jump = jump
+  // A scroll is yours only right after a wheel, touch, key or press in the thread: one that follows a resize
+  // or a reflow (the window narrowed, an image loaded) keeps a thread that was following at its end.
+  let touched = 0
+  for (const type of ["wheel", "touchmove", "keydown", "pointerdown"]) scroll.addEventListener(type, () => { touched = Date.now() }, { passive: true })
+  scroll.addEventListener("scroll", () => {
+    const atEnd = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60
+    if (!atEnd && feed.stick && Date.now() - touched > 1500) { scroll.scrollTop = scroll.scrollHeight; return }
+    feed.stick = atEnd
+    jump.hidden = feed.stick
+    if (feed.stick) jump.classList.remove("fresh")
+  })
   renderFeed()
   paintWorking()
-  requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight })
+  // At the end first; only then does scrolling up to the earlier entries load them (at the top, before
+  // that first scroll, the button was in view and drew a second batch at once).
+  requestAnimationFrame(() => {
+    scroll.scrollTop = scroll.scrollHeight
+    requestAnimationFrame(() => { if (feed?.earlier === earlier) feed.io.observe(earlier) })
+  })
   const git = makeGitPanel(t)
+  // The session's slash commands, for / (empty until a turn of it has started).
+  if (!S.commands.has(t.id)) api("GET", `threads/${t.id}/commands`).then((list) => { if (list.length) S.commands.set(t.id, list) }, () => {})
   return [
     el("div", { class: "thread-cols" },
       el("div", { class: "main-col" },
         el("div", { class: "bar" },
+          toggleSpot(),
           // One line: the project (click it for a new thread there), a middle dot, the thread's title (editable in place).
           el("div", { class: "title-wrap title-line" },
             project
@@ -1755,9 +2072,12 @@ function threadView(t) {
               : el("span", { class: "title-project gone", text: "removed project" }),
             el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
             title,
-            links)),
+            links),
+          DESKTOP ? el("div", { class: "bar-tools" },
+            el("button", { class: "icon-btn bar-tool", type: "button", title: "Open this thread's folder in VS Code", "aria-label": "Open in VS Code", html: CODE_ICON, onclick: () => openOut(vscodeUrl(threadDir(t, project))) }),
+            el("button", { class: "icon-btn bar-tool", type: "button", title: "Show this thread's folder", "aria-label": "Show folder", html: FOLDER_ICON, onclick: () => openOut(folderUrl(threadDir(t, project))) })) : null),
         scroll,
-        el("div", { class: "composer-wrap" }, box.node)),
+        el("div", { class: "composer-wrap" }, jump, box.node)),
       git.node,
       git.toggle)
   ]
@@ -1766,7 +2086,7 @@ function threadView(t) {
 /** The composer takes messages only when the thread's provider is available; switching provider can change that. */
 function paintReady(t) {
   const ready = status(t.provider)?.available === true
-  feed.composer.setReady(ready, ready ? "Reply…" : `${providerLabel(t.provider)} is turned off in Settings`)
+  feed.composer.setReady(ready, ready ? "Reply, or type @ for a file, / for a command" : `${providerLabel(t.provider)} is turned off in Settings`)
   feed.composer.setAttach(status(t.provider)?.tools !== false, `${providerLabel(t.provider)} can't open files`)
   paintCompact(t)
 }
@@ -1784,7 +2104,48 @@ const idleLong = (t) => t?.status !== "running" && idleMs(t) >= IDLE_COMPACT_MS
 /** Compact shows only for a provider that takes `/compact`, in a session whose context is filling or that has sat idle an hour. */
 const compactShown = (t) => !!t && status(t.provider)?.compaction === "manual" && !!t.resume && (needsCompaction(t) || idleLong(t))
 const compactOn = (t) => compactShown(t) && !S.compactOff.has(t.id)
+/** Names for Claude's usage limits (rate_limit_event's rateLimitType). */
+const LIMIT_NAMES = { five_hour: "5-hour limit", seven_day: "Weekly limit", seven_day_opus: "Weekly Opus limit", seven_day_sonnet: "Weekly Sonnet limit", overage: "Extra usage" }
+/** A limit worth showing beside the ring: refused, warned about, or past three quarters. */
+const limitPressing = (l) => l.status === "rejected" || l.status === "allowed_warning" || (l.used ?? 0) >= 0.75
+const tokensK = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
+const resetWords = (iso) => {
+  if (!iso) return ""
+  const d = new Date(iso)
+  const today = d.toDateString() === new Date().toDateString()
+  return `resets ${today ? "" : d.toLocaleDateString([], { weekday: "short" }) + " "}${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+}
+/** The composer's meter: the context's fill as a ring (and %), and the most pressing usage limit as words, for this thread. */
+function paintMeter() {
+  const m = feed?.meter
+  const t = S.open
+  if (!m || !t) return
+  const ctx = t.context && t.context.limit > 0 ? t.context : null
+  const share = ctx ? Math.min(1, ctx.used / ctx.limit) : 0
+  const limits = t.provider === "claude" ? (S.limits ?? []).filter((l) => l.used !== null || l.status !== "allowed") : []
+  const pressing = limits.filter(limitPressing).sort((a, b) => (b.used ?? 1) - (a.used ?? 1))[0]
+  m.hidden = !ctx && !pressing
+  if (m.hidden) return
+  const pct = Math.round(share * 100)
+  m.querySelector(".meter-ring").style.setProperty("--fill", `${share * 360}deg`)
+  m.classList.toggle("warm", share >= COMPACT_SOON)
+  m.classList.toggle("limited", !!pressing)
+  const limitShort = pressing ? (pressing.status === "rejected" ? `${LIMIT_NAMES[pressing.kind] ?? "Limit"} reached` : `${LIMIT_NAMES[pressing.kind] ?? "Limit"} ${Math.round((pressing.used ?? 0) * 100)}%`) : ""
+  m.querySelector(".meter-text").textContent = [ctx ? `${pct}%` : "", limitShort].filter(Boolean).join(" · ")
+  const lines = [
+    ctx ? `Context: ${tokensK(ctx.used)} of ${tokensK(ctx.limit)} tokens (${pct}%)` : "",
+    ...limits.map((l) => {
+      const name = LIMIT_NAMES[l.kind] ?? l.kind
+      const used = l.status === "rejected" ? "reached" : l.used !== null ? `${Math.round(l.used * 100)}% used` : l.status === "allowed_warning" ? "getting close" : "fine"
+      return [`${name}: ${used}`, resetWords(l.resetsAt)].filter(Boolean).join(", ")
+    })
+  ].filter(Boolean)
+  m.title = lines.join("\n")
+  m.setAttribute("aria-label", lines.join(". "))
+}
+
 function paintCompact(t) {
+  paintMeter()
   if (!feed?.compact || !t) return
   const shown = compactShown(t)
   feed.compact.hidden = !shown
@@ -1809,6 +2170,10 @@ function paintWorking() {
   // While a compaction runs, the working line says so (its card in the feed shows the detail).
   const compacting = running && S.open.items.some((i) => i.kind === "compact" && i.state === "running")
   feed.working.querySelector("span").textContent = compacting ? "Compacting context" : "Working"
+  // How long this turn has run, from your message (the call it's on shows just above).
+  const since = S.open.items.findLast((i) => i.kind === "user")?.at
+  feed.working.dataset.since = running && since ? since : ""
+  tickWorking()
   // A message waiting for the session to compact first.
   feed.queued.hidden = !S.open.queued
   if (S.open.queued && feed.queued.dataset.text !== S.open.queued) {
@@ -1821,7 +2186,27 @@ function paintWorking() {
   feed.branch?.setBusy(running)
   paintCompact(S.open)
 }
-const follow = () => { if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight }
+/** The working line's clock: m:ss since the turn began, each second while it shows. */
+function tickWorking() {
+  const w = feed?.working
+  if (!w) return
+  const t = w.querySelector(".working-time")
+  t.textContent = w.dataset.since && !w.hidden ? elapsed(w.dataset.since) : ""
+}
+setInterval(tickWorking, 1000)
+/**
+ * Keep a following thread at its end, once a frame: reading scrollHeight lays the whole thread out, and
+ * doing it on every event of a long thread was most of the time an event took.
+ */
+let following = 0
+const follow = () => {
+  if (following) return
+  following = requestAnimationFrame(() => {
+    following = 0
+    if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight
+    else feed?.jump?.classList.add("fresh")
+  })
+}
 
 /** An item's node, rendered again only when the item itself was replaced. */
 function nodeFor(item) {
@@ -1854,7 +2239,7 @@ const MEMORY_COMMAND = /^(?:cd\s+("[^"]*"|\S+)\s*&&\s*)?(?:(?:bash|sh|pwsh|power
  * every call in it, and open a call to see its output.
  */
 function renderFeed() {
-  const { finals, metaFor, merged } = turnEnds()
+  const { finals, metaFor, merged, changes } = turnEnds()
   const top = []
   let run = null
   for (const item of S.open.items) {
@@ -1868,20 +2253,35 @@ function renderFeed() {
   const groups = new Map()
   // Each turn (a message of yours and everything after it, up to your next) is one block, so your
   // message can stick to the top while its turn scrolls by, until the next turn's pushes it away.
-  const turns = []
+  const all = []
   for (const x of top) {
-    const node = x.items ? toolGroup(x, groups) : nodeFor(x)
-    if (!turns.length || (!x.items && x.kind === "user")) turns.push({ key: x.items ? x.key : x.id, nodes: [] })
-    turns.at(-1).nodes.push(node)
+    if (!all.length || (!x.items && x.kind === "user")) all.push({ key: x.items ? x.key : x.id, entries: [] })
+    all.at(-1).entries.push(x)
   }
-  feed.groups = groups
-  const sections = turns.map(({ key, nodes }) => {
+  // Only the latest entries (messages, runs of tool calls) are drawn: a long thread opened slowly drawing
+  // all of it. Earlier ones come in as you scroll up to them (or ask), a batch at a time; the oldest turn
+  // drawn may start partway through.
+  let budget = feed.shown, hidden = 0
+  const drawn = []
+  for (let i = all.length - 1; i >= 0; i--) {
+    const { key, entries } = all[i]
+    if (budget <= 0) { hidden += entries.length; continue }
+    const keep = entries.length <= budget ? entries : entries.slice(entries.length - budget)
+    hidden += entries.length - keep.length
+    budget -= keep.length
+    drawn.unshift({ key, entries: keep })
+  }
+  const sections = drawn.map(({ key, entries }) => {
+    const nodes = entries.map((x) => x.items ? toolGroup(x, groups) : nodeFor(x))
     let section = feed.turns.get(key)
     if (!section) feed.turns.set(key, (section = el("section", { class: "turn" })))
     reconcile(section, nodes)
     return section
   })
-  reconcile(feed.list, [...sections, feed.queued, feed.working])
+  feed.groups = groups
+  feed.hidden = hidden
+  if (hidden) feed.earlier.querySelector("span").textContent = `Show earlier (${hidden} more)`
+  reconcile(feed.list, [...(hidden ? [feed.earlier] : []), ...sections, feed.queued, feed.working])
   // Only a turn's last agent response (its answer, not the narration between tool calls) has the
   // action row, and the turn's details (model, time, cost, tokens) sit in that row beside Copy.
   for (const [id, { node }] of feed.cache) {
@@ -1890,6 +2290,7 @@ function renderFeed() {
     const turn = metaFor.get(id)
     const slot = node.querySelector(".msg-meta")
     if (slot.dataset.turn !== (turn?.id ?? "")) { slot.dataset.turn = turn?.id ?? ""; slot.replaceChildren(...(turn ? turnMeta(turn) : [])) }
+    paintTurnFiles(node, changes.get(id))
   }
 }
 /**
@@ -1898,18 +2299,92 @@ function renderFeed() {
  * A turn that failed keeps its own error line; one with no response keeps its details line.
  */
 function turnEnds() {
-  const finals = new Set(), metaFor = new Map(), merged = new Set()
+  const finals = new Set(), metaFor = new Map(), merged = new Set(), changes = new Map()
   let last = null
+  // The files the turn's edits changed, by path, with their lines added and removed.
+  let edited = new Map()
   for (const item of S.open.items) {
     if (item.kind === "assistant") last = item.id
-    else if (item.kind === "user" || item.kind === "turn") {
+    else if (item.kind === "tool" && item.diff && item.status !== "failed") {
+      const c = countsOf(item), was = edited.get(item.detail) ?? { add: 0, del: 0 }
+      edited.set(item.detail, { add: was.add + c.add, del: was.del + c.del })
+    } else if (item.kind === "user" || item.kind === "turn") {
       if (last) finals.add(last)
       if (item.kind === "turn" && last && item.outcome !== "failed") { metaFor.set(last, item); merged.add(item.id) }
+      // Only a turn that has ended lists its changes: while it runs, its files are still changing.
+      if (item.kind === "turn" && last && edited.size) changes.set(last, edited)
+      if (item.kind === "user" || item.kind === "turn") edited = new Map()
       last = null
     }
   }
   if (last) finals.add(last)
-  return { finals, metaFor, merged }
+  return { finals, metaFor, merged, changes }
+}
+/**
+ * Under a turn's answer, what its edits changed: "Changed 3 files +40 −12", each file with its own
+ * counts, and a way to the Git panel to review and commit them. Repainted only when the list changes.
+ */
+function paintTurnFiles(node, edited) {
+  const files = edited ? [...edited] : []
+  const sig = JSON.stringify(files)
+  let box = node.querySelector(".turn-files")
+  if ((box?.dataset.sig ?? "[]") === sig) return
+  if (!files.length) return void box?.remove()
+  if (!box) { box = el("div", { class: "turn-files" }); node.querySelector(".msg-actions").before(box) }
+  box.dataset.sig = sig
+  const total = files.reduce((s, [, c]) => ({ add: s.add + c.add, del: s.del + c.del }), { add: 0, del: 0 })
+  const SHOWN = 6
+  // In the desktop app a file opens in VS Code, at the thread's folder for a path given relative to it.
+  const dir = S.open ? threadDir(S.open, S.projects.find((p) => p.id === S.open.projectId)) : ""
+  const row = ([path, c]) => el("li", { class: "turn-file" },
+    DESKTOP
+      ? el("button", { class: "turn-file-path", type: "button", text: rel(path), title: `Open ${path} in VS Code`, onclick: () => openOut(vscodeUrl(absPath(path, dir))) })
+      : el("span", { class: "turn-file-path", text: rel(path), title: path }),
+    diffStat(c))
+  const rest = files.length - SHOWN
+  box.replaceChildren(
+    el("div", { class: "turn-files-head" },
+      el("span", { class: "turn-files-title", text: `Changed ${files.length} file${files.length === 1 ? "" : "s"}` }),
+      diffStat(total),
+      el("button", { class: "btn btn-quiet btn-xs turn-files-review", type: "button", title: "Open the Git panel (Alt+G) to see the diffs and commit", onclick: () => { if (gitPanel && !gitOpenNow()) setGitOpen(true) } }, "Review in Git")),
+    el("ul", { class: "turn-file-list" }, ...files.slice(0, SHOWN).map(row),
+      rest > 0 ? el("li", { class: "turn-file more" }, el("details", {}, el("summary", { text: `${rest} more` }), el("ul", { class: "turn-file-list" }, ...files.slice(SHOWN).map(row)))) : null))
+}
+/** Bring an item of the open thread into view, drawing earlier entries until it's there, and mark it a moment. */
+function jumpTo(itemId) {
+  if (!feed || !S.open?.items.some((i) => i.id === itemId)) return
+  for (let n = 0; n < 50 && !feed.cache.get(itemId)?.node.isConnected && feed.hidden; n++) {
+    feed.shown += TURNS_SHOWN
+    renderFeed()
+  }
+  const node = feed.cache.get(itemId)?.node
+  if (!node?.isConnected) return
+  feed.stick = false
+  node.scrollIntoView({ block: "center" })
+  node.classList.add("jumped")
+  setTimeout(() => node.classList.remove("jumped"), 1600)
+}
+/** How many of a thread's latest entries (messages, runs of tool calls) are drawn when it opens, and how many more each time you scroll up to the rest. */
+const TURNS_SHOWN = 60
+/** Draw the next batch of earlier turns, keeping what you're looking at where it is. */
+function showEarlier() {
+  if (!feed?.hidden) return
+  const s = feed.scroll
+  const from = s.scrollHeight - s.scrollTop
+  feed.shown += TURNS_SHOWN
+  renderFeed()
+  s.scrollTop = s.scrollHeight - from
+}
+/** On a failed turn: send your last message again (its files too), as a new message. Only on the thread's last turn. */
+function retryButton(item) {
+  const t = S.open
+  if (!t || t.items.at(-1)?.id !== item.id) return null
+  const last = t.items.findLast((i) => i.kind === "user")
+  if (!last) return null
+  return el("button", { class: "btn btn-quiet btn-xs turn-retry", type: "button", title: "Send your last message again", onclick: (e) => {
+    e.currentTarget.disabled = true
+    api("POST", `threads/${t.id}/messages`, { text: last.text }).catch((err) => { e.currentTarget.disabled = false; fail(err) })
+  } }, "Try again")
 }
 /** A turn's details: Stopped (if it was), the model, how long it took, what it cost, its tokens. */
 function turnMeta(item) {
@@ -1929,7 +2404,10 @@ function toolGroup(run, groups) {
     })
   }
   groups.set(run.key, g)
+  // The same calls as last time (an event elsewhere in the thread): nothing here to draw again.
+  const same = g.items && g.items.length === run.items.length && g.items.every((x, i) => x === run.items[i])
   g.items = run.items
+  if (same) return g.node
   reconcile(g.body, run.items.map(nodeFor))
   paintGroup(g, run.key)
   return g.node
@@ -1949,10 +2427,24 @@ function paintGroup(g, key) {
     el("span", { class: "tool-detail", text: rel(item.detail) }))
   // The reel stays put across repaints, so a call finishing mid-spin doesn't cut the spin short.
   if (!g.reel) g.win = el("span", { class: "reel-window" }, (g.reel = el("span", { class: "reel" })))
-  g.head.replaceChildren(
+  // A run that's over says what it did ("Read 7 files, edited 2"); one still going shows its latest call.
+  const summary = state !== "running" && tools.length > 1 ? toolSummary(tools) : ""
+  const counted = summary ? (failed ? `${failed} failed` : "") : `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`
+  const sum = tools.reduce((s, i) => { if (!i.diff) return s; const c = countsOf(i); return { add: s.add + c.add, del: s.del + c.del, any: true } }, { add: 0, del: 0, any: false })
+  g.head.replaceChildren(...[
     el("span", { class: "tool-state", "aria-label": state }),
     g.win,
-    el("span", { class: "tool-count", text: `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}` }))
+    sum.any ? diffStat(sum) : null,
+    el("span", { class: "tool-count", text: counted })].filter(Boolean))
+  if (summary) {
+    g.spinning?.cancel()
+    g.spinning = null
+    g.shown = `summary:${last.id}`
+    g.reel.replaceChildren(el("span", { class: "reel-line" }, el("span", { class: "tool-summary", text: summary })))
+    g.head.title = summary
+    return
+  }
+  g.head.removeAttribute("title")
   // A new call spins the row like a lottery drum and lands on it; the same call just repaints.
   const was = g.shown === undefined ? undefined : g.items.find((i) => i.id === g.shown)
   const spin = was !== undefined && g.shown !== last.id && !matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -1960,6 +2452,32 @@ function paintGroup(g, key) {
   if (spin) spinReel(g, [was, ...blurs(tools, last), last].map(line))
   else if (!g.spinning) g.reel.replaceChildren(line(last))
   else g.landing = line(last) // lands on the latest text once the spin ends
+}
+/**
+ * What a run of tool calls did, in words: "Read 7 files, edited 2, ran 3 commands". Files are counted once
+ * however often they were read; tools it has no words for are named.
+ */
+function toolSummary(tools) {
+  const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
+  const files = (names) => new Set(tools.filter((t) => names.includes(t.name)).map((t) => t.detail)).size
+  const count = (names) => tools.filter((t) => names.includes(t.name)).length
+  const known = ["Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "PowerShell", "Grep", "Glob", "WebFetch", "WebSearch", "Task", "Agent", "TodoWrite", "BashOutput", "KillShell"]
+  const read = files(["Read"]), edited = files(["Edit", "MultiEdit", "NotebookEdit"]), wrote = files(["Write"])
+  const ran = count(["Bash", "PowerShell"]), searched = count(["Grep", "Glob"]), web = count(["WebFetch", "WebSearch"]), agents = count(["Task", "Agent"])
+  const others = [...new Set(tools.filter((t) => !known.includes(t.name)).map((t) => t.name.replace(/^mcp__[^_]+__/, "").replace(/_/g, " ")))]
+  const parts = [
+    read ? `read ${n(read, "file")}` : "",
+    edited ? `edited ${read ? edited : n(edited, "file")}` : "",
+    wrote ? `wrote ${read || edited ? wrote : n(wrote, "file")}` : "",
+    ran ? `ran ${n(ran, "command")}` : "",
+    searched ? `searched ${searched === 1 ? "once" : `${searched} times`}` : "",
+    web ? `looked up ${n(web, "page")}` : "",
+    agents ? `started ${n(agents, "subagent")}` : "",
+    count(["TodoWrite"]) ? "updated the plan" : "",
+    others.length ? `used ${others.slice(0, 2).join(", ")}${others.length > 2 ? ` and ${others.length - 2} more` : ""}` : ""
+  ].filter(Boolean)
+  const text = parts.join(", ")
+  return text ? text[0].toUpperCase() + text.slice(1) : ""
 }
 /** A few other calls from the run (or the same one again) for the drum to flick past. */
 function blurs(tools, last) {
@@ -2028,15 +2546,28 @@ function renderItem(item) {
     case "tool": {
       if (memoryRead(item)) return memoryCard(item)
       const open = S.expanded.has(item.id)
-      const out = el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
+      // An edit opens to what it changed (and its output only when it failed); any other call to its output.
+      const counts = item.diff ? countsOf(item) : null
+      // A diff is drawn when its card first opens: hundreds of edits' lines in a long thread, drawn up front,
+      // made the page tens of thousands of nodes heavier.
+      const out = item.diff
+        ? el("div", { class: "tool-out tool-diff", inert: !open })
+        : el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
+      const drawDiff = () => {
+        if (!item.diff || out.childElementCount) return
+        out.append(diffView(item.diff), ...(item.status === "failed" && item.output ? [el("pre", { class: "tool-fail", text: item.output })] : []))
+      }
+      if (open) drawDiff()
       const node = el("div", { class: `tool ${item.status}${open ? " open" : ""}` })
       const row = el("button", { class: "tool-row", type: "button", "aria-expanded": String(open), onclick: () => {
         const now = !node.classList.contains("open")
+        if (now) drawDiff()
         node.classList.toggle("open", now)
         out.inert = !now
         row.setAttribute("aria-expanded", String(now))
         now ? S.expanded.add(item.id) : S.expanded.delete(item.id)
-      } }, el("span", { class: "tool-state", "aria-label": item.status }), el("span", { class: "tool-name", text: item.name }), el("span", { class: "tool-detail", text: rel(item.detail) }))
+      } }, el("span", { class: "tool-state", "aria-label": item.status }), el("span", { class: "tool-name", text: item.name }), el("span", { class: "tool-detail", text: rel(item.detail) }),
+        counts ? diffStat(counts) : null)
       node.append(row, out)
       return node
     }
@@ -2055,9 +2586,12 @@ function renderItem(item) {
     }
     case "memory": {
       const label = { recalled: "Recalled from memory", checked: "Memory checked", stored: "Stored in memory", none: "Committed" }[item.action]
-      const head = el("div", { class: "mem-head", title: item.title }, el("span", { class: "mem-label", text: label }), item.commit ? el("code", { text: item.commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: item.title }))
-      // A recall shows what singularity handed the agent, word for word.
-      return el("div", { class: `mem ${item.action}` }, head, item.text ? el("pre", { class: "mem-text", text: item.text }) : null)
+      const parts = [el("span", { class: "mem-label", text: label }), item.commit ? el("code", { text: item.commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: item.title })]
+      if (!item.text) return el("div", { class: `mem ${item.action}` }, el("div", { class: "mem-head", title: item.title }, ...parts))
+      // A recall holds what singularity handed the agent, word for word, as the markdown it is: folded, one line until opened.
+      return el("details", { class: `mem ${item.action}` },
+        el("summary", { class: "mem-head", title: item.title }, ...parts, el("span", { class: "mem-more", "aria-hidden": "true" })),
+        el("div", { class: "mem-text prose" }, mdNodes(item.text)))
     }
     case "compact": return compactCard(item)
     case "link": return linkCard(item)
@@ -2067,7 +2601,7 @@ function renderItem(item) {
         el("span", { class: "mem-label", text: "zero sent it on" }),
         el("span", { class: "mem-title", text: `${providerLabel(S.open?.provider)} stopped after a failed call (${item.reason}) without saying where things stand` })))
     case "turn": {
-      if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
+      if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error, retryButton(item))
       return el("div", { class: "turn-meta" }, turnMeta(item))
     }
   }
@@ -2116,8 +2650,9 @@ function memoryCard(item) {
   const asked = command.replace(/^singularity recall\s*/, "").replace(/^(["'])(.*)\1$/, "$2")
   const label = !recall ? "Agent listed memory" : commit ? "Agent recalled" : "Agent asked memory"
   const title = !recall ? "the changes stored in this repo" : subject ? `${subject} (asked: ${asked})` : `asked: ${asked}`
-  const head = el("div", { class: "mem-head" }, el("span", { class: "mem-label", text: label }), commit ? el("code", { text: commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: title }))
-  return el("div", { class: `mem ${commit ? "recalled" : "checked"}` }, head, el("pre", { class: "mem-text", text: out }))
+  const head = el("summary", { class: "mem-head", title }, el("span", { class: "mem-label", text: label }), commit ? el("code", { text: commit.slice(0, 10) }) : null, el("span", { class: "mem-title", text: title }), el("span", { class: "mem-more", "aria-hidden": "true" }))
+  // Folded to its one line; open, the command's output as it printed it.
+  return el("details", { class: `mem ${commit ? "recalled" : "checked"}` }, head, el("pre", { class: "mem-text", text: out }))
 }
 const verb = (tool) =>({
   Bash: "run a command", Edit: "edit a file", Write: "write a file", MultiEdit: "edit a file", NotebookEdit: "edit a notebook",
@@ -2235,9 +2770,11 @@ const prose = (body) => mdNodes(githubMd(body))
 function makeGitPanel(t) {
   if (gitPanel) clearInterval(gitPanel.timer)
   // One toggle for open and closed, fixed at the window's top right like the left sidebar's: it never moves.
+  // Labelled, not just an icon: "Git", and how many files have changed once it's looked.
   const badge = el("span", { class: "git-badge", hidden: true })
+  const count = el("span", { class: "git-count-chip", hidden: true })
   const toggle = el("button", { class: "icon-btn git-toggle", type: "button", "aria-controls": "git-panel", onclick: () => setGitOpen(!gitOpenNow()),
-    html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BRANCH_PATHS}</svg>` }, badge)
+    html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BRANCH_PATHS}</svg><span class="git-word">Git</span>` }, count, badge)
   const body = el("div", { class: "git-body" }, el("p", { class: "git-empty", text: "Loading…" }))
   const refresh = el("button", { class: "icon-btn git-refresh", type: "button", title: "Refresh", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${REFRESH_PATHS}</svg>`, onclick: () => loadGit() })
   const resize = el("div", { class: "git-resize", role: "separator", "aria-orientation": "vertical", "aria-label": "Resize Git panel", tabindex: "0", title: "Drag to resize · double-click to reset" })
@@ -2250,7 +2787,7 @@ function makeGitPanel(t) {
       refresh),
     body)
   showGit(node, load("gitOpen", false))
-  gitPanel = { node, body, toggle, badge, refresh, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "", folds: new Map() }
+  gitPanel = { node, body, toggle, badge, count, refresh, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "", folds: new Map() }
   setGitWidth(load("gitWidth", GIT.base), false)
   wireGitResize(resize)
   paintGitToggle()
@@ -2333,9 +2870,13 @@ function paintGitToggle() {
     g.badge.dataset.checks = failing ? "failed" : running ? "running" : pr.checks.length ? "passed" : ""
   }
   const branch = d?.repo ? d.branch || "detached HEAD" : S.open?.branch || ""
+  const changed = d?.repo ? d.changes.length : 0
+  g.count.hidden = !changed
+  g.count.textContent = changed > 99 ? "99+" : String(changed)
+  const files = changed ? `${changed} changed file${changed === 1 ? "" : "s"}` : ""
   const label = `${open ? "Hide" : "Show"} Git`
-  g.toggle.setAttribute("aria-label", label)
-  g.toggle.title = [label, branch, pr ? `PR #${pr.number} · ${PR_STATE_LABEL[prState(pr)]}` : ""].filter(Boolean).join("\n")
+  g.toggle.setAttribute("aria-label", [label, files].filter(Boolean).join(", "))
+  g.toggle.title = [`${label} (Alt+G)`, branch, files, pr ? `PR #${pr.number} · ${PR_STATE_LABEL[prState(pr)]}` : ""].filter(Boolean).join("\n")
 }
 
 /** How often auto-pull fetches for the open thread. */
@@ -2485,12 +3026,50 @@ function changeRow(g, c) {
   return row
 }
 
+/** How many lines a diff adds and removes (its "+" and "-" lines, not the file headers). */
+function diffCounts(text) {
+  let add = 0, del = 0
+  for (const l of text.split("\n")) {
+    if (l.startsWith("+") && !l.startsWith("+++")) add++
+    else if (l.startsWith("-") && !l.startsWith("---")) del++
+  }
+  return { add, del }
+}
+/** An item's diff counts, worked out once per item (an item is replaced, not changed, when it updates). */
+const counted = new WeakMap()
+function countsOf(item) {
+  let c = counted.get(item)
+  if (!c || c.diff !== item.diff) counted.set(item, (c = { diff: item.diff, ...diffCounts(item.diff) }))
+  return c
+}
+/** "+12 −3", green and red, for a row. */
+const diffStat = ({ add, del }) => el("span", { class: "diff-stat", "aria-label": `${add} lines added, ${del} removed` },
+  add ? el("b", { class: "d-plus", text: `+${add}` }) : null, del ? el("b", { class: "d-minus", text: `−${del}` }) : null)
+
+// ---------- out to the editor and the file manager (the desktop app only: a phone's would be the wrong machine) ----------
+const DESKTOP = location.protocol === "zero:"
+const CODE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.5 4.5-3.5 3.5 3.5 3.5M10.5 4.5l3.5 3.5-3.5 3.5M9 2.5 7 13.5"/></svg>'
+const FOLDER_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/></svg>'
+/** Where a thread's work is: the worktree its agent moved to, else its worktree, else its project's folder. */
+const threadDir = (t, project) => {
+  const m = S.open?.id === t.id ? S.open : t
+  return m.workTree || m.cwd || project?.path || ""
+}
+const slashes = (p) => p.replace(/\\/g, "/").replace(/^\/+/, "")
+const vscodeUrl = (path) => path ? `vscode://file/${encodeURI(slashes(path))}` : ""
+const folderUrl = (path) => path ? `file:///${encodeURI(slashes(path))}` : ""
+/** A path the agent gave (absolute, or under the thread's folder) as an absolute one. */
+const absPath = (path, dir) => /^([a-zA-Z]:[\\/]|\/)/.test(path) || !dir ? path : `${dir.replace(/[\\/]$/, "")}/${path}`
+const openOut = (url) => { if (url) window.open(url, "_blank") }
+
 /** A unified diff, its lines marked as added, removed or a hunk's header. */
 function diffView(text) {
   const lines = text.split("\n")
   if (lines.at(-1) === "") lines.pop()
   const cut = lines.length > 2000
-  return el("pre", { class: "git-diff" }, ...(cut ? lines.slice(0, 2000) : lines).map((l) => el("span", {
+  // A bare "@@" (an edit's pieces, from a tool card) is a divider, and nothing at the very top.
+  if (lines[0] === "@@") lines.shift()
+  return el("pre", { class: "git-diff" }, ...(cut ? lines.slice(0, 2000) : lines).map((l) => l === "@@" ? el("span", { class: "d-gap", "aria-hidden": "true" }) : el("span", {
     class: l.startsWith("@@") ? "d-hunk" : l.startsWith("+") && !l.startsWith("+++") ? "d-add" : l.startsWith("-") && !l.startsWith("---") ? "d-del" : /^(diff |index |--- |\+\+\+ |new file|deleted file)/.test(l) ? "d-meta" : "",
     text: `${l}\n`
   })), cut ? el("span", { class: "d-meta", text: "… more lines than shown here" }) : null)
@@ -3744,9 +4323,9 @@ function connect() {
       // A turn that just ended may have committed, pushed or opened a PR: the Git panel looks again.
       const ended = S.open.status === "running" && meta.status !== "running"
       // A new branch or folder (the thread moved to a worktree, or back): the chip and Git panel read it again.
-      const moved = S.open.branch !== meta.branch || S.open.cwd !== meta.cwd
+      const moved = S.open.branch !== meta.branch || S.open.cwd !== meta.cwd || S.open.workTree !== meta.workTree
       Object.assign(S.open, meta)
-      if (!("cwd" in meta)) delete S.open.cwd
+      for (const k of ["cwd", "workTree", "pr"]) if (!(k in meta)) delete S.open[k]
       if ((ended || moved) && gitPanel?.threadId === meta.id) loadGit()
       if ((ended || moved) && feed?.branch) feed.branch.refresh()
       if (!("effort" in meta)) delete S.open.effort // cleared: back to the provider's default
@@ -3756,6 +4335,8 @@ function connect() {
         feed.models.setAccess(meta.access)
         paintReady(S.open)
       }
+      if (!("unseen" in meta)) delete S.open.unseen
+      markSeen()
       paintWorking()
     }
     // A thread the open one linked to (started, messaged, waited for) changed: its cards show how it is now.
@@ -3805,6 +4386,8 @@ function connect() {
     if (S.route.name === "home" || S.route.name === "new") renderMain()
   }
   on["settings"] = (data) => { S.settings = data }
+  on["limits"] = (data) => { S.limits = data; paintMeter() }
+  on["commands"] = ({ threadId, commands }) => { S.commands.set(threadId, commands) }
   // Claude Code said which models it offers: the menus have them from the next time they open.
   on["providers"] = (data) => {
     S.providers = data
@@ -3868,12 +4451,14 @@ function openPalette() {
   const d = $("palette")
   if (d.open) return
   const entries = [
+    { label: "New thread", hint: chord("Alt N"), run: () => newThread() },
     ...S.threads.map((t) => ({ label: t.title, hint: S.projects.find((p) => p.id === t.projectId)?.name ?? "", run: () => go(`#/t/${t.id}`) })),
     ...S.projects.map((p) => ({ label: `New thread in ${p.name}`, hint: p.path, run: () => go(`#/new/${p.id}`) })),
     { label: "Evolution", hint: "zero's lineage and runs", run: () => go("#/evolution") },
     { label: "Settings", hint: "models, access, memory", run: () => openSettings() },
     ...(gitPanel ? [{ label: gitOpenNow() ? "Hide the Git panel" : "Show the Git panel", hint: "Alt+G", run: () => setGitOpen(!gitOpenNow()) }] : []),
-    { label: "Add a project", hint: "a folder on this machine", run: () => addProject() }
+    { label: "Add a project", hint: "a folder on this machine", run: () => addProject() },
+    { label: "Keyboard shortcuts", hint: "?", run: () => openKeys() }
   ]
   const input = el("input", { type: "search", placeholder: "Go to a thread, project or place…", "aria-label": "Search", autocomplete: "off", spellcheck: "false" })
   const list = el("ul", { class: "palette-list", role: "listbox" })
@@ -3913,8 +4498,7 @@ document.addEventListener("keydown", (e) => {
   const typing = e.target.isContentEditable || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
   if (e.altKey && (e.key === "n" || e.key === "N")) {
     e.preventDefault()
-    const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
-    if (pid) go(`#/new/${pid}`)
+    newThread()
     return
   }
   if (e.altKey && (e.key === "g" || e.key === "G") && gitPanel) {
@@ -3940,6 +4524,46 @@ document.addEventListener("keydown", (e) => {
   }
 })
 $("add-project").addEventListener("click", addProject)
+
+// ---------- starting, finding, and the keys for both ----------
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform)
+/** A key chord as this machine names it: "Ctrl K" here, "⌘K" on a Mac. */
+const chord = (k) => MAC ? k.replace(/Ctrl ?/g, "⌘").replace(/Alt ?/g, "⌥").replace(/Shift ?/g, "⇧") : k
+for (const k of document.querySelectorAll(".side-kbd")) k.textContent = chord(k.textContent)
+/** A new thread in the project you're in (the first one otherwise). */
+function newThread() {
+  const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
+  if (pid) go(`#/new/${pid}`)
+  else addProject()
+}
+$("new-thread").addEventListener("click", newThread)
+$("open-palette").addEventListener("click", (e) => { e.preventDefault(); openPalette() })
+$("open-keys").addEventListener("click", () => openKeys())
+/** Every key zero answers to, grouped, in one sheet: opened with ?, from the palette, or the sidebar. */
+const KEYS = [
+  ["Anywhere", [["Ctrl K", "Go to any thread, project or place"], ["Alt N", "New thread"], ["Alt G", "Show or hide the Git panel"], ["?", "These shortcuts"]]],
+  ["Writing", [["Enter", "Send"], ["Shift Enter", "New line"], ["@", "Point at a file in the project"], ["/", "Commands: zero's, and your Claude Code commands and skills"], ["↑ ↓", "Your earlier messages, in an empty box"]]],
+  ["While Claude works", [["Esc", "Stop the turn"], ["Y / N", "Allow or deny what it asks"]]]
+]
+function openKeys() {
+  if ($("dialog").open || $("palette").open || document.querySelector(".keys-sheet")) return
+  const d = el("dialog", { class: "keys-sheet", "aria-label": "Keyboard shortcuts" })
+  d.append(el("div", { class: "keys-head" }, el("h3", { text: "Keyboard shortcuts" }), el("button", { class: "icon-btn", type: "button", "aria-label": "Close", text: "×", onclick: () => d.close() })),
+    ...KEYS.map(([group, rows]) => el("section", { class: "keys-group" }, el("h4", { text: group }),
+      el("dl", {}, ...rows.flatMap(([k, what]) => [el("dt", {}, ...chord(k).split(" ").map((part) => el("kbd", { text: part }))), el("dd", { text: what })])))))
+  d.addEventListener("click", (e) => { if (e.target === d) d.close() })
+  d.addEventListener("close", () => d.remove())
+  document.body.append(d)
+  d.showModal()
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return
+  const t = e.target
+  if (t.isContentEditable || t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return
+  if (document.querySelector("dialog[open]")) return
+  e.preventDefault()
+  openKeys()
+})
 // An hour idle is reached by the clock, not by an event: look again each minute.
 setInterval(() => { if (S.open) paintCompact(S.open) }, 60_000)
 // A file dropped anywhere but the composer would open in place of the app; it does nothing instead.
@@ -3953,7 +4577,7 @@ setInterval(() => renderSide(), 60_000)
 async function boot() {
   try {
     const b = await api("GET", "bootstrap")
-    Object.assign(S, { settings: b.settings, projects: b.projects, threads: b.threads, providers: b.providers, home: b.home, zeroRoot: b.zeroRoot })
+    Object.assign(S, { settings: b.settings, projects: b.projects, threads: b.threads, providers: b.providers, home: b.home, zeroRoot: b.zeroRoot, limits: b.limits ?? [] })
   } catch (e) {
     $("main").replaceChildren(el("div", { class: "start" }, el("div", { class: "start-inner" },
       el("h1", { text: "Can't reach zero" }),

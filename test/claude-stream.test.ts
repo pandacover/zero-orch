@@ -17,7 +17,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   }
 }))
 
-const { claude, earlyDetail, partialFields } = await import("../src/app/providers/Claude.ts")
+const { claude, earlyDetail, editDiff, limitOf, partialFields, usableCommands } = await import("../src/app/providers/Claude.ts")
 
 const input = (): TurnInput => ({
   cwd: process.cwd(),
@@ -87,5 +87,59 @@ describe("Claude's tool cards", () => {
     const cards: Array<[string, string]> = []
     for await (const e of claude.turn(input())) if (e.type === "tool") cards.push([e.status, e.detail])
     expect(cards).toEqual([["running", "ls"], ["done", "ls"]])
+  })
+})
+
+describe("Claude's usage limits", () => {
+  it("passes the plan's usage windows on as they're reported, as a share and a time", async () => {
+    script = [
+      { type: "rate_limit_event", session_id: "s1", uuid: "u1", rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.82, resetsAt: 1794000000 } },
+      { type: "rate_limit_event", session_id: "s1", uuid: "u2", rate_limit_info: { status: "allowed" } },
+      { type: "result", subtype: "success", session_id: "s1", total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1 } }
+    ]
+    const limits: Array<unknown> = []
+    for await (const e of claude.turn(input())) if (e.type === "limit") limits.push(e.limit)
+    // One that names no window says nothing to show.
+    expect(limits).toEqual([{ kind: "five_hour", status: "allowed_warning", used: 0.82, resetsAt: new Date(1794000000 * 1000).toISOString(), at: expect.any(String) }])
+  })
+
+  it("reads a percentage as a share, and keeps an unknown share unknown", () => {
+    expect(limitOf({ status: "allowed", rateLimitType: "seven_day", utilization: 57 })?.used).toBe(0.57)
+    expect(limitOf({ status: "allowed", rateLimitType: "seven_day" })).toMatchObject({ used: null, resetsAt: null })
+    expect(limitOf(undefined)).toBeUndefined()
+  })
+})
+
+describe("what an edit changed, for its card", () => {
+  it("marks an Edit's old lines removed and its new lines added", () => {
+    expect(editDiff("Edit", { file_path: "a.ts", old_string: "a\nb\n", new_string: "a\nc" })).toBe("@@\n-a\n-b\n+a\n+c")
+  })
+  it("keeps a MultiEdit's pieces apart, and shows a Write as all added", () => {
+    expect(editDiff("MultiEdit", { edits: [{ old_string: "x", new_string: "y" }, { old_string: "p", new_string: "" }] })).toBe("@@\n-x\n+y\n@@\n-p")
+    expect(editDiff("Write", { file_path: "n.ts", content: "one\ntwo\n" })).toBe("@@ new content\n+one\n+two")
+  })
+  it("gives nothing for other tools or an empty change, and cuts a long one", () => {
+    expect(editDiff("Bash", { command: "ls" })).toBeUndefined()
+    expect(editDiff("Edit", { file_path: "a.ts" })).toBeUndefined()
+    const long = editDiff("Write", { content: Array.from({ length: 400 }, (_, i) => `l${i}`).join("\n") })!.split("\n")
+    expect(long).toHaveLength(301)
+    expect(long.at(-1)).toBe("@@ 101 more lines")
+  })
+})
+
+describe("the slash commands a composer offers", () => {
+  it("keeps the person's, the project's and skills, a few of Claude Code's own, and none of the terminal's", () => {
+    const list = [
+      { name: "review", description: "Review a PR", argumentHint: "", builtin: true },
+      { name: "clear", description: "Clear the conversation", argumentHint: "", builtin: true },
+      { name: "compact", description: "Compact", argumentHint: "", builtin: true },
+      { name: "deploy", description: "Ship it", argumentHint: "<env>" },
+      { name: "statusline", description: "Set up the status line", argumentHint: "" },
+      { name: "deploy", description: "a second row with the same name", argumentHint: "" }
+    ]
+    expect(usableCommands(list, ["statusline"])).toEqual([
+      { name: "deploy", description: "Ship it", hint: "<env>" },
+      { name: "review", description: "Review a PR", hint: "" }
+    ])
   })
 })

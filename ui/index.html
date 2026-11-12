@@ -29,20 +29,27 @@
         <a class="brand" href="#/" aria-label="zero home"><span class="brand-name">zero</span></a>
         <span aria-hidden="true"></span>
       </div>
-      <!-- One line: finding a thread, adding a project. (A new thread starts from a project's own +, or Alt+N.) -->
+      <!-- Starting and finding: a new thread (in the project you're in), adding a project, then search. -->
       <div class="side-actions">
-        <label class="side-act search" title="Search threads">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
-          <input id="search" type="search" placeholder="Search threads" aria-label="Search threads" autocomplete="off" spellcheck="false">
-        </label>
-        <button class="side-act side-act-icon" id="add-project" type="button" title="Add project" aria-label="Add project">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+        <button class="side-new" id="new-thread" type="button" title="New thread (Alt+N)">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.2 2.6a1.6 1.6 0 0 1 2.2 2.2L6.8 11.4 4 12l.6-2.8z"/><path d="M2.5 14h11"/></svg>
+          <span>New thread</span>
+          <kbd class="side-kbd">Alt N</kbd>
+        </button>
+        <button class="side-act side-act-icon" id="add-project" type="button" title="Add a project: a folder on this machine" aria-label="Add project">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/><path d="M8 7.25v3.5M6.25 9h3.5"/></svg>
         </button>
       </div>
+      <label class="side-act search" title="Search threads">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+        <input id="search" type="search" placeholder="Search threads" aria-label="Search threads" autocomplete="off" spellcheck="false">
+        <button class="side-kbd go-kbd" id="open-palette" type="button" title="Go to any thread, project or place (Ctrl+K)">Ctrl K</button>
+      </label>
       <nav class="tree" id="tree"></nav>
       <div class="side-foot">
         <a class="foot-link" href="#/evolution" data-route="evolution"><span class="foot-dot"></span>Evolution</a>
         <button class="foot-link" id="open-settings" type="button"><span class="foot-gear" aria-hidden="true">⚙</span>Settings</button>
+        <button class="foot-link" id="open-keys" type="button" title="Keyboard shortcuts (?)"><span class="foot-gear" aria-hidden="true">⌨</span>Shortcuts<kbd class="side-kbd">?</kbd></button>
       </div>
       <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize · double-click to reset"></div>
     </aside>

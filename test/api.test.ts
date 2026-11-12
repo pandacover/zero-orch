@@ -105,6 +105,21 @@ describe("the control plane's backend, without a transport", () => {
     expect((await api.call("POST", `threads/${t.id}/git/reviewers`, { number: 1, reviewers: "" })).status).toBe(400)
   })
 
+  it("lists a project's and a thread's files for @, marks a thread seen, and starts with no usage limits", async () => {
+    const boot = (await api.call("GET", "bootstrap")).body as { projects: Array<{ id: string }>; limits: Array<unknown> }
+    expect(boot.limits).toEqual([])
+    const projectId = boot.projects[0]!.id
+    const files = (await api.call("GET", `projects/${projectId}/files`)).body as { files: Array<string>; git: boolean }
+    expect(files.git).toBe(true)
+    expect(files.files).toContain("src/app/Api.ts")
+    const t = (await api.call("POST", "threads", { projectId })).body as { id: string; updatedAt: string }
+    expect(((await api.call("GET", `threads/${t.id}/files`)).body as { files: Array<string> }).files).toContain("ui/app.js")
+    expect((await api.call("GET", "threads/thr_missing/files")).status).toBe(404)
+    const seen = await api.call("PATCH", `threads/${t.id}`, { seen: true })
+    expect(seen.status).toBe(200)
+    expect(seen.body).toMatchObject({ id: t.id, updatedAt: t.updatedAt })
+  })
+
   it("keeps an uploaded file and finds it by id", () => {
     expect(api.upload("empty.txt", "text/plain", new Uint8Array()).status).toBe(400)
     const r = api.upload("note.txt", "text/plain", new TextEncoder().encode("hi"))

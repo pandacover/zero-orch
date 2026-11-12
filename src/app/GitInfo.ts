@@ -287,8 +287,11 @@ const text = async (exec: Run, cwd: string, args: ReadonlyArray<string>, raw = f
   return r.ok ? (raw ? r.stdout : r.stdout.trim()) : null
 }
 
-/** Everything the Git panel shows for a thread whose project is `cwd`, about `branch` (else the checked-out one). */
-export const gitView = async (cwd: string, branch: string | undefined, exec: Run = run): Promise<GitView> => {
+/**
+ * Everything the Git panel shows for a thread whose project is `cwd`, about `branch` (else the checked-out one).
+ * `linked` is the URL of the pull request the thread is linked to, for `branch`: looked up by itself, not by the branch.
+ */
+export const gitView = async (cwd: string, branch: string | undefined, exec: Run = run, linked?: string): Promise<GitView> => {
   const inside = await text(exec, cwd, ["rev-parse", "--is-inside-work-tree"])
   const empty: GitView = { repo: false, branch: "", current: "", upstream: null, ahead: 0, behind: 0, base: null, changes: [], commits: [], gh: { ok: false, detail: "" }, pr: null }
   if (inside !== "true") return empty
@@ -301,7 +304,7 @@ export const gitView = async (cwd: string, branch: string | undefined, exec: Run
     name ? text(exec, cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", `${name}@{upstream}`]) : Promise.resolve(null),
     text(exec, cwd, ["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"]),
     text(exec, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], true),
-    name ? pullRequest(cwd, name, exec) : Promise.resolve({ gh: { ok: false, detail: "HEAD is detached: no branch to look up." }, pr: null })
+    name ? pullRequest(cwd, linked && known ? linked : name, exec) : Promise.resolve({ gh: { ok: false, detail: "HEAD is detached: no branch to look up." }, pr: null })
   ])
   const [ahead, behind] = upstream ? parseCounts((await text(exec, cwd, ["rev-list", "--left-right", "--count", `${ref}...${upstream}`])) ?? "") : [0, 0]
   // A branch's own commits are those past the PR's base, else past the remote's default branch.
@@ -347,6 +350,20 @@ export const fileDiff = async (cwd: string, path: string, exec: Run = run): Prom
   const head = await text(exec, cwd, ["rev-parse", "--verify", "--quiet", "HEAD"])
   const diff = await text(exec, cwd, head ? ["diff", "--no-color", "--no-ext-diff", "HEAD", "--", path] : ["diff", "--no-color", "--no-ext-diff", "--cached", "--", path], true)
   return (diff ?? "").slice(0, MAX_DIFF)
+}
+
+/** The most files @ in the composer offers to pick from. */
+export const MAX_FILES = 20_000
+
+/**
+ * The files in a folder that git tracks or would (ignored ones left out), relative and with forward
+ * slashes, for @ in the composer to pick from. `truncated` says some were left out; `git` false: not a repository.
+ */
+export const listFiles = async (cwd: string, exec: Run = run): Promise<{ files: Array<string>; truncated: boolean; git: boolean }> => {
+  const out = await text(exec, cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], true)
+  if (out === null) return { files: [], truncated: false, git: false }
+  const all = [...new Set(out.split("\0").filter(Boolean))]
+  return { files: all.slice(0, MAX_FILES), truncated: all.length > MAX_FILES, git: true }
 }
 
 /** Everything uncommitted, for a model to describe: the stat, then the diff, cut to `limit` characters, and new files' names. */
