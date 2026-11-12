@@ -443,6 +443,8 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
     grace = setTimeout(() => end(s), STOP_GRACE_MS)
   }
   input.signal.addEventListener("abort", stop, { once: true })
+  // Stopped while its session was being got ready (a model switch): the message went in, so stop it.
+  if (input.signal.aborted) stop()
   /** The turn's own result came: the session is between turns, ready for the next. */
   let finished = false
 
