@@ -258,6 +258,8 @@ export const makeThreads = (options: {
     /** `effort: ""` goes back to following the settings. */
     const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean }) => {
       if (patch.provider && patch.provider !== t.provider) {
+        // The old provider's live session, if it keeps one, has no more turns coming.
+        PROVIDERS[t.provider].close?.(t.id)
         t.provider = patch.provider
         t.resume = null
         t.sessionCostUsd = 0
@@ -297,6 +299,7 @@ export const makeThreads = (options: {
      */
     const moveTo = (t: Thread, cwd: string | undefined, branch: string) => {
       if (cwd !== t.cwd) {
+        if (!busy(t.id)) PROVIDERS[t.provider].close?.(t.id)
         if (cwd) t.cwd = cwd
         else delete t.cwd
         t.resume = null
@@ -395,6 +398,7 @@ export const makeThreads = (options: {
         const tools = !compact && depthOf(t) < MAX_DEPTH ? threadTools(t, project, l) : undefined
         const run = (prompt: string, instructions: string, remembers: boolean) =>
           turnStream(provider, {
+            threadId: t.id,
             cwd,
             ...(tools && !prompt.startsWith("/compact") ? { threads: tools } : {}),
             prompt,
@@ -770,8 +774,11 @@ export const makeThreads = (options: {
       update,
       moveTo,
       turn,
-      /** A thread was deleted: anyone waiting for it hears so now. */
-      forget: (id: string) => settle(id),
+      /** A thread was deleted: anyone waiting for it hears so now, and its live session ends. */
+      forget: (id: string) => {
+        settle(id)
+        for (const p of Object.values(PROVIDERS)) p.close?.(id)
+      },
       isRunning: busy,
       /** How many threads have a turn going. */
       running: () => live.size,
@@ -789,6 +796,10 @@ export const makeThreads = (options: {
       },
       stopAll: () => {
         for (const l of live.values()) l.abort.abort()
+      },
+      /** End every provider's live sessions (the app is quitting). */
+      closeAll: () => {
+        for (const p of Object.values(PROVIDERS)) p.closeAll?.()
       }
     }
   })

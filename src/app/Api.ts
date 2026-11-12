@@ -334,7 +334,8 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
     close: async () => {
       evolution.stop()
       threads.stopAll()
-      // A moment for the aborted sessions to end their child processes.
+      threads.closeAll()
+      // A moment for the ended sessions to end their child processes.
       await new Promise((resolve) => setTimeout(resolve, 300))
       await runtime.dispose()
     }
