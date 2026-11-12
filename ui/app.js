@@ -1977,8 +1977,14 @@ function threadView(t) {
     html: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg><span>New</span>',
     onclick: () => { feed.stick = true; scroll.scrollTo({ top: scroll.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }) } })
   feed.jump = jump
+  // A scroll is yours only right after a wheel, touch, key or press in the thread: one that follows a resize
+  // or a reflow (the window narrowed, an image loaded) keeps a thread that was following at its end.
+  let touched = 0
+  for (const type of ["wheel", "touchmove", "keydown", "pointerdown"]) scroll.addEventListener(type, () => { touched = Date.now() }, { passive: true })
   scroll.addEventListener("scroll", () => {
-    feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60
+    const atEnd = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60
+    if (!atEnd && feed.stick && Date.now() - touched > 1500) { scroll.scrollTop = scroll.scrollHeight; return }
+    feed.stick = atEnd
     jump.hidden = feed.stick
     if (feed.stick) jump.classList.remove("fresh")
   })

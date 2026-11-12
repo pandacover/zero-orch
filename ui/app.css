@@ -1608,3 +1608,14 @@ dialog.keys-sheet { width: min(480px, calc(100vw - 32px)); padding: 18px 20px 20
 @media (hover: hover) { .jump-latest:hover { border-color: var(--accent-line); } }
 @keyframes jump-in { from { opacity: 0; translate: -50% 6px; } }
 .turn-retry { margin-left: 8px; vertical-align: middle; }
+.icon-btn.git-toggle.on .git-word { display: none; }
+/* a phone's composer keeps one row: Attach and the branch side by side, Compact as its switch alone */
+@container (max-width: 440px) {
+  .composer-controls { flex: 0 0 auto; flex-wrap: nowrap; }
+  .composer-end { min-width: 0; }
+  .compact-toggle > span:not(.compact-knob) { display: none; }
+  .compact-toggle { padding: 0 8px; }
+}
+@container (max-width: 440px) {
+  .composer-end .pop-trigger { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
