@@ -56,7 +56,9 @@ const S = {
   route: { name: "home" },
   evo: null,
   /** The plan's usage windows as Claude last reported them ({ kind, status, used, resetsAt }). */
-  limits: []
+  limits: [],
+  /** Each thread's session's slash commands (thread id → [{ name, description, hint }]), as its provider last said. */
+  commands: new Map()
 }
 function load(key, fallback) {
   try { return JSON.parse(localStorage.getItem(`zero.${key}`)) ?? fallback } catch { return fallback }
@@ -274,6 +276,9 @@ function renderSide() {
   for (const t of S.threads) if (!drafted.has(t.id) && !inbox.ids.has(t.id)) byProject.get(t.projectId)?.push(t)
   shownDrafted = [...drafted].sort().join(" ")
   shownInbox = inbox.key
+  // The window's title counts what needs you, so the taskbar says so while you're elsewhere.
+  const waiting = S.threads.filter((t) => { const st = inboxState(t); return st && st !== "working" }).length
+  document.title = waiting ? `(${waiting}) zero` : "zero"
   const hasThreads = new Set(S.threads.map((t) => t.projectId))
   // Pinned threads first, each group newest first as S.threads is; a thread another started sits under it.
   for (const [id, list] of byProject) byProject.set(id, nested(list.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))))
@@ -1262,13 +1267,27 @@ function attChip(tag, { name, mime, src, attrs = {} }) {
     isRaster(mime) && src ? el("img", { class: "att-thumb", src, alt: "" }) : icon(FILE_PATHS, "att-icon"),
     el("span", { class: "att-name", text: name }))
 }
+/** Words with each @path in them (a file picked with @) as the chip the composer showed: its name, the path on hover. */
+function mentions(text) {
+  const out = []
+  let last = 0
+  for (const m of text.matchAll(/(^|\s)@([\w.-]+(?:[/\\][\w.-]+)*\.\w+)(?=\s|$|[,;:!?)])/g)) {
+    const at = m.index + m[1].length
+    if (at > last) out.push(text.slice(last, at))
+    const path = m[2]
+    out.push(el("span", { class: "mention", title: path }, el("span", { class: "mention-at", text: "@" }), path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1)))
+    last = at + 1 + path.length
+  }
+  if (last < text.length) out.push(text.slice(last))
+  return out
+}
 /** A sent message: its words, with each attached file as a chip where it was put. */
 function userNodes(item) {
   const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
   const out = []
   let last = 0
   for (const m of item.text.matchAll(ATT)) {
-    if (m.index > last) out.push(item.text.slice(last, m.index))
+    if (m.index > last) out.push(...mentions(item.text.slice(last, m.index)))
     const a = known.get(m[1])
     // A picture shows as itself, big enough to see what it is; any other file as a chip.
     out.push(a && isRaster(a.mime)
@@ -1279,7 +1298,7 @@ function userNodes(item) {
       : el("span", { class: "att gone", text: "a file" }))
     last = m.index + m[0].length
   }
-  if (last < item.text.length) out.push(item.text.slice(last))
+  if (last < item.text.length) out.push(...mentions(item.text.slice(last)))
   return out
 }
 
@@ -1484,6 +1503,8 @@ function serialize(root) {
       if (c.nodeType === Node.TEXT_NODE) { out += c.nodeValue.replace(/​/g, ""); continue }
       if (c.nodeType !== Node.ELEMENT_NODE) continue
       if (c.classList.contains("att")) { if (c.dataset.att) out += `{{att:${c.dataset.att}}}`; continue }
+      // A file picked with @ goes as its path, the way Claude Code takes one.
+      if (c.classList.contains("mention")) { out += `@${c.dataset.path}`; continue }
       if (c.tagName === "BR") { out += "\n"; continue }
       // A block the browser made for a new line starts on one.
       if (/^(DIV|P|LI)$/.test(c.tagName) && out && !out.endsWith("\n")) out += "\n"
@@ -1536,6 +1557,8 @@ function mentionMenu(input, { files, commands = [] }) {
   const pop = el("div", { class: "mention-pop", role: "listbox", hidden: true })
   pop.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
   let items = [], at = 0, match = null, list = null, asked = 0
+  /** zero's own commands, then the provider session's (a function: those arrive once a turn has started). */
+  const cmdList = () => typeof commands === "function" ? commands() : commands
   const close = () => { pop.hidden = true; items = []; match = null }
   /** What's typed just before the caret: an @word anywhere, or a /word that starts the box. */
   const typed = () => {
@@ -1544,7 +1567,7 @@ function mentionMenu(input, { files, commands = [] }) {
     const node = s.anchorNode, end = s.anchorOffset, before = node.nodeValue.slice(0, end)
     const mention = files && /(?:^|\s)@([^\s@]*)$/.exec(before)
     if (mention) return { kind: "file", node, start: end - mention[1].length - 1, end, q: mention[1].toLowerCase() }
-    const slash = commands.length && input.firstChild === node && /^\/([\w-]*)$/.exec(before)
+    const slash = cmdList().length && input.firstChild === node && /^\/([\w:.-]*)$/.exec(before)
     if (slash) return { kind: "command", node, start: 0, end, q: slash[1].toLowerCase() }
     return null
   }
@@ -1563,8 +1586,10 @@ function mentionMenu(input, { files, commands = [] }) {
     if (!match) return close()
     at = 0
     if (match.kind === "command") {
-      items = commands.filter((c) => (c.when?.() ?? true) && c.name.startsWith(match.q)).map((c) => ({
-        value: c, view: [el("span", { class: "mention-main", text: `/${c.name}` }), c.args ? el("span", { class: "mention-args", text: c.args }) : null, el("span", { class: "mention-sub", text: c.desc })]
+      const q = match.q
+      items = cmdList().filter((c) => (c.when?.() ?? true) && (c.name.startsWith(q) || (q.length > 1 && c.name.includes(q)))).slice(0, 40).map((c) => ({
+        value: c, view: [el("span", { class: "mention-main", text: `/${c.name}` }), c.args ? el("span", { class: "mention-args", text: c.args }) : null,
+          el("span", { class: "mention-sub", text: c.desc }), c.from ? el("span", { class: "mention-from", text: c.from }) : null]
       }))
       return paint()
     }
@@ -1592,7 +1617,22 @@ function mentionMenu(input, { files, commands = [] }) {
     s.removeAllRanges()
     s.addRange(r)
     close()
-    if (m.kind === "file") return void document.execCommand("insertText", false, `@${it.value} `)
+    if (m.kind === "file") {
+      // The file goes in as a chip: its name, with the whole path on hover; it's sent as @path.
+      const cut = it.value.lastIndexOf("/")
+      const chip = el("span", { class: "mention", contenteditable: "false", "data-path": it.value, title: it.value }, el("span", { class: "mention-at", text: "@" }), it.value.slice(cut + 1))
+      const space = document.createTextNode(" ")
+      r.deleteContents()
+      r.insertNode(space)
+      r.insertNode(chip)
+      const after = document.createRange()
+      after.setStart(space, 1)
+      after.collapse(true)
+      s.removeAllRanges()
+      s.addRange(after)
+      input.dispatchEvent(new Event("input"))
+      return
+    }
     if (it.value.run) { document.execCommand("delete"); return void it.value.run() }
     document.execCommand("insertText", false, `/${it.value.name} `)
   }
@@ -1878,7 +1918,8 @@ function threadView(t) {
     onAccess: (value) => api("PATCH", `threads/${t.id}`, { access: value }).catch((e) => { models.setAccess(t.access); fail(e) })
   })
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
-  const working = el("div", { class: "working", hidden: true }, el("i"), el("i"), el("i"), el("span", { text: "Working" }))
+  const working = el("div", { class: "working", hidden: true, role: "status" }, el("i"), el("i"), el("i"), el("span", { text: "Working" }),
+    el("span", { class: "working-time" }))
   const scroll = el("div", { class: "scroll" }, list)
   // Compact: shown when the context is filling. On, the next message waits while the session compacts first.
   const compact = el("button", { class: "pill-btn compact-toggle", type: "button", role: "switch", onclick: () => {
@@ -1915,12 +1956,14 @@ function threadView(t) {
     tools: [branch.node],
     draftKey: `t:${t.id}`,
     files: () => api("GET", `threads/${t.id}/files`),
-    // What / offers: zero's own actions, and the provider's /compact when its session takes it.
-    commands: [
+    // What / offers: zero's own actions, the provider's /compact when its session takes it, then the
+    // session's own commands (the person's, the project's, skills, a few of Claude Code's) once a turn has told them.
+    commands: () => [
       { name: "compact", args: "what to keep", desc: "Summarize the thread so far to free up context", when: () => status(S.open?.provider)?.compaction === "manual" && !!S.open?.resume },
       { name: "git", desc: "Show or hide the Git panel", run: () => setGitOpen(!gitOpenNow()) },
       { name: "rename", desc: "Rename this thread", run: () => { feed?.title.focus(); feed?.title.select() } },
-      ...(project ? [{ name: "new", desc: `Start a new thread in ${project.name}`, run: () => go(`#/new/${project.id}`) }] : [])
+      ...(project ? [{ name: "new", desc: `Start a new thread in ${project.name}`, run: () => go(`#/new/${project.id}`) }] : []),
+      ...(S.commands.get(t.id) ?? []).map((c) => ({ name: c.name, args: c.hint, desc: c.description, from: providerLabel(t.provider) }))
     ],
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
@@ -1929,11 +1972,22 @@ function threadView(t) {
   const links = linksNode(t)
   feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact, meter, branch, links }
   paintReady(t)
-  scroll.addEventListener("scroll", () => { feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60 })
+  // Scrolled up, a button brings you back to the latest; it says so when something new came in meanwhile.
+  const jump = el("button", { class: "jump-latest", type: "button", hidden: true, title: "Jump to the latest", "aria-label": "Jump to the latest",
+    html: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg><span>New</span>',
+    onclick: () => { feed.stick = true; scroll.scrollTo({ top: scroll.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }) } })
+  feed.jump = jump
+  scroll.addEventListener("scroll", () => {
+    feed.stick = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60
+    jump.hidden = feed.stick
+    if (feed.stick) jump.classList.remove("fresh")
+  })
   renderFeed()
   paintWorking()
   requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight })
   const git = makeGitPanel(t)
+  // The session's slash commands, for / (empty until a turn of it has started).
+  if (!S.commands.has(t.id)) api("GET", `threads/${t.id}/commands`).then((list) => { if (list.length) S.commands.set(t.id, list) }, () => {})
   return [
     el("div", { class: "thread-cols" },
       el("div", { class: "main-col" },
@@ -1948,7 +2002,7 @@ function threadView(t) {
             title,
             links)),
         scroll,
-        el("div", { class: "composer-wrap" }, box.node)),
+        el("div", { class: "composer-wrap" }, jump, box.node)),
       git.node,
       git.toggle)
   ]
@@ -2041,6 +2095,10 @@ function paintWorking() {
   // While a compaction runs, the working line says so (its card in the feed shows the detail).
   const compacting = running && S.open.items.some((i) => i.kind === "compact" && i.state === "running")
   feed.working.querySelector("span").textContent = compacting ? "Compacting context" : "Working"
+  // How long this turn has run, from your message (the call it's on shows just above).
+  const since = S.open.items.findLast((i) => i.kind === "user")?.at
+  feed.working.dataset.since = running && since ? since : ""
+  tickWorking()
   // A message waiting for the session to compact first.
   feed.queued.hidden = !S.open.queued
   if (S.open.queued && feed.queued.dataset.text !== S.open.queued) {
@@ -2053,7 +2111,18 @@ function paintWorking() {
   feed.branch?.setBusy(running)
   paintCompact(S.open)
 }
-const follow = () => { if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight }
+/** The working line's clock: m:ss since the turn began, each second while it shows. */
+function tickWorking() {
+  const w = feed?.working
+  if (!w) return
+  const t = w.querySelector(".working-time")
+  t.textContent = w.dataset.since && !w.hidden ? elapsed(w.dataset.since) : ""
+}
+setInterval(tickWorking, 1000)
+const follow = () => {
+  if (feed?.stick) feed.scroll.scrollTop = feed.scroll.scrollHeight
+  else feed?.jump?.classList.add("fresh")
+}
 
 /** An item's node, rendered again only when the item itself was replaced. */
 function nodeFor(item) {
@@ -2086,7 +2155,7 @@ const MEMORY_COMMAND = /^(?:cd\s+("[^"]*"|\S+)\s*&&\s*)?(?:(?:bash|sh|pwsh|power
  * every call in it, and open a call to see its output.
  */
 function renderFeed() {
-  const { finals, metaFor, merged } = turnEnds()
+  const { finals, metaFor, merged, changes } = turnEnds()
   const top = []
   let run = null
   for (const item of S.open.items) {
@@ -2122,6 +2191,7 @@ function renderFeed() {
     const turn = metaFor.get(id)
     const slot = node.querySelector(".msg-meta")
     if (slot.dataset.turn !== (turn?.id ?? "")) { slot.dataset.turn = turn?.id ?? ""; slot.replaceChildren(...(turn ? turnMeta(turn) : [])) }
+    paintTurnFiles(node, changes.get(id))
   }
 }
 /**
@@ -2130,18 +2200,61 @@ function renderFeed() {
  * A turn that failed keeps its own error line; one with no response keeps its details line.
  */
 function turnEnds() {
-  const finals = new Set(), metaFor = new Map(), merged = new Set()
+  const finals = new Set(), metaFor = new Map(), merged = new Set(), changes = new Map()
   let last = null
+  // The files the turn's edits changed, by path, with their lines added and removed.
+  let edited = new Map()
   for (const item of S.open.items) {
     if (item.kind === "assistant") last = item.id
-    else if (item.kind === "user" || item.kind === "turn") {
+    else if (item.kind === "tool" && item.diff && item.status !== "failed") {
+      const c = diffCounts(item.diff), was = edited.get(item.detail) ?? { add: 0, del: 0 }
+      edited.set(item.detail, { add: was.add + c.add, del: was.del + c.del })
+    } else if (item.kind === "user" || item.kind === "turn") {
       if (last) finals.add(last)
       if (item.kind === "turn" && last && item.outcome !== "failed") { metaFor.set(last, item); merged.add(item.id) }
+      // Only a turn that has ended lists its changes: while it runs, its files are still changing.
+      if (item.kind === "turn" && last && edited.size) changes.set(last, edited)
+      if (item.kind === "user" || item.kind === "turn") edited = new Map()
       last = null
     }
   }
   if (last) finals.add(last)
-  return { finals, metaFor, merged }
+  return { finals, metaFor, merged, changes }
+}
+/**
+ * Under a turn's answer, what its edits changed: "Changed 3 files +40 −12", each file with its own
+ * counts, and a way to the Git panel to review and commit them. Repainted only when the list changes.
+ */
+function paintTurnFiles(node, edited) {
+  const files = edited ? [...edited] : []
+  const sig = JSON.stringify(files)
+  let box = node.querySelector(".turn-files")
+  if ((box?.dataset.sig ?? "[]") === sig) return
+  if (!files.length) return void box?.remove()
+  if (!box) { box = el("div", { class: "turn-files" }); node.querySelector(".msg-actions").before(box) }
+  box.dataset.sig = sig
+  const total = files.reduce((s, [, c]) => ({ add: s.add + c.add, del: s.del + c.del }), { add: 0, del: 0 })
+  const SHOWN = 6
+  const row = ([path, c]) => el("li", { class: "turn-file" }, el("span", { class: "turn-file-path", text: rel(path), title: path }), diffStat(c))
+  const rest = files.length - SHOWN
+  box.replaceChildren(
+    el("div", { class: "turn-files-head" },
+      el("span", { class: "turn-files-title", text: `Changed ${files.length} file${files.length === 1 ? "" : "s"}` }),
+      diffStat(total),
+      el("button", { class: "btn btn-quiet btn-xs turn-files-review", type: "button", title: "Open the Git panel (Alt+G) to see the diffs and commit", onclick: () => { if (gitPanel && !gitOpenNow()) setGitOpen(true) } }, "Review in Git")),
+    el("ul", { class: "turn-file-list" }, ...files.slice(0, SHOWN).map(row),
+      rest > 0 ? el("li", { class: "turn-file more" }, el("details", {}, el("summary", { text: `${rest} more` }), el("ul", { class: "turn-file-list" }, ...files.slice(SHOWN).map(row)))) : null))
+}
+/** On a failed turn: send your last message again (its files too), as a new message. Only on the thread's last turn. */
+function retryButton(item) {
+  const t = S.open
+  if (!t || t.items.at(-1)?.id !== item.id) return null
+  const last = t.items.findLast((i) => i.kind === "user")
+  if (!last) return null
+  return el("button", { class: "btn btn-quiet btn-xs turn-retry", type: "button", title: "Send your last message again", onclick: (e) => {
+    e.currentTarget.disabled = true
+    api("POST", `threads/${t.id}/messages`, { text: last.text }).catch((err) => { e.currentTarget.disabled = false; fail(err) })
+  } }, "Try again")
 }
 /** A turn's details: Stopped (if it was), the model, how long it took, what it cost, its tokens. */
 function turnMeta(item) {
@@ -2184,10 +2297,12 @@ function paintGroup(g, key) {
   // A run that's over says what it did ("Read 7 files, edited 2"); one still going shows its latest call.
   const summary = state !== "running" && tools.length > 1 ? toolSummary(tools) : ""
   const counted = summary ? (failed ? `${failed} failed` : "") : `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`
-  g.head.replaceChildren(
+  const sum = tools.reduce((s, i) => { if (!i.diff) return s; const c = diffCounts(i.diff); return { add: s.add + c.add, del: s.del + c.del, any: true } }, { add: 0, del: 0, any: false })
+  g.head.replaceChildren(...[
     el("span", { class: "tool-state", "aria-label": state }),
     g.win,
-    el("span", { class: "tool-count", text: counted }))
+    sum.any ? diffStat(sum) : null,
+    el("span", { class: "tool-count", text: counted })].filter(Boolean))
   if (summary) {
     g.spinning?.cancel()
     g.spinning = null
@@ -2298,7 +2413,11 @@ function renderItem(item) {
     case "tool": {
       if (memoryRead(item)) return memoryCard(item)
       const open = S.expanded.has(item.id)
-      const out = el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
+      // An edit opens to what it changed (and its output only when it failed); any other call to its output.
+      const counts = item.diff ? diffCounts(item.diff) : null
+      const out = item.diff
+        ? el("div", { class: "tool-out tool-diff", inert: !open }, diffView(item.diff), item.status === "failed" && item.output ? el("pre", { class: "tool-fail", text: item.output }) : null)
+        : el("pre", { class: "tool-out", inert: !open, text: item.output || (item.status === "running" ? "Running…" : "No output.") })
       const node = el("div", { class: `tool ${item.status}${open ? " open" : ""}` })
       const row = el("button", { class: "tool-row", type: "button", "aria-expanded": String(open), onclick: () => {
         const now = !node.classList.contains("open")
@@ -2306,7 +2425,8 @@ function renderItem(item) {
         out.inert = !now
         row.setAttribute("aria-expanded", String(now))
         now ? S.expanded.add(item.id) : S.expanded.delete(item.id)
-      } }, el("span", { class: "tool-state", "aria-label": item.status }), el("span", { class: "tool-name", text: item.name }), el("span", { class: "tool-detail", text: rel(item.detail) }))
+      } }, el("span", { class: "tool-state", "aria-label": item.status }), el("span", { class: "tool-name", text: item.name }), el("span", { class: "tool-detail", text: rel(item.detail) }),
+        counts ? diffStat(counts) : null)
       node.append(row, out)
       return node
     }
@@ -2340,7 +2460,7 @@ function renderItem(item) {
         el("span", { class: "mem-label", text: "zero sent it on" }),
         el("span", { class: "mem-title", text: `${providerLabel(S.open?.provider)} stopped after a failed call (${item.reason}) without saying where things stand` })))
     case "turn": {
-      if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error)
+      if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error, retryButton(item))
       return el("div", { class: "turn-meta" }, turnMeta(item))
     }
   }
@@ -2765,12 +2885,27 @@ function changeRow(g, c) {
   return row
 }
 
+/** How many lines a diff adds and removes (its "+" and "-" lines, not the file headers). */
+function diffCounts(text) {
+  let add = 0, del = 0
+  for (const l of text.split("\n")) {
+    if (l.startsWith("+") && !l.startsWith("+++")) add++
+    else if (l.startsWith("-") && !l.startsWith("---")) del++
+  }
+  return { add, del }
+}
+/** "+12 −3", green and red, for a row. */
+const diffStat = ({ add, del }) => el("span", { class: "diff-stat", "aria-label": `${add} lines added, ${del} removed` },
+  add ? el("b", { class: "d-plus", text: `+${add}` }) : null, del ? el("b", { class: "d-minus", text: `−${del}` }) : null)
+
 /** A unified diff, its lines marked as added, removed or a hunk's header. */
 function diffView(text) {
   const lines = text.split("\n")
   if (lines.at(-1) === "") lines.pop()
   const cut = lines.length > 2000
-  return el("pre", { class: "git-diff" }, ...(cut ? lines.slice(0, 2000) : lines).map((l) => el("span", {
+  // A bare "@@" (an edit's pieces, from a tool card) is a divider, and nothing at the very top.
+  if (lines[0] === "@@") lines.shift()
+  return el("pre", { class: "git-diff" }, ...(cut ? lines.slice(0, 2000) : lines).map((l) => l === "@@" ? el("span", { class: "d-gap", "aria-hidden": "true" }) : el("span", {
     class: l.startsWith("@@") ? "d-hunk" : l.startsWith("+") && !l.startsWith("+++") ? "d-add" : l.startsWith("-") && !l.startsWith("---") ? "d-del" : /^(diff |index |--- |\+\+\+ |new file|deleted file)/.test(l) ? "d-meta" : "",
     text: `${l}\n`
   })), cut ? el("span", { class: "d-meta", text: "… more lines than shown here" }) : null)
@@ -4088,6 +4223,7 @@ function connect() {
   }
   on["settings"] = (data) => { S.settings = data }
   on["limits"] = (data) => { S.limits = data; paintMeter() }
+  on["commands"] = ({ threadId, commands }) => { S.commands.set(threadId, commands) }
   // Claude Code said which models it offers: the menus have them from the next time they open.
   on["providers"] = (data) => {
     S.providers = data
@@ -4151,12 +4287,14 @@ function openPalette() {
   const d = $("palette")
   if (d.open) return
   const entries = [
+    { label: "New thread", hint: chord("Alt N"), run: () => newThread() },
     ...S.threads.map((t) => ({ label: t.title, hint: S.projects.find((p) => p.id === t.projectId)?.name ?? "", run: () => go(`#/t/${t.id}`) })),
     ...S.projects.map((p) => ({ label: `New thread in ${p.name}`, hint: p.path, run: () => go(`#/new/${p.id}`) })),
     { label: "Evolution", hint: "zero's lineage and runs", run: () => go("#/evolution") },
     { label: "Settings", hint: "models, access, memory", run: () => openSettings() },
     ...(gitPanel ? [{ label: gitOpenNow() ? "Hide the Git panel" : "Show the Git panel", hint: "Alt+G", run: () => setGitOpen(!gitOpenNow()) }] : []),
-    { label: "Add a project", hint: "a folder on this machine", run: () => addProject() }
+    { label: "Add a project", hint: "a folder on this machine", run: () => addProject() },
+    { label: "Keyboard shortcuts", hint: "?", run: () => openKeys() }
   ]
   const input = el("input", { type: "search", placeholder: "Go to a thread, project or place…", "aria-label": "Search", autocomplete: "off", spellcheck: "false" })
   const list = el("ul", { class: "palette-list", role: "listbox" })
@@ -4196,8 +4334,7 @@ document.addEventListener("keydown", (e) => {
   const typing = e.target.isContentEditable || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
   if (e.altKey && (e.key === "n" || e.key === "N")) {
     e.preventDefault()
-    const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
-    if (pid) go(`#/new/${pid}`)
+    newThread()
     return
   }
   if (e.altKey && (e.key === "g" || e.key === "G") && gitPanel) {
@@ -4223,6 +4360,46 @@ document.addEventListener("keydown", (e) => {
   }
 })
 $("add-project").addEventListener("click", addProject)
+
+// ---------- starting, finding, and the keys for both ----------
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform)
+/** A key chord as this machine names it: "Ctrl K" here, "⌘K" on a Mac. */
+const chord = (k) => MAC ? k.replace(/Ctrl ?/g, "⌘").replace(/Alt ?/g, "⌥").replace(/Shift ?/g, "⇧") : k
+for (const k of document.querySelectorAll(".side-kbd")) k.textContent = chord(k.textContent)
+/** A new thread in the project you're in (the first one otherwise). */
+function newThread() {
+  const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
+  if (pid) go(`#/new/${pid}`)
+  else addProject()
+}
+$("new-thread").addEventListener("click", newThread)
+$("open-palette").addEventListener("click", (e) => { e.preventDefault(); openPalette() })
+$("open-keys").addEventListener("click", () => openKeys())
+/** Every key zero answers to, grouped, in one sheet: opened with ?, from the palette, or the sidebar. */
+const KEYS = [
+  ["Anywhere", [["Ctrl K", "Go to any thread, project or place"], ["Alt N", "New thread"], ["Alt G", "Show or hide the Git panel"], ["?", "These shortcuts"]]],
+  ["Writing", [["Enter", "Send"], ["Shift Enter", "New line"], ["@", "Point at a file in the project"], ["/", "Commands: zero's, and your Claude Code commands and skills"], ["↑ ↓", "Your earlier messages, in an empty box"]]],
+  ["While Claude works", [["Esc", "Stop the turn"], ["Y / N", "Allow or deny what it asks"]]]
+]
+function openKeys() {
+  if ($("dialog").open || $("palette").open || document.querySelector(".keys-sheet")) return
+  const d = el("dialog", { class: "keys-sheet", "aria-label": "Keyboard shortcuts" })
+  d.append(el("div", { class: "keys-head" }, el("h3", { text: "Keyboard shortcuts" }), el("button", { class: "icon-btn", type: "button", "aria-label": "Close", text: "×", onclick: () => d.close() })),
+    ...KEYS.map(([group, rows]) => el("section", { class: "keys-group" }, el("h4", { text: group }),
+      el("dl", {}, ...rows.flatMap(([k, what]) => [el("dt", {}, ...chord(k).split(" ").map((part) => el("kbd", { text: part }))), el("dd", { text: what })])))))
+  d.addEventListener("click", (e) => { if (e.target === d) d.close() })
+  d.addEventListener("close", () => d.remove())
+  document.body.append(d)
+  d.showModal()
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return
+  const t = e.target
+  if (t.isContentEditable || t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return
+  if (document.querySelector("dialog[open]")) return
+  e.preventDefault()
+  openKeys()
+})
 // An hour idle is reached by the clock, not by an event: look again each minute.
 setInterval(() => { if (S.open) paintCompact(S.open) }, 60_000)
 // A file dropped anywhere but the composer would open in place of the app; it does nothing instead.

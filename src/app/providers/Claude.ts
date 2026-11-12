@@ -14,7 +14,7 @@ import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
 import { type Access, ACCESSES, type Effort, isCompact, type UsageLimit } from "../Model.ts"
-import type { ModelLabel, Provider, ThreadTools, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
+import type { ModelLabel, Provider, SlashCommandInfo, ThreadTools, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
 import { keepOutput, notRun, short } from "./Provider.ts"
 
 /** The models a thread can pick before Claude Code has said which it offers (or when it can't). */
@@ -87,6 +87,45 @@ const detailOf = (_tool: string, input: Record<string, unknown>): string =>
   short(input["command"] ?? input["file_path"] ?? input["pattern"] ?? input["url"] ?? input["query"] ?? input, 400)
 
 const DETAIL_KEYS = ["command", "file_path", "pattern", "url", "query"]
+
+/**
+ * Claude Code's own commands that make sense from zero's composer; the rest (/clear, /model, /config…) are
+ * the terminal's or are zero's to do. Every command of the person's, a project's, a plugin's or a skill stays.
+ */
+const BUILTIN_COMMANDS = new Set(["init", "review", "security-review", "pr-comments", "release-notes"])
+
+/** The slash commands a composer offers, from what Claude Code says it takes (/compact is zero's own toggle). */
+export const usableCommands = (
+  list: ReadonlyArray<{ name: string; description: string; argumentHint?: string; builtin?: boolean }>,
+  terminal: ReadonlyArray<string> = []
+): Array<SlashCommandInfo> => {
+  const seen = new Set<string>()
+  return list.flatMap((c) => {
+    if (seen.has(c.name) || c.name === "compact" || terminal.includes(c.name) || (c.builtin && !BUILTIN_COMMANDS.has(c.name))) return []
+    seen.add(c.name)
+    return [{ name: c.name, description: c.description, hint: c.argumentHint ?? "" }]
+  }).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** Lines of a diff kept on a tool card: enough to read the change, not a whole file. */
+const DIFF_LINES = 300
+
+/**
+ * What an Edit, MultiEdit or Write changed, as a unified-diff-like text the page colours: removed lines
+ * with "-", added with "+", an edit's pieces apart by "@@". A Write shows the file it wrote, all added.
+ * Undefined for any other tool, or an input without the strings.
+ */
+export const editDiff = (tool: string, input: Record<string, unknown>): string | undefined => {
+  const lines = (s: unknown, mark: string) => typeof s === "string" && s !== "" ? s.replace(/\n$/, "").split("\n").map((l) => mark + l) : []
+  const piece = (e: Record<string, unknown>) => ["@@", ...lines(e["old_string"], "-"), ...lines(e["new_string"], "+")]
+  const out = tool === "Edit" ? piece(input)
+    : tool === "MultiEdit" && Array.isArray(input["edits"]) ? (input["edits"] as Array<Record<string, unknown>>).flatMap(piece)
+    : tool === "Write" ? ["@@ new content", ...lines(input["content"], "+")]
+    : []
+  if (out.length <= 1) return undefined
+  const more = out.length - DIFF_LINES
+  return (more > 0 ? [...out.slice(0, DIFF_LINES), `@@ ${more} more line${more === 1 ? "" : "s"}`] : out).join("\n")
+}
 
 /**
  * The top-level string fields of a tool call's input that has only partly streamed in, those
@@ -277,7 +316,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
   let session: string | undefined
   let messageId = ""
   const streamed = new Set<string>()
-  const tools = new Map<string, { name: string; detail: string }>()
+  const tools = new Map<string, { name: string; detail: string; diff?: string | undefined }>()
   /** What each tool card shows now: a card goes up as the model starts writing its call, not once it has. */
   const announced = new Map<string, string>()
   /** Tool calls still streaming in the current message, by content block index: their input so far. */
@@ -303,6 +342,13 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
         compacting = false
         yield { type: "compact", trigger: asked ? "manual" : "auto", state: "failed", error: m.compact_error ?? "" }
       }
+      continue
+    }
+    // The session's slash commands, once it has started: asked, not waited on for long.
+    if (m.type === "system" && m.subtype === "init") {
+      const terminal = (m as { terminal_slash_commands?: Array<string> }).terminal_slash_commands ?? []
+      const list = await Promise.race([messages.supportedCommands().catch(() => undefined), new Promise<undefined>((ok) => setTimeout(() => ok(undefined), 3000))])
+      if (list) yield { type: "commands", commands: usableCommands(list, terminal) }
       continue
     }
     if (m.type === "rate_limit_event") {
@@ -355,7 +401,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       if (m.parent_tool_use_id) continue
       m.message.content.forEach((block, i) => {
         if (block.type === "tool_use") {
-          tools.set(block.id, { name: block.name, detail: detailOf(block.name, block.input as Record<string, unknown>) })
+          tools.set(block.id, { name: block.name, detail: detailOf(block.name, block.input as Record<string, unknown>), diff: editDiff(block.name, block.input as Record<string, unknown>) })
         }
         // Text that didn't arrive as deltas (a provider without partial messages) arrives whole.
         if (block.type === "text" && !streamed.has(m.message.id)) pending.push({ type: "text", key: `${m.message.id}:${i}`, delta: block.text })
@@ -364,7 +410,7 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
       for (const [id, t] of tools) {
         if (announced.get(id) === t.detail) continue
         announced.set(id, t.detail)
-        pending.push({ type: "tool", key: id, name: t.name, detail: t.detail, status: "running" })
+        pending.push({ type: "tool", key: id, name: t.name, detail: t.detail, status: "running", ...(t.diff ? { diff: t.diff } : {}) })
       }
       yield* pending.splice(0)
       continue
@@ -380,7 +426,8 @@ async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
           name: t.name,
           detail: t.detail,
           status: block.is_error ? "failed" : "done",
-          output: keepOutput(resultText(block.content))
+          output: keepOutput(resultText(block.content)),
+          ...(t.diff ? { diff: t.diff } : {})
         }
       }
       continue

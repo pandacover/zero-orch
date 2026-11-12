@@ -222,6 +222,8 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         runtime.runFork(threads.turn(thread, project, text, attachments, { compactFirst }))
         return reply(202, { started: true })
       }
+      // The slash commands its session takes, for / in its composer.
+      if (m === "GET" && parts[2] === "commands") return reply(200, threads.commands(thread.id))
       // The files where the thread works, for @ in its composer.
       if (m === "GET" && parts[2] === "files") {
         const project = store.project(thread.projectId)

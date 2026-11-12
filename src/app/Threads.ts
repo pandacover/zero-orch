@@ -19,7 +19,7 @@ import { git, head } from "../Git.ts"
 import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "../Singularity.ts"
 import type { Access, Item, Project, ProviderId, Settings, Thread, UsageLimit } from "./Model.ts"
 import { atMost, isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
-import { type Provider, type ThreadTools, turnStream, type Verdict } from "./providers/Provider.ts"
+import { type Provider, type SlashCommandInfo, type ThreadTools, turnStream, type Verdict } from "./providers/Provider.ts"
 import { claude, claudeModels, nameThread } from "./providers/Claude.ts"
 import { codex } from "./providers/Codex.ts"
 import { ollama } from "./providers/Ollama.ts"
@@ -215,6 +215,8 @@ export const makeThreads = (options: {
     const name = options.nameThread ?? nameThread
     /** The plan's usage windows as the provider last reported them, by kind: the composer's meter shows them. */
     const limits = new Map<string, UsageLimit>()
+    /** The slash commands each thread's session takes, as its provider last said: the composer offers them after /. */
+    const commands = new Map<string, ReadonlyArray<SlashCommandInfo>>()
 
     const touch = (t: Thread) => {
       t.updatedAt = now()
@@ -454,7 +456,10 @@ export const makeThreads = (options: {
                   // A call that fails once the turn is stopped failed because of the stop (Claude's "Stream closed"),
                   // not the other way round: its card says so.
                   const output = e.status === "failed" && l.abort.signal.aborted ? cutShort(e.output ?? "") : e.output ?? ""
-                  put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output })
+                  put(t, { kind: "tool", id: `tool_${e.key}`, at: now(), name: e.name, detail: e.detail, status: e.status, output, ...(e.diff ? { diff: e.diff } : {}) })
+                } else if (e.type === "commands") {
+                  commands.set(t.id, e.commands)
+                  hub.send("commands", { threadId: t.id, commands: e.commands })
                 } else if (e.type === "limit") {
                   limits.set(e.limit.kind, e.limit)
                   hub.send("limits", [...limits.values()])
@@ -788,6 +793,8 @@ export const makeThreads = (options: {
       isRunning: busy,
       /** The plan's usage windows as the provider last reported them. */
       limits: () => [...limits.values()],
+      /** A thread's session's slash commands, once a turn of it has started. */
+      commands: (id: string) => commands.get(id) ?? [],
       /** How many threads have a turn going. */
       running: () => live.size,
       stop: (id: string) => {

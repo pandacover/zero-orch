@@ -138,6 +138,8 @@ export type Item =
     detail: string
     status: "running" | "done" | "failed"
     output: string
+    /** What an edit changed: "-" and "+" lines, "@@" between pieces (Edit, MultiEdit, Write). */
+    diff?: string | undefined
   }
   | {
     readonly kind: "permission"
