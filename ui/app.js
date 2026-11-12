@@ -2006,7 +2006,10 @@ function threadView(t) {
               : el("span", { class: "title-project gone", text: "removed project" }),
             el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
             title,
-            links)),
+            links),
+          DESKTOP ? el("div", { class: "bar-tools" },
+            el("button", { class: "icon-btn bar-tool", type: "button", title: "Open this thread's folder in VS Code", "aria-label": "Open in VS Code", html: CODE_ICON, onclick: () => openOut(vscodeUrl(threadDir(t, project))) }),
+            el("button", { class: "icon-btn bar-tool", type: "button", title: "Show this thread's folder", "aria-label": "Show folder", html: FOLDER_ICON, onclick: () => openOut(folderUrl(threadDir(t, project))) })) : null),
         scroll,
         el("div", { class: "composer-wrap" }, jump, box.node)),
       git.node,
@@ -2241,7 +2244,13 @@ function paintTurnFiles(node, edited) {
   box.dataset.sig = sig
   const total = files.reduce((s, [, c]) => ({ add: s.add + c.add, del: s.del + c.del }), { add: 0, del: 0 })
   const SHOWN = 6
-  const row = ([path, c]) => el("li", { class: "turn-file" }, el("span", { class: "turn-file-path", text: rel(path), title: path }), diffStat(c))
+  // In the desktop app a file opens in VS Code, at the thread's folder for a path given relative to it.
+  const dir = S.open ? threadDir(S.open, S.projects.find((p) => p.id === S.open.projectId)) : ""
+  const row = ([path, c]) => el("li", { class: "turn-file" },
+    DESKTOP
+      ? el("button", { class: "turn-file-path", type: "button", text: rel(path), title: `Open ${path} in VS Code`, onclick: () => openOut(vscodeUrl(absPath(path, dir))) })
+      : el("span", { class: "turn-file-path", text: rel(path), title: path }),
+    diffStat(c))
   const rest = files.length - SHOWN
   box.replaceChildren(
     el("div", { class: "turn-files-head" },
@@ -2903,6 +2912,19 @@ function diffCounts(text) {
 /** "+12 −3", green and red, for a row. */
 const diffStat = ({ add, del }) => el("span", { class: "diff-stat", "aria-label": `${add} lines added, ${del} removed` },
   add ? el("b", { class: "d-plus", text: `+${add}` }) : null, del ? el("b", { class: "d-minus", text: `−${del}` }) : null)
+
+// ---------- out to the editor and the file manager (the desktop app only: a phone's would be the wrong machine) ----------
+const DESKTOP = location.protocol === "zero:"
+const CODE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.5 4.5-3.5 3.5 3.5 3.5M10.5 4.5l3.5 3.5-3.5 3.5M9 2.5 7 13.5"/></svg>'
+const FOLDER_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/></svg>'
+/** Where a thread works: its worktree, else its project's folder. */
+const threadDir = (t, project) => S.open?.id === t.id && S.open.cwd ? S.open.cwd : t.cwd || project?.path || ""
+const slashes = (p) => p.replace(/\\/g, "/").replace(/^\/+/, "")
+const vscodeUrl = (path) => path ? `vscode://file/${encodeURI(slashes(path))}` : ""
+const folderUrl = (path) => path ? `file:///${encodeURI(slashes(path))}` : ""
+/** A path the agent gave (absolute, or under the thread's folder) as an absolute one. */
+const absPath = (path, dir) => /^([a-zA-Z]:[\\/]|\/)/.test(path) || !dir ? path : `${dir.replace(/[\\/]$/, "")}/${path}`
+const openOut = (url) => { if (url) window.open(url, "_blank") }
 
 /** A unified diff, its lines marked as added, removed or a hunk's header. */
 function diffView(text) {
