@@ -150,6 +150,21 @@ export const createBranch = async (
   return { ok: true, branch }
 }
 
+/**
+ * Make `cwd` a git repository with `git init` and an empty first commit, unless it's already in one
+ * (its own, or a parent folder's): a repository nested in another is seldom what anyone wants. The
+ * first commit gives HEAD a branch to stand on, so branches and worktrees work from the start.
+ */
+export const initRepo = async (cwd: string, exec: Run = run): Promise<{ ok: true; made: boolean } | { ok: false; error: string }> => {
+  const inside = await exec("git", ["rev-parse", "--is-inside-work-tree"], cwd)
+  if (inside.missing) return { ok: false, error: "git isn't installed" }
+  if (inside.ok && inside.stdout.trim() === "true") return { ok: true, made: false }
+  const r = await exec("git", ["init"], cwd)
+  if (!r.ok) return { ok: false, error: `git init failed: ${why(r, "git init")}` }
+  const c = await exec("git", ["commit", "--allow-empty", "-m", "Initial commit"], cwd)
+  return c.ok ? { ok: true, made: true } : { ok: false, error: `the repository was made, but its first commit failed: ${why(c, "git commit")}` }
+}
+
 /** A branch name's last part as a folder name: `feat/Login fix` → `login-fix`. */
 export const slug = (s: string): string =>
   s.toLowerCase().replace(/^.*\//, "").replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 60) || "work"

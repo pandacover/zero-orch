@@ -1,8 +1,18 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+
+// A git identity for the first commit of a repository the API makes: CI runners have none.
+// Hoisted, so git commands the API runs see it (their environment is read when GitInfo loads).
+vi.hoisted(() => {
+  for (const who of ["AUTHOR", "COMMITTER"]) {
+    process.env[`GIT_${who}_NAME`] ??= "Test"
+    process.env[`GIT_${who}_EMAIL`] ??= "test@example.com"
+  }
+})
 import { type Api, makeApi } from "../src/app/Api.ts"
 import { envFor } from "../src/Proc.ts"
 
@@ -34,6 +44,35 @@ describe("the control plane's backend, without a transport", () => {
     expect(await api.call("GET", "nope")).toEqual({ status: 404, body: { error: "not found" } })
     expect((await api.call("POST", "projects", "not an object")).status).toBe(400)
     expect((await api.call("GET", "threads/thr_missing")).status).toBe(404)
+  })
+
+  it("makes a missing project folder and a git repository in it, only when asked", async () => {
+    const dir = join(home, "made", "deep", "app")
+    expect(await api.call("POST", "projects", { path: dir })).toEqual({ status: 400, body: { error: `no folder at ${dir}` } })
+    expect(existsSync(dir)).toBe(false)
+
+    const made = await api.call("POST", "projects", { path: dir, create: true, git: true })
+    expect(made.status).toBe(201)
+    expect(made.body).toMatchObject({ name: "app", path: dir, git: "initialized" })
+    expect(existsSync(join(dir, ".git"))).toBe(true)
+    // An empty first commit, so the branch menu has a branch to show.
+    expect(execFileSync("git", ["log", "--format=%s"], { cwd: dir, encoding: "utf8" }).trim()).toBe("Initial commit")
+    const branches = (await api.call("GET", `projects/${(made.body as { id: string }).id}/branches`)).body as { repo: boolean; current: string }
+    expect(branches.repo).toBe(true)
+    expect(branches.current).not.toBe("")
+
+    // Added again, it's the same project, and git leaves the repository as it is.
+    const again = await api.call("POST", "projects", { path: dir, create: true, git: true })
+    expect(again.body).toMatchObject({ id: (made.body as { id: string }).id, git: "already" })
+
+    // A subfolder of a repository isn't given a repository of its own.
+    const sub = join(dir, "pkg")
+    expect((await api.call("POST", "projects", { path: sub, create: true, git: true })).body).toMatchObject({ git: "already" })
+    expect(existsSync(join(sub, ".git"))).toBe(false)
+
+    const file = join(home, "a-file.txt")
+    writeFileSync(file, "x")
+    expect(await api.call("POST", "projects", { path: file, create: true })).toEqual({ status: 400, body: { error: `${file} is a file, not a folder` } })
   })
 
   it("tells subscribers what changed, until they leave", async () => {

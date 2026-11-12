@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { createBranch, createWorktree, listBranches, newBranchName, parseLocal, parseRemote, samePath, slug, switchBranch, worktreeOf } from "../src/app/Branches.ts"
+import { createBranch, createWorktree, initRepo, listBranches, newBranchName, parseLocal, parseRemote, samePath, slug, switchBranch, worktreeOf } from "../src/app/Branches.ts"
+import type { Run } from "../src/app/GitInfo.ts"
 
 const git = (cwd: string, ...args: Array<string>) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
 
@@ -42,6 +43,26 @@ describe("branch lists, as git prints them", () => {
     expect(slug("..")).toBe("work")
     expect(newBranchName("origin/main")).toMatch(/^zero\/main-[a-z0-9]{4,6}$/)
     expect(samePath(join(tmpdir(), "a", ".."), tmpdir())).toBe(true)
+  })
+})
+
+describe("making a folder a repository", () => {
+  const fake = (fails: string | null, inside = false): Run => async (_cmd, args) => {
+    const sub = args[0] ?? ""
+    if (sub === "rev-parse") return { ok: inside, stdout: inside ? "true\n" : "", stderr: inside ? "" : "fatal: not a git repository", missing: false }
+    return sub === fails
+      ? { ok: false, stdout: "", stderr: "fatal: unable to auto-detect email address", missing: false }
+      : { ok: true, stdout: "", stderr: "", missing: false }
+  }
+
+  it("inits and makes a first commit, or leaves a repository alone", async () => {
+    expect(await initRepo("x", fake(null))).toEqual({ ok: true, made: true })
+    expect(await initRepo("x", fake(null, true))).toEqual({ ok: true, made: false })
+  })
+
+  it("says which step failed", async () => {
+    expect(await initRepo("x", fake("init"))).toEqual({ ok: false, error: "git init failed: fatal: unable to auto-detect email address" })
+    expect(await initRepo("x", fake("commit"))).toEqual({ ok: false, error: "the repository was made, but its first commit failed: fatal: unable to auto-detect email address" })
   })
 })
 

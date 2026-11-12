@@ -11,7 +11,7 @@
  * turn ends.
  */
 import { Context, Effect, Layer, Schema } from "effect"
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { DEFAULT_SETTINGS, newId, type Project, Settings, type Thread, type ThreadMeta, metaOf } from "./Model.ts"
@@ -28,7 +28,8 @@ export class Store extends Context.Service<Store, {
   saveSettings(input: unknown): Effect.Effect<Settings, StoreError>
   projects(): ReadonlyArray<Project>
   project(id: string): Project | undefined
-  addProject(path: string, name?: string): Effect.Effect<Project, StoreError>
+  /** A folder as a project; with `create`, the folder (and its parents) are made when missing. */
+  addProject(path: string, name?: string, create?: boolean): Effect.Effect<Project, StoreError>
   removeProject(id: string): Effect.Effect<void>
   threads(): ReadonlyArray<ThreadMeta>
   thread(id: string): Thread | undefined
@@ -93,10 +94,17 @@ export const make = (home: string) =>
         ),
       projects: () => projects,
       project: (id) => projects.find((p) => p.id === id),
-      addProject: (path, name) =>
+      addProject: (path, name, create = false) =>
         Effect.gen(function*() {
           const full = resolve(path.trim().replace(/^"|"$/g, ""))
-          if (!existsSync(full)) return yield* new StoreError({ message: `no folder at ${full}` })
+          if (!existsSync(full)) {
+            if (!create) return yield* new StoreError({ message: `no folder at ${full}` })
+            yield* Effect.try({
+              try: () => mkdirSync(full, { recursive: true }),
+              catch: (e) => new StoreError({ message: `couldn't make ${full}: ${(e as Error).message}` })
+            })
+          }
+          if (!statSync(full).isDirectory()) return yield* new StoreError({ message: `${full} is a file, not a folder` })
           const known = projects.find((p) => resolve(p.path).toLowerCase() === full.toLowerCase())
           if (known) return known
           const project: Project = { id: newId("p"), name: name?.trim() || basename(full), path: full, createdAt: new Date().toISOString() }
