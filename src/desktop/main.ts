@@ -87,18 +87,30 @@ else {
    * A thread's "Open in VS Code" opens VS Code's own link; its "Show folder" opens a folder (only a folder:
    * a file would run, and a link in a page mustn't run anything).
    */
-  const open = async (url: string) => {
-    if (/^https?:\/\//.test(url)) return void shell.openExternal(url)
-    if (/^vscode(-insiders)?:\/\/file\//.test(url)) return void shell.openExternal(url)
+  const open = (url: string) => openOut(url).catch((e: unknown) => notice(`Couldn't open that: ${e instanceof Error ? e.message : String(e)}`))
+  /** A note in the page's corner, from here: something the page asked for didn't happen. */
+  const notice = (text: string) => {
+    if (win && !win.isDestroyed()) win.webContents.send("event", "notice", { text, error: true })
+  }
+  /**
+   * The OS opens a link, or says why it can't. Windows rejects a link whose app is missing or
+   * uninstalled ("Application not found"); openPath resolves with its error instead of rejecting.
+   */
+  const external = (url: string, app: string) => shell.openExternal(url).catch(() =>
+    notice(`${app} didn't open: no installed app handles ${url.split(":")[0]}:// links here. Install ${app}, or reinstall it to register its links again.`))
+  const openPath = (path: string) => shell.openPath(path).then((error) => { if (error) notice(`Couldn't open ${path}: ${error}`) })
+  const openOut = async (url: string) => {
+    if (/^https?:\/\//.test(url)) return external(url, "The browser")
+    if (/^vscode(-insiders)?:\/\/file\//.test(url)) return external(url, url.startsWith("vscode-insiders:") ? "VS Code Insiders" : "VS Code")
     if (url.startsWith("file:")) {
       const path = fileURLToPath(url)
-      if (statSync(path, { throwIfNoEntry: false })?.isDirectory()) void shell.openPath(path)
+      if (statSync(path, { throwIfNoEntry: false })?.isDirectory()) await openPath(path)
       return
     }
     const id = url.startsWith(`${PAGE}attachments/`) ? url.slice(`${PAGE}attachments/`.length) : ""
     const a = id ? (await api).attachment(id) : undefined
     if (!a) return
-    if (isInlineImage(a.mime)) void shell.openPath(a.path)
+    if (isInlineImage(a.mime)) await openPath(a.path)
     else win?.webContents.downloadURL(url)
   }
 

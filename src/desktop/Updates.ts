@@ -46,7 +46,7 @@ export const pollForUpdates = (): void => {
       message: `zero ${available} is out`,
       detail: `It couldn't install itself (${e.message}). Download it from GitHub instead.`
     })
-    if (response === 0) void shell.openExternal(`${REPO.replace(/\.git$/, "")}/releases/tag/v${available}`)
+    if (response === 0) shell.openExternal(`${REPO.replace(/\.git$/, "")}/releases/tag/v${available}`).catch(() => {})
   })
 
   check()

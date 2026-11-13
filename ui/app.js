@@ -194,19 +194,68 @@ function actionSheet(title, actions) {
   d.showModal()
 }
 /**
- * `open` on a long press of `node` by a finger, or a right-click. The press doesn't also follow the
- * link under it, and the phone's own link menu stays away (app.css: -webkit-touch-callout).
+ * A right-click menu of `actions` ({ label, run, danger, icon }) at (`x`, `y`): a small list by the pointer,
+ * not a modal. A click elsewhere, Escape, a scroll or the window losing focus puts it away; Up and Down
+ * move between its items. Only one is open at a time.
  */
-function onHold(node, open) {
+let ctxMenu = null
+function contextMenu(x, y, title, actions) {
+  ctxMenu?.close()
+  const back = document.activeElement
+  const m = el("div", { class: "ctx-menu", role: "menu", "aria-label": title, popover: "auto" },
+    actions.map((a) => el("button", { class: `ctx-item${a.danger ? " danger" : ""}`, type: "button", role: "menuitem", tabindex: -1,
+      onclick: () => { close(); a.run() } }, a.icon ? icon(a.icon) : el("span", { class: "ico" }), el("span", { text: a.label }))))
+  /** Put away: by a pick, a key, or the browser's light dismiss (a click elsewhere). Safe to run twice. */
+  const close = () => {
+    if (!m.isConnected) return
+    if (m.matches(":popover-open")) m.hidePopover()
+    removeEventListener("blur", close)
+    removeEventListener("resize", close)
+    removeEventListener("scroll", close, true)
+    m.remove()
+    if (ctxMenu?.node === m) ctxMenu = null
+    // Back to where focus was, unless a click put it somewhere else since.
+    if (!document.activeElement || document.activeElement === document.body) back?.focus?.({ preventScroll: true })
+  }
+  m.addEventListener("toggle", (e) => { if (e.newState === "closed") close() })
+  m.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return }
+    const items = [...m.querySelectorAll(".ctx-item")]
+    const i = items.indexOf(document.activeElement)
+    const to = e.key === "ArrowDown" ? (i + 1) % items.length : e.key === "ArrowUp" ? (i - 1 + items.length) % items.length
+      : e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : -1
+    if (to < 0) return
+    e.preventDefault()
+    items[to].focus()
+  })
+  document.body.append(m)
+  m.showPopover()
+  // Opens down and right of the pointer, flipped where that would leave the window.
+  const w = m.offsetWidth, h = m.offsetHeight
+  m.style.left = `${Math.max(6, x + w > innerWidth - 6 ? x - w : x)}px`
+  m.style.top = `${Math.max(6, y + h > innerHeight - 6 ? y - h : y)}px`
+  addEventListener("blur", close)
+  addEventListener("resize", close)
+  addEventListener("scroll", close, true)
+  m.querySelector(".ctx-item")?.focus({ preventScroll: true })
+  ctxMenu = { node: m, close }
+}
+/**
+ * The actions `menu()` names ({ title, actions }) on a long press of `node` by a finger (a sheet up from the
+ * bottom), or a right-click (a menu at the pointer). The press doesn't also follow the link under it, and the
+ * phone's own link menu stays away (app.css: -webkit-touch-callout).
+ */
+function onHold(node, menu) {
   let timer = 0
   let start = null
   let held = false
+  const sheet = () => { const { title, actions } = menu(); actionSheet(title, actions) }
   const cancel = () => { clearTimeout(timer); timer = 0 }
   node.addEventListener("pointerdown", (e) => {
     held = false
     if (e.pointerType === "mouse") return
     start = { x: e.clientX, y: e.clientY }
-    timer = setTimeout(() => { timer = 0; held = true; navigator.vibrate?.(8); open() }, 450)
+    timer = setTimeout(() => { timer = 0; held = true; navigator.vibrate?.(8); sheet() }, 450)
   })
   // Moving the finger (a scroll) isn't a press.
   node.addEventListener("pointermove", (e) => { if (timer && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8) cancel() })
@@ -214,8 +263,13 @@ function onHold(node, open) {
   node.addEventListener("click", (e) => { if (held) { e.preventDefault(); e.stopPropagation(); held = false } }, true)
   node.addEventListener("contextmenu", (e) => {
     e.preventDefault()
-    if (held || timer) { cancel(); if (!held) { held = true; open() } return }
-    open()
+    // A finger's long press fires this too: that's the sheet's.
+    if (held || timer) { cancel(); if (!held) { held = true; sheet() } return }
+    // The keyboard's menu key has no pointer: the menu opens at the row.
+    const r = node.getBoundingClientRect()
+    const keyed = e.button !== 2 && e.clientX === 0 && e.clientY === 0
+    const { title, actions } = menu()
+    contextMenu(keyed ? r.left + 12 : e.clientX, keyed ? r.bottom - 4 : e.clientY, title, actions)
   })
 }
 
@@ -309,10 +363,11 @@ function renderSide() {
         el("span", { class: "proj-actions" },
           el("button", { class: "icon-btn", type: "button", title: `New thread in ${p.name}`, "aria-label": `New thread in ${p.name}`, onclick: () => go(`#/new/${p.id}`) }, "+"),
           el("button", { class: "icon-btn proj-remove", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, onclick: () => removeProject(p) }, "×"))),
-        () => actionSheet(p.name, [
-          { label: "New thread", run: () => go(`#/new/${p.id}`) },
-          { label: "Remove from zero", danger: true, run: () => removeProject(p) }
-        ])),
+        () => ({ title: p.name, actions: [
+          { label: "New thread", icon: PLUS_PATHS, run: () => go(`#/new/${p.id}`) },
+          { label: "Copy folder path", icon: COPY_PATHS, run: () => copyText(p.path, "Folder path copied.") },
+          { label: "Remove from zero", icon: TRASH_PATHS, danger: true, run: () => removeProject(p) }
+        ] })),
       el("ul", { class: "threads", inert: closed },
         threads.length === 0
           // Every thread of it is up in Drafts: it still has threads, just none to list here.
@@ -369,7 +424,7 @@ function threadRow(t, where = "") {
     // Pinning and deleting live here, on the row's hover, rather than in the thread's header (a long press, by touch).
     el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => pinThread(t) }),
     el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })),
-  () => threadSheet(t))
+  () => threadMenu(t))
 }
 /**
  * Where a thread stands for the person: "ask" (waiting for their approval), "failed" or "done" (a turn
@@ -429,15 +484,28 @@ function nested(list) {
   return out
 }
 const CHILD_PATHS = '<path d="M4 3v5.5A1.5 1.5 0 0 0 5.5 10H12M9.5 7.5 12 10l-2.5 2.5"/>'
+// The right-click menu's icons: the paths of the row's own icons below.
+const COPY_PATHS = '<rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/>'
+const PIN_PATHS = '<path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/>'
+const TRASH_PATHS = '<path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/>'
+const DISCARD_PATHS = '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>'
 /** `node`, with `open` on a long press or right-click. */
 const held = (node, open) => { onHold(node, open); return node }
 const pinThread = (t) => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail)
-/** What a long press on a thread offers: what its row's hover buttons do. */
-const threadSheet = (t, draftKey = "") => actionSheet(t.title, [
-  ...(draftKey ? [{ label: "Discard draft", run: () => discardDraft(draftKey) }] : []),
-  { label: t.pinned ? "Unpin" : "Pin to the top", run: () => pinThread(t) },
-  { label: "Delete thread", danger: true, run: () => deleteThread(t) }
-])
+/** What a right-click or long press on a thread offers: what its row's hover buttons do, and copying its id. */
+const threadMenu = (t, draftKey = "") => ({ title: t.title, actions: [
+  ...(draftKey ? [{ label: "Discard draft", icon: DISCARD_PATHS, run: () => discardDraft(draftKey) }] : []),
+  { label: t.pinned ? "Unpin" : "Pin to the top", icon: PIN_PATHS, run: () => pinThread(t) },
+  { label: "Copy thread ID", icon: COPY_PATHS, run: () => copyText(t.id, "Thread ID copied.") },
+  { label: "Delete thread", icon: TRASH_PATHS, danger: true, run: () => deleteThread(t) }
+] })
+/** Put `text` on the clipboard, and say so. */
+async function copyText(text, said = "Copied.") {
+  try {
+    await navigator.clipboard.writeText(text)
+    toast(said)
+  } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
+}
 /** A thread's dot (working, waiting for an approval, or ended unseen) and its pin, ahead of its title. */
 const DOTS = {
   working: ["run-dot", "Working"],
@@ -499,14 +567,14 @@ function draftsSection(inbox = new Set()) {
           el("span", { class: "age", text: ago(d.at) })),
         el("button", { class: "icon-btn thread-pin", type: "button", title: "Discard draft", "aria-label": `Discard draft in ${thread.title}`, html: DISCARD_ICON, onclick: () => discardDraft(key) }),
         el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${thread.title}`, html: TRASH_ICON, onclick: () => deleteThread(thread) })),
-      () => threadSheet(thread, key))
+      () => threadMenu(thread, key))
       return held(el("li", { class: "thread-row draft-row" },
         el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: where, "aria-current": active ? "page" : null },
           el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
           el("span", { class: "t", text: d.title }),
           el("span", { class: "age", text: ago(d.at) })),
         el("button", { class: "icon-btn thread-del", type: "button", title: "Discard draft", "aria-label": `Discard draft: ${d.title}`, html: TRASH_ICON, onclick: () => discardDraft(key) })),
-      () => actionSheet(d.title, [{ label: "Discard draft", danger: true, run: () => discardDraft(key) }]))
+      () => ({ title: d.title, actions: [{ label: "Discard draft", icon: TRASH_PATHS, danger: true, run: () => discardDraft(key) }] }))
     })))
 }
 /** Repaint only the Drafts section: typing changes nothing else in the sidebar. */
@@ -939,6 +1007,11 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
   }
 }
 
+/** A branch's name in a list: its folder part (zero/, origin/) quiet, so the part that tells branches apart stands out. */
+function branchLabel(name) {
+  const cut = name.lastIndexOf("/") + 1
+  return el("span", { class: "bp-branch" }, cut ? el("span", { class: "bp-dir", text: name.slice(0, cut) }) : null, name.slice(cut))
+}
 /** What's wrong with `name` as a new branch's name, in words; "" when it's fine or empty. `taken` is the local branches' names. */
 const branchNameProblem = (name, taken) =>
   !name ? ""
@@ -1019,6 +1092,7 @@ function branchPicker({ load, onSwitch, onCreate, onWorktree, onJoin, onLeave = 
   }
   // Made once, outside pop.paint, so typing in the search box never loses its caret.
   const filter = own(el("input", { class: "bp-filter", type: "search", placeholder: "Find a branch, or type a new name", "aria-label": "Find a branch, or type a new name", "data-key": "filter", autocomplete: "off", spellcheck: "false" }))
+  const filterBox = el("label", { class: "bp-search" }, icon('<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/>'), filter)
   const listBox = el("div", { class: "pop-scroll bp-list", role: "menu", "aria-label": "Branches" })
   const cmdBox = el("div", { class: "bp-cmds" })
   filter.addEventListener("input", () => { state.filter = filter.value; paintList() })
@@ -1066,14 +1140,15 @@ function branchPicker({ load, onSwitch, onCreate, onWorktree, onJoin, onLeave = 
           else act(async () => { state.pending = null; await onSwitch(b.name) })
         } },
         el("span", { class: "pop-check", "aria-hidden": "true", text: on ? "✓" : "" }),
-        el("span", { class: "bp-branch", text: b.name }),
+        branchLabel(b.name),
         el("span", { class: "bp-meta" }, ...tags))
     })
-    const remoteRows = remote.map((r) => {
-      const item = popItem({ key: `r/${r}`, on: false, text: r, disabled: locked, onPick: () => act(async () => { state.pending = null; await onSwitch(r) }) })
-      item.title = `Make a local branch that tracks ${r}, and switch to it`
-      return item
-    })
+    const remoteRows = remote.map((r) =>
+      el("button", { class: "pop-item bp-row", type: "button", role: "menuitemradio", "aria-checked": "false", "data-key": `r/${r}`, disabled: locked,
+        title: `Make a local branch that tracks ${r}, and switch to it`,
+        onclick: () => act(async () => { state.pending = null; await onSwitch(r) }) },
+        el("span", { class: "pop-check", "aria-hidden": "true" }),
+        branchLabel(r)))
     listBox.replaceChildren(...[
       local.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Local branches" }, el("div", { class: "pop-head", text: "Branches" }), rows) : null,
       remote.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Remote branches" }, el("div", { class: "pop-head", text: "Remote" }), remoteRows) : null,
@@ -1105,7 +1180,7 @@ function branchPicker({ load, onSwitch, onCreate, onWorktree, onJoin, onLeave = 
               el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "leave", disabled: locked, onclick: () => act(onLeave) }, "Work in the project folder"))
             : null
       pop.panel.replaceChildren(el("div", { class: "pop-col bp-pick" },
-        filter,
+        filterBox,
         state.running ? el("div", { class: "pop-note", text: "Branches switch once this turn ends." }) : null,
         state.working ? el("div", { class: "pop-note", text: "Working…" }) : null,
         state.problem ? el("p", { class: "bp-error", role: "alert", text: state.problem }) : null,
@@ -3782,10 +3857,10 @@ const EVO_KINDS = {
   evolve: { label: "Evolve", verb: "Start evolving", what: "Generations back to back, each starting from what the last one kept, until the count or the money runs out." }
 }
 const EVO_STEPS = [
-  ["measure", "Measure", "The solver works each benchmark task; hidden tests it never sees score the result."],
-  ["propose", "Propose", "The improver reads the scores and earlier attempts, recalls the most similar past win, and edits genome/."],
-  ["judge", "Judge", "The new genome is benchmarked. It wins with a higher score, or the same score for at least 15% less."],
-  ["keep", "Keep", "A win is committed and stored in memory for the next improver. A loss is put back and logged."]
+  ["measure", "Measure", "The solver works every benchmark task; hidden tests it never sees score it."],
+  ["propose", "Propose", "The improver studies the scores and earlier tries, recalls a past win, and edits genome/."],
+  ["judge", "Judge", "The new genome is benchmarked. It wins with a higher score, or the same for 15% less."],
+  ["keep", "Keep", "A win is committed and remembered for the next improver. A loss is put back."]
 ]
 const EVO_FILES = [
   ["genome/solver.md", "solver.md", "The instructions every solver agent starts with."],
@@ -3799,6 +3874,9 @@ const EVO_KNOBS = [
   ["improverModel", "Improver model", "Rewrites the genome", modelName],
   ["improverEffort", "Improver effort", "How hard it thinks each turn"]
 ]
+/** The page's tabs: [key, label]. Overview has what's needed to run; the rest is for reading. */
+const EVO_TABS = [["overview", "Overview"], ["history", "History"], ["genome", "Genome"], ["bench", "Benchmark"]]
+let evoTab = load("evoTab", "overview")
 
 const EVO_LEDE = "zero rewrites its own genome, the instructions and settings its agents run with, and keeps a change only when a benchmark with hidden tests shows it's better."
 function evolutionView() {
@@ -3824,15 +3902,16 @@ function loadEvo() {
 /** Before the first answer: the page's shape, so nothing jumps when it arrives. */
 function evoSkeleton() {
   const bar = (w, h = 12) => el("span", { class: "skel", style: `width:${w};height:${h}px` })
-  const tile = (label) => el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, bar("55%", 26)), el("div", { class: "kpi-sub" }, bar("80%", 10)))
+  const stat = (label) => el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, bar("55%", 26)), el("div", { class: "kpi-sub" }, bar("80%", 10)))
   return [
-    el("header", { class: "evo-head" },
-      el("div", {}, el("h1", { text: "Evolution" }), el("p", { class: "lede", text: EVO_LEDE })),
-      el("span", { class: "evo-status" }, el("i"), "Loading…")),
-    evoLoop({ job: null, log: [] }),
-    el("section", { class: "kpis", "aria-busy": "true" }, ["Score", "Cost per task", "Generations", "Spent"].map(tile)),
-    el("section", { class: "card", "aria-busy": "true" }, el("h2", { text: "Lineage" }), bar("60%", 10), el("div", { class: "chart" }, bar("100%", 240))),
-    el("div", { class: "evo-grid" }, el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Run" })), el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Output" })))
+    evoHeader(null),
+    evoTabs(null),
+    el("div", { class: "evo-tab" },
+      el("section", { class: "kpis", "aria-busy": "true" }, ["Score", "Cost per task", "Generations", "Spent"].map(stat)),
+      evoLoop({ job: null, log: [] }),
+      el("div", { class: "evo-main" },
+        el("section", { class: "card evo-chart-card", "aria-busy": "true" }, el("h2", { text: "Lineage" }), bar("60%", 10), el("div", { class: "chart" }, bar("100%", 240))),
+        el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Run" }))))
   ]
 }
 /** Rebuild one section in place, leaving the rest of the page (and where it's scrolled) alone. */
@@ -3879,6 +3958,7 @@ function evoEstimate(E) {
   return evoMode === "generation" ? first : Math.min(first + one * (evoGens - 1), evoMore)
 }
 
+/** Paint the page: the header and tabs, then the open tab. Where the page is scrolled stays put. */
 function paintEvo() {
   const root = $("evo")
   if (!root || !S.evo) return
@@ -3886,40 +3966,70 @@ function paintEvo() {
   const running = evoRunning(E)
   clearInterval(evoClock)
   if (running) evoClock = setInterval(() => { const n = $("evo-elapsed"); if (n && S.evo?.job) n.textContent = elapsed(S.evo.job.startedAt); else clearInterval(evoClock) }, 1000)
-  root.replaceChildren(
-    evoHeader(E),
-    evoLoop(E),
-    evoStats(E),
-    evoChart(E),
-    el("div", { class: "evo-grid" }, evoRun(E), evoOutput(E)),
-    evoHistory(E),
-    el("div", { class: "evo-grid evo-grid-wide" }, evoGenome(E), el("div", { class: "evo-stack" }, evoBench(E), evoMemory(E)))
-  )
+  if (!EVO_TABS.some(([k]) => k === evoTab)) evoTab = "overview"
+  const body = {
+    overview: () => [
+      evoStats(E),
+      evoLoop(E),
+      el("div", { class: "evo-main" }, evoChart(E), evoRun(E)),
+      evoOutput(E),
+      evoLatest(E)
+    ],
+    history: () => [evoHistory(E)],
+    genome: () => [el("div", { class: "evo-main evo-main-genome" }, evoGenome(E), evoMemory(E))],
+    bench: () => [evoBench(E)]
+  }[evoTab]
+  root.replaceChildren(evoHeader(E), evoTabs(E), el("div", { class: "evo-tab", id: "evo-tab", role: "tabpanel", "aria-labelledby": `evo-tab-${evoTab}` }, body()))
   const log = $("evo-log")
   if (log) log.scrollTop = log.scrollHeight
 }
+/** Open a tab of the page, and keep focus on its tab when it had it. */
+function evoGo(tab) {
+  const had = document.activeElement?.closest?.(".evo-tabs")
+  evoTab = tab
+  save("evoTab", tab)
+  paintEvo()
+  if (had) $(`evo-tab-${tab}`)?.focus()
+}
 
 function evoStatus(E) {
+  if (!E) return el("span", { class: "evo-status" }, el("i"), "Loading…")
   const j = E.job
   if (evoRunning(E)) {
     return el("span", { class: "evo-status live" }, el("i"),
       j.state === "stopping" ? "Stopping…" : `${EVO_KINDS[j.request.kind].label} running`,
-      el("span", { class: "mono", id: "evo-elapsed", text: elapsed(j.startedAt) }))
+      el("span", { class: "evo-status-time", id: "evo-elapsed", text: elapsed(j.startedAt) }))
   }
   if (!j) return el("span", { class: "evo-status" }, el("i"), "Idle")
   const when = ago(j.endedAt ?? j.startedAt)
   const said = { done: "Last run finished", failed: "Last run failed", stopped: "Last run stopped" }[j.state] ?? "Idle"
-  return el("span", { class: `evo-status ${j.state}` }, el("i"), said, el("span", { class: "mono", text: when === "now" ? "just now" : `${when} ago` }))
+  return el("span", { class: `evo-status ${j.state}` }, el("i"), said, el("span", { class: "evo-status-time", text: when === "now" ? "just now" : `${when} ago` }))
 }
 
 function evoHeader(E) {
   return el("header", { class: "evo-head" },
-    el("div", {},
+    el("div", { class: "evo-title" },
       el("h1", { text: "Evolution" }),
       el("p", { class: "lede", text: EVO_LEDE })),
     evoStatus(E))
 }
 
+/** The tabs under the header. History counts its generations. Left and Right move between them. */
+function evoTabs(E) {
+  const keys = EVO_TABS.map(([k]) => k)
+  return el("nav", { class: "evo-tabs", role: "tablist", "aria-label": "Evolution" },
+    EVO_TABS.map(([k, label]) => el("button", {
+      class: "evo-tabbtn", type: "button", role: "tab", id: `evo-tab-${k}`, "aria-selected": String(k === evoTab), tabindex: k === evoTab ? 0 : -1,
+      onclick: () => { if (E && k !== evoTab) evoGo(k) },
+      onkeydown: (e) => {
+        if (!E || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return
+        e.preventDefault()
+        evoGo(keys[(keys.indexOf(k) + (e.key === "ArrowRight" ? 1 : keys.length - 1)) % keys.length])
+      }
+    }, label, k === "history" && E?.attempts.length ? el("span", { class: "evo-tab-n", text: String(E.attempts.length) }) : null)))
+}
+
+/** How a generation works, as four steps; during a run, which one it's on. */
 function evoLoop(E) {
   const stage = evoStage(E)
   const at = EVO_STEPS.findIndex(([k]) => k === stage)
@@ -3936,19 +4046,19 @@ function evoStats(E) {
   const first = E.measures[0]
   const kept = E.attempts.filter((a) => a.accepted).length
   const benchUsd = E.measures.reduce((s, m) => s + m.costUsd, 0)
-  const tile = (label, value, sub, good = null) =>
+  const stat = (label, value, sub, good = null) =>
     el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, value),
       el("div", { class: "kpi-sub" }, good ? el("span", { class: "kpi-good", text: good }) : null, sub))
   const saved = now && first ? share(perTask(first), perTask(now)) : 0
   return el("section", { class: "kpis", "aria-label": "Where zero stands" },
-    tile("Score", now ? [pct(now.score), el("small", { text: "%" })] : "—",
+    stat("Score", now ? [pct(now.score), el("small", { text: "%" })] : "—",
       now ? `${now.solved} of ${now.tasks} tasks fully solved${(now.reps ?? 1) > 1 ? ` · ${now.reps} reps` : ""}` : "Run a benchmark to score this genome"),
-    tile("Cost per task", now ? usd(perTask(now)) : "—",
-      now && first ? (saved > 0 ? `from ${usd(perTask(first))} at the start` : `${usd(perTask(first))} at the start`) : "What one solver run costs, on average",
+    stat("Cost per task", now ? usd(perTask(now)) : "—",
+      now && first ? (saved > 0 ? `from ${usd(perTask(first))}` : `${usd(perTask(first))} at the start`) : "One solver run, on average",
       saved > 0 ? `${saved}% less` : null),
-    tile("Generations", String(E.attempts.length),
+    stat("Generations", String(E.attempts.length),
       E.attempts.length ? `${kept} kept · ${E.attempts.length - kept} turned down` : "None yet"),
-    tile("Spent", usd(E.spentUsd), `${usd(benchUsd)} benchmarks · ${usd(E.spentUsd - benchUsd)} improvers`))
+    stat("Spent", usd(E.spentUsd), `${usd(benchUsd)} benchmarks · ${usd(E.spentUsd - benchUsd)} improvers`))
 }
 
 function evoChart(E) {
@@ -3960,16 +4070,16 @@ function evoChart(E) {
     [["score", "Score"], ["cost", "Cost"]].map(([m, l]) =>
       el("button", { type: "button", role: "radio", "aria-checked": String(m === metric), onclick: () => { evoMetric = m; save("evoMetric", m); swapEvo("evo-chart", evoChart)?.querySelector("[aria-checked=true]")?.focus() } }, l)))
   const key = (cls, text) => el("span", { class: "legend-item" }, el("span", { class: `legend-mark ${cls}` }), text)
-  const card = el("section", { class: "card", id: "evo-chart" },
+  const card = el("section", { class: "card evo-chart-card", id: "evo-chart" },
     el("div", { class: "card-head" },
       el("div", {}, el("h2", { text: "Lineage" }),
-        el("p", { class: "hint hint-2", text: metric === "cost"
-          ? "What a full benchmark run cost the genome each generation started from. Lower is better; the line drops when a cheaper genome is kept."
-          : "The genome's score, generation by generation. The line moves only when a change is kept." })),
+        el("p", { class: "hint", text: metric === "cost"
+          ? "A full benchmark run's cost, generation by generation. It drops when a cheaper genome is kept."
+          : "The genome's score, generation by generation. It moves only when a change is kept." })),
       seg),
     chart,
     E.attempts.length === 0 && !evoNow(E) ? null : el("div", { class: "legend" }, key("lm-start", "First measured"), key("lm-kept", "Kept"), key("lm-down", "Turned down"), key("lm-guard", "Stopped by a guard"),
-      flat && metric === "score" ? el("span", { class: "legend-note", text: "Every genome scores the same here, so Cost tells more." }) : null))
+      flat && metric === "score" ? el("span", { class: "legend-note", text: "Every genome scores the same: Cost tells more." }) : null))
   drawLineage(chart, E, evoRunning(E) && E.job.request.kind !== "bench", metric)
   return card
 }
@@ -3992,31 +4102,33 @@ function evoRun(E) {
   }
   const field = (label, help, control, off = false) =>
     el("div", { class: `evo-field${off ? " off" : ""}` },
-      el("div", {}, el("div", { class: "evo-field-label" }, label, el("span", { class: "only", text: "Evolve only" })), el("div", { class: "row-help", text: help })), control)
+      el("div", { class: "evo-field-text" },
+        el("div", { class: "evo-field-label" }, label, el("span", { class: "only", text: "Evolve only" })),
+        el("div", { class: "row-help", text: help })),
+      control)
   const more = el("input", { id: "evo-more", type: "number", min: 1, max: 500, step: 1, value: evoMore, inputmode: "decimal", disabled: notEvolve })
   more.addEventListener("change", () => { evoMore = Math.min(500, Math.max(1, Number(more.value) || 5)); more.value = evoMore; save("evoMore", evoMore); paintEvoEstimate() })
-  const modes = el("div", { class: "modes", role: "radiogroup", "aria-label": "What to run" },
-    Object.entries(EVO_KINDS).map(([m, k]) =>
+  const kinds = Object.keys(EVO_KINDS)
+  const pick = (m) => { evoMode = m; save("evoMode", m); paintRun() }
+  const modes = el("div", { class: "seg evo-modes", role: "radiogroup", "aria-label": "What to run" },
+    kinds.map((m) =>
       el("button", {
-        class: "mode", type: "button", role: "radio", "aria-checked": String(m === evoMode), tabindex: m === evoMode ? 0 : -1,
-        onclick: () => { evoMode = m; save("evoMode", m); paintRun() },
+        type: "button", role: "radio", "aria-checked": String(m === evoMode), tabindex: m === evoMode ? 0 : -1,
+        onclick: () => pick(m),
         onkeydown: (e) => {
           if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key)) return
           e.preventDefault()
-          const ks = Object.keys(EVO_KINDS)
-          evoMode = ks[(ks.indexOf(m) + (e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : ks.length - 1)) % ks.length]
-          save("evoMode", evoMode)
-          paintRun()
+          pick(kinds[(kinds.indexOf(m) + (e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : kinds.length - 1)) % kinds.length])
         }
-      }, el("span", { class: "mode-dot" }), el("span", {}, el("b", { text: k.label }), el("span", { text: k.what })))))
+      }, EVO_KINDS[m].label)))
   return el("section", { class: "card evo-run", id: "evo-run" },
-    el("h2", { text: "Run" }),
-    el("p", { class: "hint", text: "Runs use real agent sessions and cost real money." }),
+    el("div", { class: "card-head" }, el("h2", { text: "Run" }), el("span", { class: "hint", text: "Real sessions, real money" })),
     modes,
+    el("p", { class: "evo-mode-what", text: EVO_KINDS[evoMode].what }),
     el("div", { class: "evo-fields" },
-      field("Reps per task", "Run each task more than once to average out luck. Multiplies the benchmark's cost.", stepper("evo-reps", evoReps, 1, 5, (n) => { evoReps = n; save("evoReps", n) })),
+      field("Reps per task", "Runs each task more than once to average out luck.", stepper("evo-reps", evoReps, 1, 5, (n) => { evoReps = n; save("evoReps", n) })),
       field("Generations", "At most this many in a row.", stepper("evo-gens", evoGens, 1, 50, (n) => { evoGens = n; save("evoGens", n) }, notEvolve), notEvolve),
-      field("Spend up to", `More from here, on top of the ${usd(E.spentUsd)} spent so far. Checked before each generation, so the last one can go a little over.`,
+      field("Spend up to", `More, on top of the ${usd(E.spentUsd)} spent so far.`,
         el("label", { class: "money" }, el("span", { text: "$" }), more), notEvolve)),
     // Whatever the mode: the same note, so choosing one doesn't move the page.
     dirty
@@ -4034,13 +4146,13 @@ function evoRun(E) {
 }
 /** The Run card alone, after a choice in it: same size in every mode, focus kept on the chosen one. */
 function paintRun() {
-  const had = document.activeElement?.closest?.(".modes")
+  const had = document.activeElement?.closest?.(".evo-modes")
   const fresh = swapEvo("evo-run", evoRun)
-  if (had) fresh?.querySelector(".mode[aria-checked=true]")?.focus()
+  if (had) fresh?.querySelector(".evo-modes [aria-checked=true]")?.focus()
 }
 function evoEstimateText(E, est) {
   if (est === null) return [el("span", { class: "hint", text: "The cost shows once the genome has a score." })]
-  return [el("span", { class: "hint", text: evoMode === "evolve" ? "Up to about" : "About" }), el("b", { class: "mono", text: usd(est) })]
+  return [el("span", { class: "hint", text: evoMode === "evolve" ? "Up to about" : "About" }), el("b", { text: usd(est) })]
 }
 function paintEvoEstimate() {
   const n = $("evo-est")
@@ -4051,14 +4163,28 @@ function evoOutput(E) {
   const j = E.job
   const running = evoRunning(E)
   const args = j ? ["zero", ...(j.request.kind === "bench" ? ["bench"] : [j.request.kind])].join(" ") : ""
-  const log = el("div", { class: "log", id: "evo-log", role: "log", "aria-live": "off" },
+  const log = el("div", { class: `log${E.log.length ? "" : " empty"}`, id: "evo-log", role: "log", "aria-live": "off" },
     E.log.length ? E.log.map((l) => logLine(l.line))
-      : el("div", { class: "log-empty" }, el("b", { text: "Nothing has run since zero started." }), "Start a run and its output streams here, line by line."))
+      : el("div", { class: "log-empty", text: "Nothing has run since zero started. A run's output streams here, line by line." }))
   return el("section", { class: "card evo-out" },
     el("div", { class: "card-head" },
-      el("div", {}, el("h2", { text: "Output" }), el("p", { class: "hint", text: j ? `${EVO_KINDS[j.request.kind].label} · ${{ running: "running", stopping: "stopping", done: "finished", failed: "failed", stopped: "stopped" }[j.state]} · ${args}` : "The live output of the current or last run." })),
+      el("div", { class: "evo-out-title" }, el("h2", { text: "Output" }),
+        j ? el("span", { class: "hint", text: `${EVO_KINDS[j.request.kind].label} · ${{ running: "running", stopping: "stopping", done: "finished", failed: "failed", stopped: "stopped" }[j.state]}` }) : null,
+        j ? el("code", { class: "file-chip", text: args }) : null),
       running ? el("button", { class: "btn btn-quiet btn-xs", type: "button", disabled: j.state === "stopping", onclick: stopEvo }, j.state === "stopping" ? "Stopping…" : "Stop") : null),
     log)
+}
+
+/** Overview's last few generations, with a way to all of them. */
+function evoLatest(E) {
+  const last = E.attempts.slice(-3).reverse()
+  return el("section", { class: "card" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Latest generations" }), el("p", { class: "hint", text: "Open one to see what the improver tried, why, and what the benchmark said." })),
+      E.attempts.length > last.length ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => evoGo("history") }, `See all ${E.attempts.length}`) : null),
+    last.length === 0
+      ? el("div", { class: "evo-empty" }, el("b", { text: "No generations yet." }), "Run one: the first measures the genome as it is, then tries to beat it.")
+      : el("ol", { class: "attempts" }, last.map((a) => evoAttempt(E, a))))
 }
 
 function evoHistory(E) {
@@ -4079,7 +4205,7 @@ function evoHistory(E) {
 }
 function evoAttempt(E, a) {
   const guard = a.childScore === null
-  const verdict = a.accepted ? "Kept" : guard ? "Stopped by a guard" : "Turned down"
+  const verdict = a.accepted ? "Kept" : guard ? "Guard" : "Turned down"
   const pc = judgedCost(E, a.parentId, a.at)
   const cc = guard ? null : judgedCost(E, a.childId, a.at)
   const dScore = guard ? null : a.childScore - a.parentScore
@@ -4088,20 +4214,21 @@ function evoAttempt(E, a) {
   const d = el("details", { class: `attempt ${a.accepted ? "kept" : guard ? "guard" : "down"}`, id: `evo-att-${a.generation}`, open: evoOpen.has(a.generation) },
     el("summary", {},
       el("span", { class: "gen", text: `#${a.generation}` }),
-      el("span", { class: "att-main" }, el("span", { class: "verdict", text: verdict }), el("span", { class: "att-sum", text: a.summary || "No summary." })),
+      el("span", { class: "verdict", text: verdict, title: guard ? "Stopped by a guard before it was measured" : null }),
+      el("span", { class: "att-sum", text: a.summary || "No summary." }),
       el("span", { class: "att-nums" },
         guard ? el("span", { class: "delta", text: "not measured" })
-          : [Math.abs(dScore) < 0.0005 ? delta(0, "score =") : delta(dScore, `${dScore > 0 ? "+" : ""}${(dScore * 100).toFixed(1)} pts`, dScore > 0),
-            dCost === null ? null : delta(dCost, dCost === 0 ? "cost =" : `${dCost > 0 ? "+" : ""}${dCost}% cost`, dCost < 0)],
+          : [Math.abs(dScore) < 0.0005 ? delta(0, "same score") : delta(dScore, `${dScore > 0 ? "+" : ""}${(dScore * 100).toFixed(1)} pts`, dScore > 0),
+            dCost === null ? null : delta(dCost, dCost === 0 ? "same cost" : `${dCost > 0 ? "+" : "−"}${Math.abs(dCost)}% cost`, dCost < 0)],
         el("span", { class: "when", text: `${ago(a.at)} ago`.replace("now ago", "just now"), title: new Date(a.at).toLocaleString() }))),
     el("div", { class: "att-body" },
       el("dl", {},
         a.hypothesis ? [el("dt", { text: "Why it tried this" }), el("dd", { text: a.hypothesis })] : null,
         el("dt", { text: "Verdict" }), el("dd", { text: a.reason }),
-        el("dt", { text: "Score" }), el("dd", { class: "mono", text: `${pct(a.parentScore)}% → ${guard ? "—" : `${pct(a.childScore)}%`}` }),
-        el("dt", { text: "Benchmark cost" }), el("dd", { class: "mono", text: `${pc === null ? "—" : usd(pc)} → ${cc === null ? "—" : usd(cc)}` }),
+        el("dt", { text: "Score" }), el("dd", { class: "num", text: `${pct(a.parentScore)}% → ${guard ? "—" : `${pct(a.childScore)}%`}` }),
+        el("dt", { text: "Benchmark cost" }), el("dd", { class: "num", text: `${pc === null ? "—" : usd(pc)} → ${cc === null ? "—" : usd(cc)}` }),
         el("dt", { text: "Files" }), el("dd", {}, a.files.length ? a.files.map((f) => el("code", { class: "file-chip", text: f })) : el("span", { class: "hint", text: "None" })),
-        el("dt", { text: "Improver cost" }), el("dd", { class: "mono", text: usd(a.improverCostUsd) }),
+        el("dt", { text: "Improver cost" }), el("dd", { class: "num", text: usd(a.improverCostUsd) }),
         a.commit ? [el("dt", { text: "Commit" }), el("dd", {}, el("code", { class: "file-chip", text: a.commit.slice(0, 10), title: a.commit }))] : null)))
   d.addEventListener("toggle", () => (d.open ? evoOpen.add(a.generation) : evoOpen.delete(a.generation)))
   return d
@@ -4110,6 +4237,8 @@ function evoAttempt(E, a) {
 function openAttempt(gen) {
   evoOpen.add(gen)
   evoFilter = "all"
+  evoTab = "history"
+  save("evoTab", evoTab)
   paintEvo()
   const n = $(`evo-att-${gen}`)
   n?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" })
@@ -4125,13 +4254,13 @@ function evoGenome(E) {
   return el("section", { class: "card evo-genome", id: "evo-genome" },
     el("div", { class: "card-head" },
       el("div", {}, el("h2", { text: "Current genome" }),
-        el("p", { class: "hint", text: "What generations change: the settings below and three instruction files, all in genome/ and versioned in git." })),
+        el("p", { class: "hint", text: "What generations change: these settings and three instruction files, all in genome/ and versioned in git." })),
       el("code", { class: "file-chip", text: g.id, title: "The genome's id: a hash of all four files" })),
     el("dl", { class: "knobs" }, EVO_KNOBS.map(([k, label, help, show]) =>
-      el("div", { class: "knob" }, el("dt", { text: label }), el("dd", { text: show ? show(g.knobs[k]) : String(g.knobs[k]) }), el("div", { class: "row-help", text: help })))),
+      el("div", { class: "knob", title: help }, el("dt", { text: label }), el("dd", { text: show ? show(g.knobs[k]) : String(g.knobs[k]) })))),
     el("div", { class: "files" },
       el("div", { class: "file-tabs", role: "tablist", "aria-label": "Genome files" },
-        EVO_FILES.map(([f, name]) => el("button", { type: "button", role: "tab", "aria-selected": String(f === file[0]), onclick: () => { evoFile = f; swapEvo("evo-genome", evoGenome)?.querySelector("[aria-selected=true]")?.focus() } }, name))),
+        EVO_FILES.map(([f, name]) => el("button", { type: "button", role: "tab", "aria-selected": String(f === file[0]), onclick: () => { evoFile = f; swapEvo("evo-genome", evoGenome)?.querySelector(".file-tabs [aria-selected=true]")?.focus() } }, name))),
       el("p", { class: "hint", text: `${file[2]} ${text.trim().split("\n").length} lines.` }),
       el("pre", { class: "file-text", tabindex: 0, text: text.trim() || "(empty)" })),
     el("p", { class: "hint evo-uses" }, el("span", { class: `pill${on ? "" : " off"}` }, el("i"), on ? "In your threads" : "Off for threads"),
@@ -4141,20 +4270,23 @@ function evoGenome(E) {
 function evoBench(E) {
   const now = evoNow(E)
   const res = new Map((now?.results ?? []).map((r) => [r.id, r]))
-  const firstLine = (p) => p.split(/\n\s*\n/)[0].replace(/`/g, "").replace(/\s+/g, " ").trim()
+  const firstLine = (p) => p.split(/\n\s*\n/)[0].replace(/`/g, "").replace(/^#+\s*/, "").replace(/\s+/g, " ").trim()
   return el("section", { class: "card" },
-    el("h2", { text: "Benchmark" }),
-    el("p", { class: "hint", text: `${E.tasks.length} small programming tasks. Each has hidden tests the solver never sees; the score is the share of them passed.` }),
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Benchmark" }),
+        el("p", { class: "hint", text: `${E.tasks.length} small programming tasks. Each has hidden tests the solver never sees; the score is the share of them passed.` })),
+      now ? el("span", { class: "pill" }, el("i"), `${now.solved} of ${now.tasks} solved`) : null),
     el("ul", { class: "tasks" }, E.tasks.map((t) => {
       const r = res.get(t.id)
       const full = r && r.passed === r.total
-      return el("li", {},
-        el("details", {},
-          el("summary", {},
-            el("span", { class: "task-id mono", text: t.id }),
-            r ? el("span", { class: "task-bar", title: `${r.passed} of ${r.total} hidden cases passed` }, el("span", { style: `width:${(r.passed / Math.max(1, r.total)) * 100}%`, class: full ? "full" : "" })) : el("span", { class: "task-bar" }),
-            el("span", { class: "task-nums mono", text: r ? `${r.passed}/${r.total} · ${usd(r.costUsd / (now.reps ?? 1))}` : "not run" })),
-          el("p", { class: "task-prompt", text: firstLine(t.prompt) })))
+      const about = firstLine(t.prompt)
+      return el("li", { class: "task" },
+        el("div", { class: "task-text" },
+          el("span", { class: "task-id", text: t.id }),
+          el("span", { class: "task-prompt", text: about, title: about })),
+        r ? el("span", { class: "task-bar", title: `${r.passed} of ${r.total} hidden cases passed` }, el("span", { style: `width:${(r.passed / Math.max(1, r.total)) * 100}%`, class: full ? "full" : "" })) : el("span", { class: "task-bar" }),
+        el("span", { class: "task-nums", text: r ? `${r.passed}/${r.total}` : "not run" }),
+        el("span", { class: "task-cost", text: r ? usd(r.costUsd / (now.reps ?? 1)) : "" }))
     })))
 }
 
@@ -4166,17 +4298,18 @@ function evoMemory(E) {
       el("ul", { class: "memory" }, [0, 1].map(() => el("li", {}, el("span", { class: "skel", style: "width:70%;height:10px" })))))
   }
   const live = E.memory.filter((m) => !m.retired)
-  return el("section", { class: "card" },
-    el("h2", { text: "Memory" }),
-    el("p", { class: "hint", text: "Kept changes singularity stored. Before each generation it hands the improver the one most like the job at hand." }),
+  return el("section", { class: "card evo-memory" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Memory" }),
+        el("p", { class: "hint", text: "Kept changes singularity stored. Before each generation it hands the improver the one most like the job at hand." })),
+      E.memory.length ? el("span", { class: "pill" }, el("i"), `${live.length} in use${E.memory.length > live.length ? ` · ${E.memory.length - live.length} retired` : ""}`) : null),
     E.memory.length === 0
       ? el("div", { class: "evo-empty" }, "Nothing stored yet. Each kept generation is stored here.")
       : el("ul", { class: "memory" }, E.memory.map((m) =>
         el("li", { class: m.retired ? "retired" : "" },
-          el("span", { class: "mem-title", text: m.title || m.task }),
-          el("code", { class: "file-chip", text: m.commit.slice(0, 7), title: m.commit }),
-          m.retired ? el("span", { class: "hint", text: "retired" }) : null))),
-    E.memory.length ? el("p", { class: "hint", text: `${live.length} in use${E.memory.length > live.length ? `, ${E.memory.length - live.length} retired` : ""}.` }) : null)
+          el("span", { class: "mem-title", text: m.title || m.task, title: m.title || m.task }),
+          m.retired ? el("span", { class: "hint", text: "retired" }) : null,
+          el("code", { class: "file-chip", text: m.commit.slice(0, 7), title: m.commit })))))
 }
 
 async function startEvo() {
@@ -4388,6 +4521,8 @@ function connect() {
   on["settings"] = (data) => { S.settings = data }
   on["limits"] = (data) => { S.limits = data; paintMeter() }
   on["commands"] = ({ threadId, commands }) => { S.commands.set(threadId, commands) }
+  // The desktop app couldn't do something the page asked of the OS (open a link in VS Code, a folder).
+  on["notice"] = ({ text, error }) => toast(text, Boolean(error))
   // Claude Code said which models it offers: the menus have them from the next time they open.
   on["providers"] = (data) => {
     S.providers = data
@@ -4404,6 +4539,7 @@ function connect() {
     const log = $("evo-log")
     if (log) {
       log.querySelector(".log-empty")?.remove()
+      log.classList.remove("empty")
       const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40
       log.append(logLine(entry.line))
       if (stick) log.scrollTop = log.scrollHeight
