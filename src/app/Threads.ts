@@ -222,6 +222,16 @@ export const makeThreads = (options: {
     const limits = new Map<string, UsageLimit>()
     /** The slash commands each thread's session takes, as its provider last said: the composer offers them after /. */
     const commands = new Map<string, ReadonlyArray<SlashCommandInfo>>()
+    /** Messages sent to a thread while its turn ran, oldest first: they run, as one, when it ends. */
+    const queues = new Map<string, Array<{ id: string; text: string; words: string; attachments: ReadonlyArray<Attachment> }>>()
+    /** The thread's meta says what's waiting, so the page shows it under the turn. */
+    const showWaiting = (t: Thread) => {
+      const q = queues.get(t.id) ?? []
+      if (q.length) t.waiting = q.map((m) => ({ id: m.id, text: m.words }))
+      else delete t.waiting
+      hub.send("thread", metaOf(t))
+      store.saveThread(t, true)
+    }
 
     const touch = (t: Thread) => {
       t.updatedAt = now()
@@ -358,12 +368,32 @@ export const makeThreads = (options: {
      * With `compactFirst` (the person left Compact on when the context was filling), the provider
      * compacts its session first while the message waits in `queued`; then the message runs.
      */
-    const turn = (
+    type TurnOpts = { readonly compactFirst?: boolean; readonly from?: { readonly threadId: string; readonly title: string } }
+    /** A turn, then (however it ended) the messages sent meanwhile, as the next turn. */
+    const turn = (t: Thread, project: Project, text: string, attachments: ReadonlyArray<Attachment> = [], opts: TurnOpts = {}): Effect.Effect<void, never, Memory | ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path> =>
+      turnOnce(t, project, text, attachments, opts).pipe(
+        Effect.ensuring(Effect.sync(() => {
+          const q = queues.get(t.id)
+          queues.delete(t.id)
+          // Not into a thread deleted meanwhile, nor beside a turn that's somehow going already.
+          if (!q?.length || store.thread(t.id) !== t || live.has(t.id)) return
+          showWaiting(t)
+          starting.add(t.id)
+          Effect.runForkWith(services)(turn(t, project, q.map((m) => m.text).join("\n\n"), q.flatMap((m) => m.attachments)).pipe(
+            Effect.ensuring(Effect.sync(() => {
+              starting.delete(t.id)
+              if (!live.has(t.id)) settle(t.id)
+            }))
+          ))
+        }))
+      )
+
+    const turnOnce = (
       t: Thread,
       project: Project,
       text: string,
       attachments: ReadonlyArray<Attachment> = [],
-      opts: { readonly compactFirst?: boolean; readonly from?: { readonly threadId: string; readonly title: string } } = {}
+      opts: TurnOpts = {}
     ) =>
       Effect.gen(function*() {
         const memory = yield* Memory
@@ -834,10 +864,29 @@ export const makeThreads = (options: {
       turn,
       /** A thread was deleted: anyone waiting for it hears so now, and its live session ends. */
       forget: (id: string) => {
+        queues.delete(id)
         settle(id)
         for (const p of Object.values(PROVIDERS)) p.close?.(id)
       },
       isRunning: busy,
+      /** A message sent while the thread works: it waits, shown, and runs when the turn ends. */
+      enqueue: (t: Thread, text: string, attachments: ReadonlyArray<Attachment> = []) => {
+        const q = queues.get(t.id) ?? []
+        const words = plainText(text, attachments).trim() || "Your message"
+        q.push({ id: newId("q"), text, words, attachments })
+        queues.set(t.id, q)
+        showWaiting(t)
+      },
+      /** Take back a waiting message before it runs; false when it already ran or never was. */
+      unqueue: (t: Thread, id: string) => {
+        const q = queues.get(t.id)
+        const i = q?.findIndex((m) => m.id === id) ?? -1
+        if (!q || i < 0) return false
+        q.splice(i, 1)
+        if (!q.length) queues.delete(t.id)
+        showWaiting(t)
+        return true
+      },
       /** The plan's usage windows as the provider last reported them. */
       limits: () => [...limits.values()],
       /** A thread's session's slash commands, once a turn of it has started. */

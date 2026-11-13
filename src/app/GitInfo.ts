@@ -281,6 +281,35 @@ export const pullRequest = async (cwd: string, branch: string, exec: Run = run):
   return { gh: { ok: true, detail: "" }, pr: toPullRequest(raw, Array.isArray(comments) ? comments : []) }
 }
 
+/** GitHub's default branch for each folder's repository, as `gh` last said (null: it couldn't), and when. */
+const defaults = new Map<string, { name: string | null; at: number }>()
+const DEFAULT_TTL_MS = 10 * 60 * 1000
+/**
+ * The repository's default branch on GitHub, where a pull request goes unless it says otherwise. Asked
+ * of GitHub, not read off `origin/HEAD`: that's set at clone time and goes stale when the default changes.
+ */
+export const defaultBranch = async (cwd: string, exec: Run = run): Promise<string | null> => {
+  const known = defaults.get(cwd)
+  if (known && Date.now() - known.at < DEFAULT_TTL_MS) return known.name
+  const r = await exec("gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], cwd)
+  const name = r.ok && isRefName(r.stdout.trim()) ? r.stdout.trim() : null
+  defaults.set(cwd, { name, at: Date.now() })
+  return name
+}
+
+/**
+ * The remote's default branch as `origin/<name>`: GitHub's, else what the clone's `origin/HEAD` says;
+ * null when neither knows.
+ */
+export const remoteDefault = async (cwd: string, exec: Run = run): Promise<string | null> => {
+  const [github, remoteHead] = await Promise.all([
+    defaultBranch(cwd, exec),
+    text(exec, cwd, ["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"])
+  ])
+  if (github) return `origin/${github}`
+  return remoteHead && remoteHead !== "origin/HEAD" ? remoteHead : null
+}
+
 /** A git command's output (trimmed, unless `raw`: status lines start with a meaningful space), or null when it failed. */
 const text = async (exec: Run, cwd: string, args: ReadonlyArray<string>, raw = false) => {
   const r = await exec("git", args, cwd)
@@ -302,13 +331,13 @@ export const gitView = async (cwd: string, branch: string | undefined, exec: Run
   const ref = name ? `refs/heads/${name}` : "HEAD"
   const [upstream, remoteHead, status, prInfo] = await Promise.all([
     name ? text(exec, cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", `${name}@{upstream}`]) : Promise.resolve(null),
-    text(exec, cwd, ["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"]),
+    remoteDefault(cwd, exec),
     text(exec, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], true),
     name ? pullRequest(cwd, linked && known ? linked : name, exec) : Promise.resolve({ gh: { ok: false, detail: "HEAD is detached: no branch to look up." }, pr: null })
   ])
   const [ahead, behind] = upstream ? parseCounts((await text(exec, cwd, ["rev-list", "--left-right", "--count", `${ref}...${upstream}`])) ?? "") : [0, 0]
   // A branch's own commits are those past the PR's base, else past the remote's default branch.
-  const base = prInfo.pr?.base ? `origin/${prInfo.pr.base}` : remoteHead && remoteHead !== "origin/HEAD" ? remoteHead : null
+  const base = prInfo.pr?.base ? `origin/${prInfo.pr.base}` : remoteHead
   const format = `--format=%H${FS}%s${FS}%an${FS}%aI`
   const own = base && base.replace(/^origin\//, "") !== name
     ? await text(exec, cwd, ["log", format, "-n", "50", `${base}..${ref}`, "--"])
