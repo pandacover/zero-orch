@@ -877,15 +877,15 @@ export const makeThreads = (options: {
         queues.set(t.id, q)
         showWaiting(t)
       },
-      /** Take back a waiting message before it runs; false when it already ran or never was. */
-      unqueue: (t: Thread, id: string) => {
+      /** Take back a waiting message before it runs: what it said and its files, for the composer; null when it already ran or never was. */
+      unqueue: (t: Thread, id: string): { text: string; attachments: ReadonlyArray<Attachment> } | null => {
         const q = queues.get(t.id)
         const i = q?.findIndex((m) => m.id === id) ?? -1
-        if (!q || i < 0) return false
-        q.splice(i, 1)
+        if (!q || i < 0) return null
+        const [m] = q.splice(i, 1)
         if (!q.length) queues.delete(t.id)
         showWaiting(t)
-        return true
+        return { text: m!.text, attachments: m!.attachments }
       },
       /** The plan's usage windows as the provider last reported them. */
       limits: () => [...limits.values()],

@@ -1974,6 +1974,22 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     after.collapse(true)
     caretTo(after)
   }
+  // A chip can move to another composer with its draft: it tells the box it's in now, not this one.
+  const changed = (box) => box?.dispatchEvent(new Event("input"))
+  /** A file chip in the box, with its × to take the file out. */
+  const removable = (chip, name) => {
+    const x = el("button", { class: "att-x", type: "button", tabindex: "-1", "aria-label": `Remove ${name}`, title: "Remove", text: "×" })
+    x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
+    x.addEventListener("click", () => {
+      const box = chip.closest(".input")
+      const next = chip.nextSibling
+      if (next?.nodeType === Node.TEXT_NODE && next.nodeValue === " ") next.remove()
+      chip.remove()
+      changed(box)
+    })
+    chip.append(x)
+    return chip
+  }
   const addFiles = (files) => {
     if (disabled) return
     if (!canAttach) return toast(attach.title, true)
@@ -1981,19 +1997,7 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     for (const file of files) {
       if (file.size > MAX_FILE) { toast(`${file.name} is over 25 MB, too big to attach.`, true); continue }
       const local = isRaster(file.type) ? URL.createObjectURL(file) : null
-      const chip = attChip("span", { name: file.name || "pasted file", mime: file.type, src: local, attrs: { contenteditable: "false", "data-state": "uploading", title: "Uploading…" } })
-      const x = el("button", { class: "att-x", type: "button", tabindex: "-1", "aria-label": `Remove ${file.name || "file"}`, title: "Remove", text: "×" })
-      x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
-      // A chip can move to another composer with its draft: it tells the box it's in now, not this one.
-      const changed = (box) => box?.dispatchEvent(new Event("input"))
-      x.addEventListener("click", () => {
-        const box = chip.closest(".input")
-        const next = chip.nextSibling
-        if (next?.nodeType === Node.TEXT_NODE && next.nodeValue === " ") next.remove()
-        chip.remove()
-        changed(box)
-      })
-      chip.append(x)
+      const chip = removable(attChip("span", { name: file.name || "pasted file", mime: file.type, src: local, attrs: { contenteditable: "false", "data-state": "uploading", title: "Uploading…" } }), file.name || "file")
       nodes.push(chip, document.createTextNode(" "))
       // The preview gives way to the server's copy once it's there.
       upload(file).then((a) => {
@@ -2140,6 +2144,32 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
       document.execCommand("insertText", false, `${empty() ? "" : "\n\n"}${block}\n\n`)
       sync()
     },
+    /**
+     * A message taken back (from the queue): its words and files go at the end of what's written, below it,
+     * to be edited and sent again.
+     */
+    restore: (text, attachments = []) => {
+      const known = new Map(attachments.map((a) => [a.id, a]))
+      const nodes = []
+      let last = 0
+      for (const m of text.matchAll(ATT)) {
+        if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)))
+        const a = known.get(m[1])
+        // Chips keep their file: serialize() turns each back into its marker.
+        if (a) nodes.push(removable(attChip("span", { name: a.name, mime: a.mime, src: isRaster(a.mime) ? fileUrl(a.id) : null, attrs: { contenteditable: "false", "data-att": a.id, title: `${a.name} · ${bytes(a.size)}` } }), a.name))
+        last = m.index + m[0].length
+      }
+      if (last < text.length) nodes.push(document.createTextNode(text.slice(last)))
+      if (!nodes.length) return
+      if (!empty()) nodes.unshift(document.createTextNode("\n\n"))
+      input.append(...nodes)
+      sync()
+      input.focus()
+      const r = document.createRange()
+      r.selectNodeContents(input)
+      r.collapse(false)
+      caretTo(r)
+    },
     fill: (text) => {
       input.textContent = text
       sync()
@@ -2218,7 +2248,8 @@ function threadView(t) {
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
-  const queued = el("div", { class: "queued-list", hidden: true })
+  // What waits to be sent: a tray on the composer's top edge.
+  const queued = el("div", { class: "queue-tray", hidden: true, role: "list", "aria-label": "Queued messages" })
   const links = linksNode(t)
   // The turns above the ones drawn: a button for them, which also loads them as it scrolls into view.
   const earlier = el("button", { class: "feed-earlier", type: "button", onclick: () => showEarlier() }, el("span"))
@@ -2272,7 +2303,7 @@ function threadView(t) {
             el("button", { class: "icon-btn bar-tool", type: "button", title: "Open this thread's folder in VS Code", "aria-label": "Open in VS Code", html: CODE_ICON, onclick: () => openOut(vscodeUrl(threadDir(t, project))) }),
             el("button", { class: "icon-btn bar-tool", type: "button", title: "Show this thread's folder", "aria-label": "Show folder", html: FOLDER_ICON, onclick: () => openOut(folderUrl(threadDir(t, project))) })) : null),
         scroll,
-        el("div", { class: "composer-wrap" }, jump, box.node)),
+        el("div", { class: "composer-wrap" }, jump, queued, box.node)),
       git.node,
       git.toggle)
   ]
@@ -2371,28 +2402,42 @@ function paintWorking() {
   const since = S.open.items.findLast((i) => i.kind === "user")?.at
   feed.working.dataset.since = running && since ? since : ""
   tickWorking()
-  // A message waiting for the session to compact first, and the ones sent while the turn runs.
-  const waiting = S.open.waiting ?? []
-  feed.queued.hidden = !S.open.queued && !waiting.length
-  const key = JSON.stringify([S.open.queued ?? "", waiting])
-  if (feed.queued.dataset.key !== key) {
-    feed.queued.dataset.key = key
-    const id = S.open.id
-    feed.queued.replaceChildren(
-      S.open.queued ? el("div", { class: "queued" }, el("span", { class: "queued-label", text: "Queued · runs once the context is compacted" }), el("div", { class: "queued-text", text: S.open.queued })) : null,
-      ...waiting.map((m) => el("div", { class: "queued" },
-        el("span", { class: "queued-label queued-head" }, "Queued · runs when this turn ends",
-          el("button", { class: "att-x queued-x", type: "button", title: "Don't send this", "aria-label": "Don't send this message", text: "×",
-            onclick: () => api("DELETE", `threads/${id}/queue/${m.id}`).catch(fail) })),
-        el("div", { class: "queued-text", text: m.text }))))
-  }
+  paintQueue()
   // Moved only when out of place: moving it restarts its animation (each tool call came through here).
-  if (feed.working.previousElementSibling !== feed.queued || feed.list.lastElementChild !== feed.working) feed.list.append(feed.queued, feed.working)
+  if (feed.list.lastElementChild !== feed.working) feed.list.append(feed.working)
   feed.composer.setBusy(running)
   feed.models.setBusy(running)
   feed.branch?.setBusy(running)
   paintCompact(S.open)
 }
+/**
+ * The tray on the composer: a message waiting for the session to compact first, and the ones sent while the
+ * turn runs. One sent while it runs can be taken back: out of the queue, into the composer, to edit.
+ */
+function paintQueue() {
+  const tray = feed.queued
+  const waiting = S.open.waiting ?? []
+  tray.hidden = !S.open.queued && !waiting.length
+  const key = JSON.stringify([S.open.queued ?? "", waiting])
+  if (tray.dataset.key === key) return
+  tray.dataset.key = key
+  const id = S.open.id
+  const row = (label, text, action) => el("div", { class: "queue-item", role: "listitem" },
+    el("span", { class: "queue-label", text: label }), el("span", { class: "queue-text", text }), action)
+  const takeBack = (m) => el("button", { class: "queue-edit", type: "button", title: "Edit: back to the composer, out of the queue",
+    "aria-label": "Edit this message: back to the composer", html: PENCIL_SVG, onclick: async (e) => {
+      const b = e.currentTarget
+      b.disabled = true
+      try {
+        const back = await api("DELETE", `threads/${id}/queue/${m.id}`)
+        if (feed?.queued === tray) feed.composer.restore(back.text, back.attachments)
+      } catch (err) { b.disabled = false; fail(err) }
+    } })
+  tray.replaceChildren(
+    S.open.queued ? row("After compaction", S.open.queued, null) : null,
+    ...waiting.map((m) => row("Queued", m.text, takeBack(m))))
+}
+const PENCIL_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 3.5l2 2L6 12H4v-2z"/><path d="M9.5 4.5l2 2"/></svg>'
 /** The working line's clock: m:ss since the turn began, each second while it shows. */
 function tickWorking() {
   const w = feed?.working
@@ -2497,7 +2542,7 @@ function renderFeed() {
   feed.groups = groups
   feed.hidden = hidden
   if (hidden) feed.earlier.querySelector("span").textContent = `Show earlier (${hidden} more)`
-  reconcile(feed.list, [...(hidden ? [feed.earlier] : []), ...sections, feed.queued, feed.working])
+  reconcile(feed.list, [...(hidden ? [feed.earlier] : []), ...sections, feed.working])
   // Only a turn's last agent response (its answer, not the narration between tool calls) has the
   // action row, and the turn's details (model, time, cost, tokens) sit in that row beside Copy.
   for (const [id, { node }] of feed.cache) {

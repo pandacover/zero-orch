@@ -239,9 +239,12 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         runtime.runFork(threads.turn(thread, project, text, attachments, { compactFirst }))
         return reply(202, { started: true })
       }
-      // Take back a message waiting for the turn to end: DELETE threads/<id>/queue/<its id>.
+      // Take back a message waiting for the turn to end: DELETE threads/<id>/queue/<its id>. The answer is the
+      // message, its words and its files, for the page to put back in the composer.
       if (m === "DELETE" && parts[2] === "queue" && parts[3]) {
-        return threads.unqueue(thread, parts[3]) ? reply(200, { removed: parts[3] }) : error(409, "that message already ran")
+        const back = threads.unqueue(thread, parts[3])
+        if (!back) return error(409, "that message already ran")
+        return reply(200, { text: back.text, attachments: back.attachments.map(({ id, name, mime, size }) => ({ id, name, mime, size })) })
       }
       // The slash commands its session takes, for / in its composer.
       if (m === "GET" && parts[2] === "commands") return reply(200, threads.commands(thread.id))

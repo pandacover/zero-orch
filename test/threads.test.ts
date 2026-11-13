@@ -649,8 +649,9 @@ describe("a running turn", () => {
       threads.enqueue(t as never, "never mind this one")
       threads.enqueue(t as never, "and then run the tests")
       const dropped = (t as never as { waiting: Array<{ id: string; text: string }> }).waiting[1]!
-      expect(threads.unqueue(t as never, dropped.id)).toBe(true)
-      expect(threads.unqueue(t as never, dropped.id)).toBe(false)
+      // Taken back, it comes back as written, for the composer; a second time, it's gone.
+      expect(threads.unqueue(t as never, dropped.id)).toEqual({ text: "never mind this one", attachments: [] })
+      expect(threads.unqueue(t as never, dropped.id)).toBeNull()
       threads.answer(t.id, threads_pending(t), true)
     })
     // The queued turn runs on its own after the first; wait for it to end.

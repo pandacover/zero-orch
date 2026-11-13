@@ -29,6 +29,8 @@
   --body: "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --mono: "Martian Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
   --r: 14px;
+  /* Lucide's brain icon (ISC license), as a mask */
+  --brain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 18V5'/%3E%3Cpath d='M15 13a4.17 4.17 0 01-3-4 4.17 4.17 0 01-3 4'/%3E%3Cpath d='M17.707 6.294A3 3 0 1012 5a3 3 0 10-5.707 1.294'/%3E%3Cpath d='M17.996 5.125a4 4 0 012.526 5.77'/%3E%3Cpath d='M18 18a4 4 0 002-7.465'/%3E%3Cpath d='M19.967 17.482a4 4 0 11-7.967.517 4 4 0 11-7.967-.517'/%3E%3Cpath d='M6 18a4 4 0 01-2-7.465'/%3E%3Cpath d='M6.004 5.125a4 4 0 00-2.526 5.77'/%3E%3C/svg%3E");
   /* the thread's column: the composer's width, how far it sits in from the pane's sides, and how far in its words start */
   --column: 780px;
   --edge: 20px;
@@ -285,13 +287,28 @@ button.title-project { cursor: pointer; }
 .compact-toggle.on .compact-knob { background: var(--accent); }
 .compact-toggle.on .compact-knob::after { translate: 10px 0; }
 @keyframes compact-in { from { opacity: 0; translate: 6px 0; } }
-/* a message waiting for the context to compact first */
-.queued-list { display: flex; flex-direction: column; gap: 6px; }
-.queued-label.queued-head { display: flex; align-items: center; gap: 8px; }
-.queued-x { margin-left: auto; }
-.queued { align-self: flex-end; max-width: 80%; margin: 4px 0 2px auto; padding: 9px 13px; border: 1px dashed var(--accent-line); border-radius: 14px; color: var(--muted); }
-.queued-label { display: block; margin-bottom: 3px; font: 500 10.5px var(--mono); letter-spacing: .02em; color: var(--accent-text); }
-.queued-text { color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; opacity: .75; }
+/* what waits to be sent (after a compaction, or after the turn): a tray on the composer's top edge, a step
+   narrower than it, one line per message; it covers the composer's ring where they meet, so the two read as one */
+.queue-tray {
+  position: relative; z-index: 1; width: calc(100% - 28px); max-width: calc(var(--column) - 28px); margin: 10px auto 0;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 5px 5px 6px;
+  border: 1px solid var(--line-strong); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--fill);
+  animation: tray-in .18s var(--ease) both;
+}
+.queue-tray[hidden] { display: none; }
+.queue-tray:not([hidden]) + .composer { margin-top: 0; }
+.queue-item { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 30px; padding: 2px 3px 2px 10px; border-radius: 9px; }
+.queue-label { flex: none; font: 500 11.5px var(--body); color: var(--accent-text); }
+.queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink); }
+.queue-edit {
+  flex: none; display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 7px;
+  background: none; color: var(--muted); cursor: pointer;
+}
+.queue-edit svg { width: 14px; height: 14px; }
+@media (hover: hover) { .queue-edit:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); } }
+.queue-edit:disabled { opacity: .5; cursor: default; }
+@keyframes tray-in { from { opacity: 0; translate: 0 6px; } }
+@media (prefers-reduced-motion: reduce) { .queue-tray { animation: none; } }
 /* a compaction in the feed: a card that shows it working, then what it did */
 .compact-card { margin-block: 6px; padding-block: 11px 12px; border-radius: 12px; background: var(--fill); font-size: 13px; }
 .compact-card.running { background: var(--accent-soft); }
@@ -467,8 +484,11 @@ button.title-project { cursor: pointer; }
   border: 0; background: none; text-align: left; cursor: pointer; border-radius: 8px; font-size: 13px; color: var(--muted);
 }
 @media (hover: hover) { .tool-row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); color: var(--ink); } }
-/* a finished call shows nothing; a running one spins, a failed one is crossed */
-.tool-state { display: none; flex: none; }
+/* a finished call shows nothing; a running one spins, a failed one is crossed. The mark sits in the gutter
+   (in a run, in the step its calls are in by), so the call's words start where every other line's do */
+.tool-row { position: relative; }
+.tool-state { display: none; position: absolute; top: 50%; left: calc(var(--gut) / 2); translate: -50% -50%; }
+.tool-group-body .tool-state { left: calc(var(--gut) + var(--nest) / 2); }
 .tool.running > .tool-row .tool-state, .tool-group.running > .tool-group-head .tool-state {
   display: block; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--accent); border-top-color: transparent; animation: spin .8s linear infinite;
 }
@@ -516,8 +536,14 @@ button.title-project { cursor: pointer; }
 
 /* singularity memory: one quiet line, like a tool row, with a small dot in place of a card */
 .mem { min-width: 0; padding: 2px 0; font-size: 12.5px; color: var(--muted); }
-.mem-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.mem-head::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.mem-head { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* memory's mark: Lucide's brain (ISC), in the gutter by the composer's edge (in a run, in the step its calls are
+   in by), so the line's words start where every other line's do; tinted by what memory did */
+.mem-head::before {
+  content: ""; position: absolute; top: 50%; left: calc(var(--gut) / -2 - 1px); width: 12px; height: 12px; translate: -50% -50%;
+  background: var(--accent); -webkit-mask: var(--brain) center / contain no-repeat; mask: var(--brain) center / contain no-repeat;
+}
+.tool-group-body .mem-head::before { left: calc(var(--nest) / -2 - 1px); }
 .mem.checked .mem-head::before, .mem.none .mem-head::before { background: var(--faint); }
 .mem.followup .mem-head::before { background: var(--muted); }
 .mem-text {
@@ -549,10 +575,12 @@ button.title-project { cursor: pointer; }
 .turn-error { background: var(--warn-soft); border-radius: 11px; padding-block: 10px; font-size: 13.5px; }
 .turn-error b { color: var(--warn); }
 /* working: an orbit of light (see WORKING_GLYPH), the words with a light passing over them, and how long the turn has run */
-.working { display: flex; align-items: center; gap: 10px; min-height: 26px; color: var(--muted); font-size: 13px; }
+.working { position: relative; display: flex; align-items: center; gap: 10px; min-height: 26px; color: var(--muted); font-size: 13px; }
+/* the mark sits in the gutter by the composer's edge, drawn at 18px and shown at 12.6 to fit it: "Working" starts
+   where every other line's words do */
 .wk {
   --wk-hot: color-mix(in srgb, var(--accent) 35%, var(--ink));
-  flex: none; position: relative; width: 18px; height: 18px; margin: 0 1px;
+  position: absolute; top: 50%; left: calc(var(--gut) / -2 - 1px); width: 18px; height: 18px; translate: -50% -50%; scale: .7;
 }
 .wk > span { position: absolute; inset: 0; border-radius: 50%; }
 /* the orbit: a hairline */
@@ -1475,7 +1503,7 @@ body.resizing .git-panel { transition: none; }
     -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
   }
   /* the mono labels, a size up: read at arm's length, not a desk */
-  .msg-meta, .turn-meta, .tool-count, .code-head, .git-at, .git-when, .git-fact, .git-sha, .git-count, .queued-label { font-size: 11.5px; }
+  .msg-meta, .turn-meta, .tool-count, .code-head, .git-at, .git-when, .git-fact, .git-sha, .git-count, .queue-label { font-size: 11.5px; }
   .tool-name, .tool-detail, .compact-time, .compact-facts, .git-path, .path { font-size: 12.5px; }
   .thread-link .age { font-size: 12px; }
   .git-chg { width: 68px; font-size: 11px; }
