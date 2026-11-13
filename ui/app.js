@@ -139,10 +139,19 @@ function showTip(n) {
   const r = n.getBoundingClientRect()
   const w = tip.offsetWidth
   const h = tip.offsetHeight
-  const x = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, innerWidth - w - 8))
+  let x = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, innerWidth - w - 8))
   const below = r.bottom + 6
+  const y = below + h > innerHeight - 8 ? r.top - h - 6 : below
+  // The desktop window's minimize, maximize and close buttons are drawn over the page's top right, above
+  // everything it shows: a tip that would reach under them moves left of them.
+  const wco = navigator.windowControlsOverlay
+  if (wco?.visible) {
+    const bar = wco.getTitlebarAreaRect()
+    const edge = bar.x + bar.width
+    if (y < bar.y + bar.height && x + w > edge - 8) x = Math.max(8, edge - w - 8)
+  }
   tip.style.left = `${x}px`
-  tip.style.top = `${below + h > innerHeight - 8 ? r.top - h - 6 : below}px`
+  tip.style.top = `${y}px`
 }
 document.addEventListener("pointerover", (e) => {
   // A finger has no hover: a tap would leave a tip standing over what it opened.
@@ -1429,6 +1438,14 @@ function userNodes(item) {
   return out
 }
 
+/**
+ * zero's mark, the slanted 0 with its slash, as the working sign (drawn in app.css, by masks): a faint mark, a light
+ * that sweeps round it (lighting the slash as it crosses) with a glow under it, and now and then the whole mark
+ * turns over like a coin. Only transforms and opacity move, so it keeps time while the page is busy drawing.
+ */
+const ZERO_GLYPH = '<span class="zg"><span class="zg-mark zg-base"></span>' +
+  '<span class="zg-glow"><span class="zg-mark zg-lit"><span class="zg-sweep"></span></span></span>' +
+  '<span class="zg-mark zg-lit"><span class="zg-sweep"></span></span></span>'
 const COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>'
 const CHECK_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>'
 /** The row under a message that shows on hover: a copy button for `text()`, then any `extra` (a response's turn details). */
@@ -2049,8 +2066,8 @@ function threadView(t) {
     onAccess: (value) => api("PATCH", `threads/${t.id}`, { access: value }).catch((e) => { models.setAccess(t.access); fail(e) })
   })
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
-  const working = el("div", { class: "working", hidden: true, role: "status" }, el("i"), el("i"), el("i"), el("span", { text: "Working" }),
-    el("span", { class: "working-time" }))
+  const working = el("div", { class: "working", hidden: true, role: "status", "aria-label": "Working" },
+    el("span", { class: "zero-glyph", html: ZERO_GLYPH }), el("span", { class: "working-label" }), el("span", { class: "working-time" }))
   const scroll = el("div", { class: "scroll" }, list)
   // Compact: shown when the context is filling. On, the next message waits while the session compacts first.
   const compact = el("button", { class: "pill-btn compact-toggle", type: "button", role: "switch", onclick: () => {
@@ -2104,7 +2121,7 @@ function threadView(t) {
   // The turns above the ones drawn: a button for them, which also loads them as it scrolls into view.
   const earlier = el("button", { class: "feed-earlier", type: "button", onclick: () => showEarlier() }, el("span"))
   feed?.io?.disconnect()
-  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), working, queued, composer: box, stick: true, models, title, compact, meter, branch, links, shown: TURNS_SHOWN, hidden: 0, earlier }
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), folds: new Map(), working, queued, composer: box, stick: true, models, title, compact, meter, branch, links, shown: TURNS_SHOWN, hidden: 0, earlier }
   feed.io = new IntersectionObserver((seen) => { if (seen.some((e) => e.isIntersecting) && feed?.earlier === earlier) showEarlier() }, { root: scroll, rootMargin: "600px 0px 0px 0px" })
 
   paintReady(t)
@@ -2245,7 +2262,8 @@ function paintWorking() {
   feed.working.hidden = !running || asking
   // While a compaction runs, the working line says so (its card in the feed shows the detail).
   const compacting = running && S.open.items.some((i) => i.kind === "compact" && i.state === "running")
-  feed.working.querySelector("span").textContent = compacting ? "Compacting context" : "Working"
+  feed.working.querySelector(".working-label").textContent = compacting ? "Compacting context" : ""
+  feed.working.setAttribute("aria-label", compacting ? "Compacting context" : "Working")
   // How long this turn has run, from your message (the call it's on shows just above).
   const since = S.open.items.findLast((i) => i.kind === "user")?.at
   feed.working.dataset.since = running && since ? since : ""
@@ -2256,7 +2274,8 @@ function paintWorking() {
     feed.queued.dataset.text = S.open.queued
     feed.queued.replaceChildren(el("span", { class: "queued-label", text: "Queued · runs once the context is compacted" }), el("div", { class: "queued-text", text: S.open.queued }))
   }
-  feed.list.append(feed.queued, feed.working)
+  // Moved only when out of place: moving it restarts its animation (each tool call came through here).
+  if (feed.working.previousElementSibling !== feed.queued || feed.list.lastElementChild !== feed.working) feed.list.append(feed.queued, feed.working)
   feed.composer.setBusy(running)
   feed.models.setBusy(running)
   feed.branch?.setBusy(running)
@@ -2347,13 +2366,22 @@ function renderFeed() {
     budget -= keep.length
     drawn.unshift({ key, entries: keep })
   }
-  const sections = drawn.map(({ key, entries }) => {
-    const nodes = entries.map((x) => x.items ? toolGroup(x, groups) : nodeFor(x))
+  const sections = drawn.map(({ key, entries }, i) => {
+    let nodes = entries.map((x) => x.items ? toolGroup(x, groups) : nodeFor(x))
+    // A turn that has ended with its answer: the work before the answer (what it said between calls, the calls,
+    // the approvals) folds into one row, "Worked for 4m 12s", open on demand. Your message and the answer stay.
+    const from = entries[0] && !entries[0].items && entries[0].kind === "user" ? 1 : 0
+    const end = entries.findIndex((x) => !x.items && metaFor.has(x.id))
+    if (end > from) {
+      const live = i === drawn.length - 1 && feed.painted
+      nodes = [...nodes.slice(0, from), workedFold(key, nodes.slice(from, end), metaFor.get(entries[end].id), live), ...nodes.slice(end)]
+    }
     let section = feed.turns.get(key)
     if (!section) feed.turns.set(key, (section = el("section", { class: "turn" })))
     reconcile(section, nodes)
     return section
   })
+  feed.painted = true
   feed.groups = groups
   feed.hidden = hidden
   if (hidden) feed.earlier.querySelector("span").textContent = `Show earlier (${hidden} more)`
@@ -2393,7 +2421,8 @@ function turnEnds() {
       last = null
     }
   }
-  if (last) finals.add(last)
+  // A turn still running hasn't given its answer yet: what it says between calls gets no action row.
+  if (last && S.open.status !== "running") finals.add(last)
   return { finals, metaFor, merged, changes }
 }
 /**
@@ -2426,6 +2455,52 @@ function paintTurnFiles(node, edited) {
     el("ul", { class: "turn-file-list" }, ...files.slice(0, SHOWN).map(row),
       rest > 0 ? el("li", { class: "turn-file more" }, el("details", {}, el("summary", { text: `${rest} more` }), el("ul", { class: "turn-file-list" }, ...files.slice(SHOWN).map(row)))) : null))
 }
+/** How long a turn worked, as "38s", "4m 12s" or "1h 5m" (the fold's row and the answer's details both say it so). */
+function workedFor(ms) {
+  const s = Math.max(1, Math.round(ms / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+/**
+ * The fold a finished turn's work goes into: a row saying how long it worked, and the work itself on demand.
+ * `live`: the turn just ended as you watched, so the work is drawn open and then eases shut.
+ */
+function workedFold(key, nodes, turn, live) {
+  const id = `worked:${key}`
+  let f = feed.folds.get(key)
+  if (!f) {
+    const head = el("button", { class: "worked-head", type: "button" })
+    const body = el("div", { class: "worked-body" })
+    f = { head, body, node: el("div", { class: "worked" }, head, body) }
+    head.addEventListener("click", () => {
+      S.expanded.has(id) ? S.expanded.delete(id) : S.expanded.add(id)
+      paintFold(f, id)
+    })
+    feed.folds.set(key, f)
+    // Shown open for two frames, so the shutting has somewhere to ease from.
+    if (live && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      f.opening = true
+      requestAnimationFrame(() => requestAnimationFrame(() => { f.opening = false; paintFold(f, id) }))
+    }
+  }
+  reconcile(f.body, nodes)
+  f.label = `Worked for ${workedFor(turn.durationMs ?? 0)}`
+  paintFold(f, id)
+  return f.node
+}
+function paintFold(f, id) {
+  const open = f.opening || S.expanded.has(id)
+  f.node.classList.toggle("open", open)
+  f.body.inert = !open
+  f.head.setAttribute("aria-expanded", String(open))
+  if (f.head.dataset.label !== f.label) {
+    f.head.dataset.label = f.label
+    f.head.replaceChildren(el("span", { class: "worked-label", text: f.label }),
+      el("span", { class: "worked-chev", "aria-hidden": "true", html: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 4 4 4-4 4"/></svg>' }))
+  }
+}
 /** Bring an item of the open thread into view, drawing earlier entries until it's there, and mark it a moment. */
 function jumpTo(itemId) {
   if (!feed || !S.open?.items.some((i) => i.id === itemId)) return
@@ -2435,6 +2510,8 @@ function jumpTo(itemId) {
   }
   const node = feed.cache.get(itemId)?.node
   if (!node?.isConnected) return
+  // Inside a finished turn's folded work: open it first.
+  node.closest(".worked:not(.open)")?.querySelector(".worked-head")?.click()
   feed.stick = false
   node.scrollIntoView({ block: "center" })
   node.classList.add("jumped")
@@ -2464,7 +2541,7 @@ function retryButton(item) {
 }
 /** A turn's details: Stopped (if it was), the model, how long it took, what it cost, its tokens. */
 function turnMeta(item) {
-  const meta = [modelName(item.model), `${(item.durationMs / 1000).toFixed(1)}s`, item.costUsd !== null ? usd(item.costUsd) : null, item.tokens ? `${(item.tokens / 1000).toFixed(1)}k tokens` : null].filter(Boolean)
+  const meta = [modelName(item.model), workedFor(item.durationMs ?? 0), item.costUsd !== null ? usd(item.costUsd) : null, item.tokens ? `${(item.tokens / 1000).toFixed(1)}k tokens` : null].filter(Boolean)
   return [item.outcome === "stopped" ? el("span", { class: "stopped", text: "Stopped" }) : null, ...meta.map((m) => el("span", { text: m }))].filter(Boolean)
 }
 function toolGroup(run, groups) {
@@ -2501,7 +2578,7 @@ function paintGroup(g, key) {
   const line = (item) => el("span", { class: "reel-line" },
     el("span", { class: "tool-name", text: item.kind === "tool" ? item.name : item.tool }),
     el("span", { class: "tool-detail", text: rel(item.detail) }))
-  // The reel stays put across repaints, so a call finishing mid-spin doesn't cut the spin short.
+  // The reel stays put across repaints, so a call finishing mid-roll doesn't cut the roll short.
   if (!g.reel) g.win = el("span", { class: "reel-window" }, (g.reel = el("span", { class: "reel" })))
   // A run that's over says what it did ("Read 7 files, edited 2"); one still going shows its latest call.
   const summary = state !== "running" && tools.length > 1 ? toolSummary(tools) : ""
@@ -2521,13 +2598,13 @@ function paintGroup(g, key) {
     return
   }
   g.head.removeAttribute("title")
-  // A new call spins the row like a lottery drum and lands on it; the same call just repaints.
-  const was = g.shown === undefined ? undefined : g.items.find((i) => i.id === g.shown)
-  const spin = was !== undefined && g.shown !== last.id && !matchMedia("(prefers-reduced-motion: reduce)").matches
+  // A new call rolls up into the row, pushing what it showed (the call before, or the run's summary so far) out the
+  // top; the same call just repaints.
+  const roll = g.shown !== undefined && g.shown !== last.id && g.reel.firstElementChild && !matchMedia("(prefers-reduced-motion: reduce)").matches
   g.shown = last.id
-  if (spin) spinReel(g, [was, ...blurs(tools, last), last].map(line))
+  if (roll) rollReel(g, g.spinning ? g.landing : g.reel.firstElementChild, line(last))
   else if (!g.spinning) g.reel.replaceChildren(line(last))
-  else g.landing = line(last) // lands on the latest text once the spin ends
+  else g.landing = line(last) // the roll ends on the latest text
 }
 /**
  * What a run of tool calls did, in words: "Read 7 files, edited 2, ran 3 commands". Files are counted once
@@ -2555,22 +2632,18 @@ function toolSummary(tools) {
   const text = parts.join(", ")
   return text ? text[0].toUpperCase() + text.slice(1) : ""
 }
-/** A few other calls from the run (or the same one again) for the drum to flick past. */
-function blurs(tools, last) {
-  const pool = tools.filter((i) => i.id !== last.id)
-  return Array.from({ length: 4 }, () => pool[Math.floor(Math.random() * pool.length)] ?? last)
-}
-/** Roll the drum from the first line to the last: fast and blurred, then easing to a stop with a small bounce. */
-function spinReel(g, lines) {
+/**
+ * Roll the row up one line, from `from` to `to`: the old line rises and fades out the top while the new one
+ * rises in from below and settles, eased. A call that comes mid-roll rolls on from where the last one was going.
+ */
+function rollReel(g, from, to) {
   g.spinning?.cancel()
-  g.landing = lines.at(-1)
-  g.reel.replaceChildren(...lines)
-  const run = g.reel.animate([
-    { transform: "translateY(0)", filter: "blur(0)" },
-    { offset: 0.2, filter: "blur(1.4px)" },
-    { offset: 0.75, filter: "blur(0.4px)" },
-    { transform: `translateY(-${((lines.length - 1) / lines.length) * 100}%)`, filter: "blur(0)" }
-  ], { duration: 720, easing: "cubic-bezier(.12,.75,.22,1.12)" })
+  g.landing = to
+  g.reel.replaceChildren(from, to)
+  const timing = { duration: 420, easing: "cubic-bezier(.22,.8,.24,1)" }
+  const run = g.reel.animate([{ transform: "translateY(0)" }, { transform: "translateY(-50%)" }], timing)
+  from.animate([{ opacity: 1 }, { opacity: 0 }], { ...timing, duration: 300 })
+  to.animate([{ opacity: 0 }, { opacity: 1 }], timing)
   g.spinning = run
   run.onfinish = () => {
     if (g.spinning !== run) return
@@ -2878,7 +2951,9 @@ function makeGitPanel(t) {
   // Closed, it stays in the page (inert) so it can slide and fade both ways; see setGitOpen.
   const node = el("aside", { class: "git-panel", id: "git-panel", "aria-label": "Git" },
     resize,
-    el("div", { class: "git-head" }, tabs, gitSpot()),
+    // The header row holds only the toggle (and the window's buttons, in the desktop app); the tabs get a row of their own under it.
+    el("div", { class: "git-head" }, gitSpot()),
+    el("div", { class: "git-tabrow" }, tabs),
     sub,
     body)
   showGit(node, load("gitOpen", false))
@@ -4528,6 +4603,8 @@ function connect() {
       for (const k of ["cwd", "workTree", "pr"]) if (!(k in meta)) delete S.open[k]
       if ((ended || moved) && gitPanel?.threadId === meta.id) loadGit()
       if ((ended || moved) && feed?.branch) feed.branch.refresh()
+      // Ended: its answer gets its action row, and the work before it folds away (see renderFeed).
+      if (ended && feed) renderFeed()
       if (!("effort" in meta)) delete S.open.effort // cleared: back to the provider's default
       if (feed && document.activeElement !== feed.title) feed.title.value = meta.title
       if (feed) {

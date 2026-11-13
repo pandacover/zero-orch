@@ -216,9 +216,11 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 
 .main {
   min-width: 0; min-height: 0; display: flex; flex-direction: column; outline: none; overflow: hidden;
-  /* flush with the window's edges, on the sidebar's own background: no line between them */
-  margin: 0; background: var(--bg); border: 0;
+  /* flush with the window's top and right edges; a single left border divides it from the sidebar */
+  margin: 0; background: var(--bg); border: 0; border-left: 1px solid var(--line);
 }
+/* hidden sidebar: the border stays (transparent) so nothing shifts by a pixel */
+.shell.side-hidden .main { border-color: transparent; }
 .main-col { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* the sidebar's top row (where the toggle sits) clears the toggle on narrow screens; wide screens align it below */
 .side { padding-top: 26px; }
@@ -233,9 +235,9 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
   .shell.side-hidden .side > :not(.side-resize) { opacity: 0; transition: opacity var(--fade-out); }
   .main { position: relative; z-index: 1; transition: border-color var(--side-move); }
   body.resizing .shell, body.resizing .side { transition: none; }
-  /* the panel's header row is 54px tall from the window top, so the toggle and the sidebar's top row centre 27px down */
-  .icon-btn.side-toggle { top: 11px; }
-  .side { padding-top: 11px; }
+  /* the panel's header row is --head tall from the window top, so the toggle and the sidebar's top row centre on it */
+  .icon-btn.side-toggle { top: calc((var(--head) - 32px) / 2); }
+  .side { padding-top: calc((var(--head) - 32px) / 2); }
   /* with the sidebar hidden the header's left padding grows to clear the toggle, which now sits over the panel */
   .bar { transition: padding var(--side-move); }
   .shell.side-hidden .bar { padding-left: 56px; }
@@ -243,7 +245,7 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 }
 
 /* ---------- thread ---------- */
-.bar { display: flex; align-items: center; gap: 10px; padding: 10px 18px 10px 20px; min-height: 54px; }
+.bar { display: flex; align-items: center; gap: 10px; padding: 6px 18px 6px 20px; min-height: var(--head); }
 .title-wrap { flex: 1; min-width: 0; }
 .title {
   width: 100%; border: 0; background: none; padding: 2px 6px; margin-left: -6px; border-radius: 6px;
@@ -457,7 +459,7 @@ button.title-project { cursor: pointer; }
 .tool.failed > .tool-row .tool-state, .tool-group.failed > .tool-group-head .tool-state { display: block; font: 600 12px/1 var(--mono); color: var(--ink); }
 .tool.failed > .tool-row .tool-state::before, .tool-group.failed > .tool-group-head .tool-state::before { content: "×"; }
 @keyframes spin { to { transform: rotate(360deg); } }
-/* the head of a run of tools: a one-line window onto a reel that spins, lottery-style, to each new call */
+/* the head of a run of tools: a one-line window onto a reel that rolls up to each new call */
 .reel-window { flex: 1; min-width: 0; height: 18px; overflow: hidden; }
 .reel { display: flex; flex-direction: column; will-change: transform; }
 .reel-line { flex: none; height: 18px; display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -508,24 +510,63 @@ button.title-project { cursor: pointer; }
 .mem code { font-size: 11px; color: var(--muted); }
 .mem-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* a finished turn's work, folded: "Worked for 4m 12s", and the work under it on demand */
+.worked-head {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; margin: 0 -8px; border: 0; border-radius: 8px; background: none;
+  color: var(--muted); font: 500 13px var(--body); cursor: pointer;
+}
+@media (hover: hover) { .worked-head:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 4%, transparent); } }
+.worked-chev { display: grid; place-items: center; width: 14px; height: 14px; color: var(--faint); transition: transform .24s var(--ease); }
+.worked-chev svg { width: 13px; height: 13px; }
+.worked.open .worked-chev { transform: rotate(90deg); }
+.worked-body {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 10px; padding-left: 14px;
+  overflow: clip; transition: height .36s var(--ease), opacity .26s ease, margin .36s var(--ease), visibility .36s;
+}
+.worked-body > * { min-width: 0; }
+.worked:not(.open) > .worked-body { height: 0; margin-top: 0; opacity: 0; visibility: hidden; }
 .turn-meta { display: flex; gap: 14px; font: 400 10.5px var(--mono); color: var(--faint); padding: 0 2px 6px; }
 .turn-meta .stopped { color: var(--warn); }
 .turn-error { background: var(--warn-soft); border-radius: 11px; padding: 10px 14px; font-size: 13.5px; }
 .turn-error b { color: var(--warn); }
-.working { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
-.working i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
-.working i:nth-child(2) { animation-delay: .15s; } .working i:nth-child(3) { animation-delay: .3s; }
+/* working: zero's mark comes alive (see ZERO_GLYPH), with how long the turn has run beside it */
+.working { display: flex; align-items: center; gap: 10px; min-height: 26px; color: var(--muted); font-size: 13px; }
+.working-label:empty { display: none; }
+.zero-glyph {
+  --zg-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Cellipse cx='10' cy='12' rx='5.7' ry='8.7' transform='rotate(16 10 12)'/%3E%3Cpath d='M8.2 15.3 11.8 8.7'/%3E%3C/svg%3E");
+  --zg-head: color-mix(in srgb, var(--accent) 45%, var(--ink));
+  flex: none; position: relative; width: 20px; height: 24px; margin: 1px 1px 1px 0;
+}
+.zg { position: absolute; inset: 0; animation: zg-turn 5.6s cubic-bezier(.65, 0, .25, 1) infinite; will-change: transform; }
+.zg-mark, .zg-glow { position: absolute; inset: 0; }
+.zg-mark { -webkit-mask: var(--zg-mask) center / contain no-repeat; mask: var(--zg-mask) center / contain no-repeat; overflow: hidden; }
+.zg-base { background: color-mix(in srgb, var(--ink) 16%, transparent); }
+/* the light: a comet's tail in the accent, a near-white head, swept round the mark's centre */
+.zg-sweep {
+  position: absolute; inset: -40%; will-change: transform; animation: zg-sweep 1.5s linear infinite;
+  background: conic-gradient(from 0deg, transparent 0turn .42turn, color-mix(in srgb, var(--accent) 55%, transparent) .8turn, var(--zg-head) .985turn, transparent 1turn);
+}
+.zg-glow { filter: blur(3px); opacity: .85; }
+@keyframes zg-sweep { to { transform: rotate(1turn); } }
+/* most of the time still; then a quick, eased turn over, like a coin */
+@keyframes zg-turn { 0%, 70% { transform: perspective(70px) rotateY(0); } 100% { transform: perspective(70px) rotateY(1turn); } }
+@media (prefers-reduced-motion: reduce) {
+  .zg, .zg-sweep { animation: none; }
+  .zg-lit { animation: zg-fade 1.8s ease-in-out infinite; }
+}
+@keyframes zg-fade { 50% { opacity: .3; } }
 @keyframes pulse { 0%, 100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
 
 /* composer: docked to the bottom edge, rounded on top only, with a soft tinted ring */
 .composer-wrap { flex: none; padding: 0 20px; }
 .composer {
   position: relative; max-width: 780px; margin: 10px auto 0; padding: 14px 12px 10px 16px;
-  border: 0; border-radius: 18px 18px 0 0; background: var(--fill);
-  box-shadow: none; transition: box-shadow .15s ease;
+  border: 1px solid var(--line-strong); border-bottom: 0; border-radius: 18px 18px 0 0; background: var(--surface);
+  box-shadow: 0 0 0 7px var(--ring), 0 -10px 30px -18px #00000040; transition: border-color .15s ease, box-shadow .15s ease;
   container-type: inline-size;
 }
-.composer.drop { box-shadow: 0 0 0 2px var(--accent); }
+.composer:focus-within { border-color: var(--accent-line); }
+.composer.drop { border-color: var(--accent); box-shadow: 0 0 0 7px var(--accent-soft); }
 .composer .input {
   /* At least one whole line (its line-height plus padding): any shorter and an empty input overflows, and shows a scrollbar. */
   position: relative; min-height: calc(1.65em + 4px); max-height: 280px; overflow-y: auto; outline: none; padding: 2px 2px 2px 0;
@@ -1070,7 +1111,7 @@ dialog p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
  * Closed, it sits at the end of the thread's header (which leaves room for it); open, in the panel's header.
  */
 .icon-btn.git-toggle { position: fixed; top: 26px; right: 12px; z-index: 30; width: 32px; height: 32px; }
-@media (min-width: 821px) { .icon-btn.git-toggle { top: 11px; } }
+@media (min-width: 821px) { .icon-btn.git-toggle { top: calc((var(--head) - 32px) / 2); } }
 .git-toggle svg { width: 17px; height: 17px; }
 .git-toggle.on { color: var(--accent-text); }
 .thread-cols .bar { padding-right: 56px; }
@@ -1098,11 +1139,13 @@ body.resizing .git-panel { transition: none; }
 .git-resize { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; cursor: col-resize; z-index: 5; touch-action: none; }
 .git-resize:focus-visible { outline: none; background: var(--accent-line); }
 /*
- * The panel's top row is its tabs, on the thread header's line, with the toggle's spot at its right end. The tab you're
+ * The panel's top row, on the thread header's line, holds the toggle (and the desktop window's buttons); its tabs have
+ * the row under it, where nothing at the window's top right can cover them. The tab you're
  * on reads in ink and the others muted: type, not a box, says where you are. Under them, a row says what the tab is
  * about (the branch, how many commits, what's uncommitted) and holds what can be done about it.
  */
-.git-head { position: relative; flex: none; display: flex; align-items: center; gap: 8px; min-height: 54px; padding: 0 56px 0 10px; }
+.git-head { position: relative; flex: none; display: flex; align-items: center; gap: 8px; min-height: var(--head); padding: 0 56px 0 10px; }
+.git-tabrow { flex: none; display: flex; align-items: center; min-width: 0; padding: 0 10px 2px; overflow-x: auto; scrollbar-width: none; }
 .git-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .git-tab {
   display: inline-flex; align-items: baseline; gap: 6px; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: none;
@@ -1490,9 +1533,12 @@ body.resizing .git-panel { transition: none; }
 .child-mark svg { width: 12px; height: 12px; }
 
 /* ---------- the window's own title bar (Windows, Linux) ----------
-   main.ts hides the system title bar and draws minimize, maximize and close over the top right, as tall
-   as the header row. --wco is how wide they are (0 in a browser and on macOS): what sits at the top right
-   moves left by it. The header rows drag the window; what's clickable in them doesn't. */
+   main.ts hides the system title bar and draws minimize, maximize and close over the top right, square
+   and on --bg. --wco is how wide they are (0 in a browser and on macOS): what sits at the top right
+   moves left by it. --head, the header rows' height, is theirs, so everything in the top row centres
+   with them; 54px where there are none. */
+:root { --head: env(titlebar-area-height, 54px); }
+/* The header rows drag the window; what's clickable in them doesn't. */
 :root { --wco: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)); }
 .icon-btn.git-toggle { right: calc(12px + var(--wco)); }
 .thread-cols .bar { padding-right: calc(56px + var(--wco)); }

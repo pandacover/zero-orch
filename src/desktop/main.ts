@@ -116,13 +116,15 @@ else {
 
   /**
    * On Windows and Linux the page is the whole window: no system title bar or menu bar (the menu's
-   * shortcuts still work), and the minimize, maximize and close buttons drawn over its top right, as
-   * tall as the page's header row (app.css keeps its own buttons clear of them, and drags by its headers).
-   * macOS keeps its own title bar.
+   * shortcuts still work), and the minimize, maximize and close buttons drawn over its top right, on the
+   * page's own background (app.css's --bg). Electron paints each button 45px wide whatever the height, so
+   * 45px tall makes them square; the page's header row takes the same height (env(titlebar-area-height)),
+   * so they centre on it. app.css keeps its own buttons clear of them and drags by its headers; app.js
+   * keeps tooltips out from under them. macOS keeps its own title bar.
    */
-  const OVERLAY_HEIGHT = 54
+  const OVERLAY_HEIGHT = 45
   const overlay = () => nativeTheme.shouldUseDarkColors
-    ? { color: "#0d0d0d", symbolColor: "#a3a3a3", height: OVERLAY_HEIGHT }
+    ? { color: "#000000", symbolColor: "#a3a3a3", height: OVERLAY_HEIGHT }
     : { color: "#ffffff", symbolColor: "#666666", height: OVERLAY_HEIGHT }
   const frame = () => process.platform === "darwin" ? {} : { titleBarStyle: "hidden" as const, titleBarOverlay: overlay() }
   // The buttons follow the system's light or dark, as the page does.
@@ -150,7 +152,7 @@ else {
       title: "zero",
       // Shown once painted, on the page's own background: no white flash.
       show: false,
-      backgroundColor: nativeTheme.shouldUseDarkColors ? "#0d0d0d" : "#ffffff",
+      backgroundColor: nativeTheme.shouldUseDarkColors ? "#000000" : "#ffffff",
       ...frame(),
       webPreferences: { preload: join(import.meta.dirname, "preload.cjs"), sandbox: true, contextIsolation: true }
     })
