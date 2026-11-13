@@ -42,9 +42,15 @@
       </div>
       <nav class="tree" id="tree"></nav>
       <div class="side-foot">
-        <a class="foot-link" href="#/evolution" data-route="evolution"><span class="foot-dot"></span>Evolution</a>
-        <button class="foot-link" id="open-settings" type="button"><span class="foot-gear" aria-hidden="true">⚙</span>Settings</button>
-        <button class="foot-link" id="open-keys" type="button" title="Keyboard shortcuts (?)"><span class="foot-gear" aria-hidden="true">⌨</span>Shortcuts<kbd class="side-kbd">?</kbd></button>
+        <a class="foot-link" href="#/evolution" data-route="evolution">Evolution</a>
+        <div class="foot-icons">
+          <button class="icon-btn foot-icon" id="open-settings" type="button" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.1"/><path d="M6.9 1.75h2.2l.35 1.6a5 5 0 0 1 1.2.7l1.55-.5 1.1 1.9-1.2 1.1a5 5 0 0 1 0 1.4l1.2 1.1-1.1 1.9-1.55-.5a5 5 0 0 1-1.2.7l-.35 1.6H6.9l-.35-1.6a5 5 0 0 1-1.2-.7l-1.55.5-1.1-1.9 1.2-1.1a5 5 0 0 1 0-1.4l-1.2-1.1 1.1-1.9 1.55.5a5 5 0 0 1 1.2-.7z"/></svg>
+          </button>
+          <button class="icon-btn foot-icon" id="open-keys" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="3.75" width="12.5" height="8.5" rx="1.75"/><path d="M4.5 6.5h.01M7 6.5h.01M9.5 6.5h.01M12 6.5h-.5M5 9.5h6"/></svg>
+          </button>
+        </div>
       </div>
       <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize · double-click to reset"></div>
     </aside>

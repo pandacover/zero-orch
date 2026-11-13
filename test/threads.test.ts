@@ -634,6 +634,38 @@ describe("a running turn", () => {
     expect(allowed).toBe("allowed")
   })
 
+  it("queues messages sent while a turn runs, and runs them as one turn when it ends", async () => {
+    const prompts: Array<string> = []
+    let isRunning: (id: string) => boolean = () => false
+    let id = ""
+    const { events } = await run(async function*(input) {
+      prompts.push(input.prompt)
+      if (prompts.length === 1) await input.ask("Bash", "ls", () => "ask")
+      yield { type: "text", key: "m:0", delta: "OK." } as never
+    }, (threads, t) => {
+      isRunning = threads.isRunning
+      id = t.id
+      threads.enqueue(t as never, "nope, stash the changes")
+      threads.enqueue(t as never, "never mind this one")
+      threads.enqueue(t as never, "and then run the tests")
+      const dropped = (t as never as { waiting: Array<{ id: string; text: string }> }).waiting[1]!
+      // Taken back, it comes back as written, for the composer; a second time, it's gone.
+      expect(threads.unqueue(t as never, dropped.id)).toEqual({ text: "never mind this one", attachments: [] })
+      expect(threads.unqueue(t as never, dropped.id)).toBeNull()
+      threads.answer(t.id, threads_pending(t), true)
+    })
+    // The queued turn runs on its own after the first; wait for it to end.
+    for (let i = 0; i < 200 && (prompts.length < 2 || isRunning(id)); i++) await new Promise((r) => setTimeout(r, 10))
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]).toContain("nope, stash the changes\n\nand then run the tests")
+    expect(prompts[1]).not.toContain("never mind")
+    const metas = events.filter((e) => e.event === "thread" && e.data.id === id).map((e) => e.data)
+    expect(metas.some((m) => m.waiting?.length === 2)).toBe(true)
+    // Once it runs, nothing is shown waiting any more.
+    expect(metas.at(-1)!.waiting).toBeUndefined()
+    expect(metas.at(-1)!.status).toBe("idle")
+  })
+
   it("denies a waiting approval when the thread turns read-only", async () => {
     let allowed: string | undefined
     await run(async function*(input) {

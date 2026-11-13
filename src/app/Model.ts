@@ -217,6 +217,8 @@ export interface ThreadMeta {
   context?: { used: number; limit: number } | undefined
   /** A message waiting while the session compacts first (its words), shown as queued. */
   queued?: string | undefined
+  /** Messages the person sent while a turn ran (their words): they run, as one message, when it ends. */
+  waiting?: Array<{ id: string; text: string }> | undefined
   /** Kept at the top of its project in the sidebar. */
   pinned?: boolean | undefined
   /** HEAD when the thread's current task started: a message after HEAD moves (a commit) starts a new one. */

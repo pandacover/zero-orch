@@ -29,6 +29,12 @@
   --body: "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --mono: "Martian Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
   --r: 14px;
+  /* Lucide's brain icon (ISC license), as a mask */
+  --brain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 18V5'/%3E%3Cpath d='M15 13a4.17 4.17 0 01-3-4 4.17 4.17 0 01-3 4'/%3E%3Cpath d='M17.707 6.294A3 3 0 1012 5a3 3 0 10-5.707 1.294'/%3E%3Cpath d='M17.996 5.125a4 4 0 012.526 5.77'/%3E%3Cpath d='M18 18a4 4 0 002-7.465'/%3E%3Cpath d='M19.967 17.482a4 4 0 11-7.967.517 4 4 0 11-7.967-.517'/%3E%3Cpath d='M6 18a4 4 0 01-2-7.465'/%3E%3Cpath d='M6.004 5.125a4 4 0 00-2.526 5.77'/%3E%3C/svg%3E");
+  /* the thread's column: the composer's width, how far it sits in from the pane's sides, and how far in its words start */
+  --column: 780px;
+  --edge: 20px;
+  --gut: 17px;
   --ease: cubic-bezier(.2, .7, .2, 1);
   /* lets heights ease to and from auto (Chromium 129+; elsewhere they just snap) */
   interpolate-size: allow-keywords;
@@ -189,7 +195,7 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 @media (hover: hover) { .draft-thread:hover .draft-link { padding-right: 60px; } }
 .draft-mark { display: inline-flex; flex: none; width: 13px; height: 13px; opacity: .8; }
 .draft-mark svg { width: 13px; height: 13px; }
-.run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: breathe 1.6s ease-in-out infinite; flex: none; }
+.run-dot { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
 .ask-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); flex: none; box-shadow: 0 0 0 3px var(--warn-soft); }
 /* a turn ended that the person hasn't seen: done in the accent, an error as a hollow ring */
 .done-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
@@ -205,14 +211,23 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 @media (hover: hover) { .inbox-row:hover .t-where { display: none; } }
 .inbox.needs { padding-bottom: 6px; }
 .threads .none { padding: 4px 8px 6px 22px; color: var(--faint); font-size: 12.5px; }
-@keyframes breathe { 50% { box-shadow: 0 0 0 4px var(--accent-soft); } }
+/* Something going on breathes: a soft ring about its dot swells and fades. The ring is drawn once and only its
+   opacity and scale move (a box-shadow that grows repaints every frame, and made typing lag while a turn ran). */
+.run-dot::after, .evo-status.live i::after, .evo-step.active .evo-step-n::after, .git-badge[data-checks="running"]::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 4px var(--accent-soft); pointer-events: none;
+  animation: breathe 1.6s ease-in-out infinite;
+}
+@keyframes breathe { 0%, 100% { opacity: 0; transform: scale(.7); } 50% { opacity: 1; transform: scale(1); } }
 
-.side-foot { padding-top: 10px; display: grid; gap: 2px; }
+/* Evolution on the left; Settings and Shortcuts as icons on the right */
+.side-foot { padding-top: 10px; display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.foot-icons { display: flex; align-items: center; gap: 2px; }
+.foot-icon { width: 32px; height: 32px; border-radius: 8px; }
+.foot-icon > svg { width: 16px; height: 16px; }
+@media (hover: hover) { .foot-icon:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .foot-link { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 8px; background: none; text-align: left; cursor: pointer; text-decoration: none; font-size: 13.5px; color: var(--muted); }
 @media (hover: hover) { .foot-link:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); } }
 .foot-link.active { color: var(--ink); background: color-mix(in srgb, var(--ink) 9%, transparent); }
-.foot-dot { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--accent); }
-.foot-gear { width: 8px; text-align: center; font-size: 13px; }
 
 .main {
   min-width: 0; min-height: 0; display: flex; flex-direction: column; outline: none; overflow: hidden;
@@ -272,12 +287,30 @@ button.title-project { cursor: pointer; }
 .compact-toggle.on .compact-knob { background: var(--accent); }
 .compact-toggle.on .compact-knob::after { translate: 10px 0; }
 @keyframes compact-in { from { opacity: 0; translate: 6px 0; } }
-/* a message waiting for the context to compact first */
-.queued { align-self: flex-end; max-width: 80%; margin: 4px 0 2px auto; padding: 9px 13px; border: 1px dashed var(--accent-line); border-radius: 14px; color: var(--muted); }
-.queued-label { display: block; margin-bottom: 3px; font: 500 10.5px var(--mono); letter-spacing: .02em; color: var(--accent-text); }
-.queued-text { color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; opacity: .75; }
+/* what waits to be sent (after a compaction, or after the turn): a tray on the composer's top edge, a step
+   narrower than it, one line per message; it covers the composer's ring where they meet, so the two read as one */
+.queue-tray {
+  position: relative; z-index: 1; width: calc(100% - 28px); max-width: calc(var(--column) - 28px); margin: 10px auto 0;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 5px 5px 6px;
+  border: 1px solid var(--line-strong); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--fill);
+  animation: tray-in .18s var(--ease) both;
+}
+.queue-tray[hidden] { display: none; }
+.queue-tray:not([hidden]) + .composer { margin-top: 0; }
+.queue-item { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 30px; padding: 2px 3px 2px 10px; border-radius: 9px; }
+.queue-label { flex: none; font: 500 11.5px var(--body); color: var(--accent-text); }
+.queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink); }
+.queue-edit {
+  flex: none; display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 7px;
+  background: none; color: var(--muted); cursor: pointer;
+}
+.queue-edit svg { width: 14px; height: 14px; }
+@media (hover: hover) { .queue-edit:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 8%, transparent); } }
+.queue-edit:disabled { opacity: .5; cursor: default; }
+@keyframes tray-in { from { opacity: 0; translate: 0 6px; } }
+@media (prefers-reduced-motion: reduce) { .queue-tray { animation: none; } }
 /* a compaction in the feed: a card that shows it working, then what it did */
-.compact-card { margin: 6px 0; padding: 11px 14px 12px; border-radius: 12px; background: var(--fill); font-size: 13px; }
+.compact-card { margin-block: 6px; padding-block: 11px 12px; border-radius: 12px; background: var(--fill); font-size: 13px; }
 .compact-card.running { background: var(--accent-soft); }
 .compact-card.failed { background: var(--warn-soft); }
 .compact-head { display: flex; align-items: center; gap: 9px; }
@@ -340,25 +373,24 @@ button.title-project { cursor: pointer; }
 }
 
 .scroll { flex: 1; overflow: auto; min-height: 0; scroll-behavior: auto; }
-.feed { max-width: 800px; margin: 0 auto; padding: 28px 24px 32px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.feed {
+  max-width: calc(var(--column) + 2 * var(--edge)); margin: 0 auto; padding: 28px calc(var(--edge) + var(--gut)) 32px;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px;
+}
+/* A card or a row with a fill (your message, a tool call, its output, an approval) spans the composer's width,
+   past the column on both sides by the gutter, and pads its words back in by as much: they line up with the
+   replies' words and the composer's, and the cards' edges with the composer's. Inside a run of tool calls,
+   --nest indents the words a step further, not the fill. */
+.msg-user, .msg-edit, .tool-out, .mem-text, .ask, .compact-card, .link-card, .turn-error, .turn-files {
+  margin-inline: calc(-1 * var(--gut)); padding-inline: calc(var(--gut) + var(--nest, 0px)) var(--gut);
+}
 .feed > * { min-width: 0; }
 /* a turn: your message and everything after it, up to your next */
 .turn { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .turn > * { min-width: 0; }
-/* your message sticks to the top while its turn scrolls under it; the next turn's message pushes it away.
-   A strip of background above it and a soft fade below keep what scrolls under from showing round its edges. */
-.turn > .msg-u:first-child {
-  position: sticky; top: 0; z-index: 3; padding-top: 12px; margin-top: -12px;
-  background: var(--bg); box-shadow: 0 10px 14px -6px var(--bg);
-}
-/* a very long message stays a readable size while stuck, scrolling inside itself */
-.turn > .msg-u:first-child .msg-user { max-height: 38vh; overflow-y: auto; }
-.turn > .msg-u.expanded:first-child { position: static; }
-.turn > .msg-u.expanded:first-child .msg-user { max-height: none; overflow: visible; }
-
 /* a sent message spans the feed; click it to edit */
 .msg-user {
-  background: var(--fill); border-radius: 14px; padding: 10px 15px; white-space: pre-wrap; word-break: break-word; line-height: 1.7;
+  background: var(--fill); border-radius: 14px; padding-block: 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.7;
   cursor: text; transition: background-color .15s ease, box-shadow .15s ease;
 }
 @media (hover: hover) { .msg-user:hover { background: color-mix(in srgb, var(--ink) 9%, var(--bg)); } }
@@ -384,7 +416,7 @@ button.title-project { cursor: pointer; }
 .msg-copy { width: 26px; height: 26px; }
 /* the edit box takes the bubble's place */
 .msg-edit {
-  border-radius: 14px; background: var(--fill); padding: 10px 12px 10px 15px;
+  border-radius: 14px; background: var(--fill); padding-block: 10px;
   box-shadow: 0 0 0 2px var(--accent-line); animation: item-in .18s var(--ease) backwards;
 }
 .msg-edit-input { outline: none; min-height: 1.7em; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; line-height: 1.7; }
@@ -447,12 +479,16 @@ button.title-project { cursor: pointer; }
 .tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .tool { border-radius: 9px; }
 .tool-row {
-  width: 100%; display: flex; align-items: center; gap: 10px; padding: 5px 8px; margin: 0 -8px;
+  width: calc(100% + 2 * var(--gut)); display: flex; align-items: center; gap: 10px;
+  padding: 5px var(--gut) 5px calc(var(--gut) + var(--nest, 0px)); margin: 0 calc(-1 * var(--gut));
   border: 0; background: none; text-align: left; cursor: pointer; border-radius: 8px; font-size: 13px; color: var(--muted);
 }
 @media (hover: hover) { .tool-row:hover { background: color-mix(in srgb, var(--ink) 4%, transparent); color: var(--ink); } }
-/* a finished call shows nothing; a running one spins, a failed one is crossed */
-.tool-state { display: none; flex: none; }
+/* a finished call shows nothing; a running one spins, a failed one is crossed. The mark sits in the gutter
+   (in a run, in the step its calls are in by), so the call's words start where every other line's do */
+.tool-row { position: relative; }
+.tool-state { display: none; position: absolute; top: 50%; left: calc(var(--gut) / 2); translate: -50% -50%; }
+.tool-group-body .tool-state { left: calc(var(--gut) + var(--nest) / 2); }
 .tool.running > .tool-row .tool-state, .tool-group.running > .tool-group-head .tool-state {
   display: block; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--accent); border-top-color: transparent; animation: spin .8s linear infinite;
 }
@@ -469,22 +505,24 @@ button.title-project { cursor: pointer; }
 .tool-group { border-radius: 9px; }
 .tool-count { flex: none; font: 400 10.5px var(--mono); color: var(--faint); }
 .tool-group-body {
-  display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; margin: 2px 0 6px 4px; padding-left: 16px;
+  --nest: 20px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; margin: 2px calc(-1 * var(--gut)) 6px; padding-inline: var(--gut);
   overflow: clip; transition: height .24s var(--ease), opacity .2s ease, margin .24s var(--ease), visibility .24s;
 }
 .tool-group:not(.open) > .tool-group-body { height: 0; margin-block: 0; opacity: 0; visibility: hidden; }
 .tool-group-body > *, .tool-group, .tool { min-width: 0; }
 .tool-group-body .asked { padding: 4px 0; }
+/* what isn't a call in a run (an approval, a memory) sits a step in, as the calls' words do */
+.tool-group-body > :not(.tool) { margin-left: var(--nest); }
 .asked > span { flex: none; }
 .tool-out {
-  margin: 2px 0 8px; padding: 10px 12px; max-height: 280px; overflow: auto; background: var(--fill); border-radius: 9px; font: 400 11.5px/1.65 var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--muted);
+  margin-block: 2px 8px; padding-block: 10px; max-height: 280px; overflow: auto; background: var(--fill); border-radius: 9px; font: 400 11.5px/1.65 var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--muted);
   transition: height .24s var(--ease), padding .24s var(--ease), margin .24s var(--ease), opacity .2s ease, visibility .24s;
 }
 .tool:not(.open) > .tool-out { height: 0; padding-block: 0; margin-block: 0; opacity: 0; overflow: hidden; visibility: hidden; }
 
 /* approval */
 .ask {
-  border: 1px solid var(--accent-line); background: var(--surface); border-radius: var(--r); padding: 14px 16px;
+  border: 1px solid var(--accent-line); background: var(--surface); border-radius: var(--r); padding-block: 14px; padding-inline: calc(var(--gut) - 1px); /* less its border */
   box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow);
 }
 .ask-q { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
@@ -498,12 +536,18 @@ button.title-project { cursor: pointer; }
 
 /* singularity memory: one quiet line, like a tool row, with a small dot in place of a card */
 .mem { min-width: 0; padding: 2px 0; font-size: 12.5px; color: var(--muted); }
-.mem-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.mem-head::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.mem-head { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* memory's mark: Lucide's brain (ISC), in the gutter by the composer's edge (in a run, in the step its calls are
+   in by), so the line's words start where every other line's do; tinted by what memory did */
+.mem-head::before {
+  content: ""; position: absolute; top: 50%; left: calc(var(--gut) / -2 - 1px); width: 12px; height: 12px; translate: -50% -50%;
+  background: var(--accent); -webkit-mask: var(--brain) center / contain no-repeat; mask: var(--brain) center / contain no-repeat;
+}
+.tool-group-body .mem-head::before { left: calc(var(--nest) / -2 - 1px); }
 .mem.checked .mem-head::before, .mem.none .mem-head::before { background: var(--faint); }
 .mem.followup .mem-head::before { background: var(--muted); }
 .mem-text {
-  margin: 6px 0 2px 14px; padding: 10px 12px; max-height: 320px; overflow: auto; border-radius: 9px; background: var(--fill);
+  --nest: 14px; margin-block: 6px 2px; padding-block: 10px; max-height: 320px; overflow: auto; border-radius: 9px; background: var(--fill);
   font: 400 11.5px/1.65 var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--muted);
 }
 .mem-label { font-weight: 500; color: var(--ink); white-space: nowrap; }
@@ -512,7 +556,8 @@ button.title-project { cursor: pointer; }
 
 /* a finished turn's work, folded: "Worked for 4m 12s", and the work under it on demand */
 .worked-head {
-  display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; margin: 0 -8px; border: 0; border-radius: 8px; background: none;
+  display: flex; align-items: center; gap: 6px; width: calc(100% + 2 * var(--gut)); padding: 4px var(--gut); margin: 0 calc(-1 * var(--gut));
+  border: 0; border-radius: 8px; background: none; text-align: left;
   color: var(--muted); font: 500 13px var(--body); cursor: pointer;
 }
 @media (hover: hover) { .worked-head:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 4%, transparent); } }
@@ -520,47 +565,66 @@ button.title-project { cursor: pointer; }
 .worked-chev svg { width: 13px; height: 13px; }
 .worked.open .worked-chev { transform: rotate(90deg); }
 .worked-body {
-  display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 10px; padding-left: 14px;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin: 10px calc(-1 * var(--gut)) 0; padding-inline: var(--gut);
   overflow: clip; transition: height .36s var(--ease), opacity .26s ease, margin .36s var(--ease), visibility .36s;
 }
 .worked-body > * { min-width: 0; }
 .worked:not(.open) > .worked-body { height: 0; margin-top: 0; opacity: 0; visibility: hidden; }
 .turn-meta { display: flex; gap: 14px; font: 400 10.5px var(--mono); color: var(--faint); padding: 0 2px 6px; }
 .turn-meta .stopped { color: var(--warn); }
-.turn-error { background: var(--warn-soft); border-radius: 11px; padding: 10px 14px; font-size: 13.5px; }
+.turn-error { background: var(--warn-soft); border-radius: 11px; padding-block: 10px; font-size: 13.5px; }
 .turn-error b { color: var(--warn); }
-/* working: zero's mark comes alive (see ZERO_GLYPH), with how long the turn has run beside it */
-.working { display: flex; align-items: center; gap: 10px; min-height: 26px; color: var(--muted); font-size: 13px; }
-.working-label:empty { display: none; }
-.zero-glyph {
-  --zg-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Cellipse cx='10' cy='12' rx='5.7' ry='8.7' transform='rotate(16 10 12)'/%3E%3Cpath d='M8.2 15.3 11.8 8.7'/%3E%3C/svg%3E");
-  --zg-head: color-mix(in srgb, var(--accent) 45%, var(--ink));
-  flex: none; position: relative; width: 20px; height: 24px; margin: 1px 1px 1px 0;
+/* working: an orbit of light (see WORKING_GLYPH), the words with a light passing over them, and how long the turn has run */
+.working { position: relative; display: flex; align-items: center; gap: 10px; min-height: 26px; color: var(--muted); font-size: 13px; }
+/* the mark sits in the gutter by the composer's edge, drawn at 18px and shown at 12.6 to fit it: "Working" starts
+   where every other line's words do */
+.wk {
+  --wk-hot: color-mix(in srgb, var(--accent) 35%, var(--ink));
+  position: absolute; top: 50%; left: calc(var(--gut) / -2 - 1px); width: 18px; height: 18px; translate: -50% -50%; scale: .7;
 }
-.zg { position: absolute; inset: 0; animation: zg-turn 5.6s cubic-bezier(.65, 0, .25, 1) infinite; will-change: transform; }
-.zg-mark, .zg-glow { position: absolute; inset: 0; }
-.zg-mark { -webkit-mask: var(--zg-mask) center / contain no-repeat; mask: var(--zg-mask) center / contain no-repeat; overflow: hidden; }
-.zg-base { background: color-mix(in srgb, var(--ink) 16%, transparent); }
-/* the light: a comet's tail in the accent, a near-white head, swept round the mark's centre */
-.zg-sweep {
-  position: absolute; inset: -40%; will-change: transform; animation: zg-sweep 1.5s linear infinite;
-  background: conic-gradient(from 0deg, transparent 0turn .42turn, color-mix(in srgb, var(--accent) 55%, transparent) .8turn, var(--zg-head) .985turn, transparent 1turn);
+.wk > span { position: absolute; inset: 0; border-radius: 50%; }
+/* the orbit: a hairline */
+.wk-ring { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--ink) 10%, transparent); }
+/* the comet's tail: a conic sweep, cut to the orbit's band, brightest at its head */
+.wk-arc {
+  background: conic-gradient(from 0deg, transparent 0turn .5turn, color-mix(in srgb, var(--accent) 60%, transparent) .8turn, var(--wk-hot) 1turn);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 1.75px), #000 calc(100% - 1.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 1.75px), #000 calc(100% - 1.5px));
 }
-.zg-glow { filter: blur(3px); opacity: .85; }
-@keyframes zg-sweep { to { transform: rotate(1turn); } }
-/* most of the time still; then a quick, eased turn over, like a coin */
-@keyframes zg-turn { 0%, 70% { transform: perspective(70px) rotateY(0); } 100% { transform: perspective(70px) rotateY(1turn); } }
+/* its head: a bright point with a glow, on the orbit at the top */
+.wk-head::after {
+  content: ""; position: absolute; top: -1px; left: 50%; width: 3.5px; height: 3.5px; margin-left: -1.75px; border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 12%, var(--ink)); box-shadow: 0 0 4px 1px var(--wk-hot), 0 0 9px 2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+/* the tail and head go round together, easing: slow over the top, quick below */
+.wk-arc, .wk-head { animation: wk-orbit 1.7s cubic-bezier(.55, .15, .45, .85) infinite; will-change: transform; }
+/* the core, and a soft halo about the whole, breathe slowly */
+.wk > .wk-core { inset: 6.5px; background: radial-gradient(circle at 40% 35%, var(--wk-hot), var(--accent) 75%); animation: wk-breathe 2.6s ease-in-out infinite; will-change: transform, opacity; }
+.wk > .wk-halo { inset: -3px; background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 22%, transparent), transparent); animation: wk-breathe 2.6s ease-in-out infinite; will-change: transform, opacity; }
+@keyframes wk-orbit { to { transform: rotate(1turn); } }
+@keyframes wk-breathe { 0%, 100% { transform: scale(.72); opacity: .55; } 50% { transform: scale(1); opacity: 1; } }
+/* the words: muted, with a brighter copy seen through a soft window that slides across them */
+.working-label { position: relative; display: inline-block; color: var(--muted); font-weight: 500; letter-spacing: .01em; white-space: nowrap; }
+.wk-shine {
+  position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+  -webkit-mask: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%);
+  mask: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%);
+  animation: wk-shine 2.6s cubic-bezier(.4, 0, .2, 1) infinite; will-change: transform;
+}
+/* the copy holds still while its window moves: it moves back as far */
+.wk-shine > .wk-text { display: block; color: var(--ink); animation: wk-unshine 2.6s cubic-bezier(.4, 0, .2, 1) infinite; will-change: transform; }
+@keyframes wk-shine { 0% { transform: translateX(-100%); } 70%, 100% { transform: translateX(100%); } }
+@keyframes wk-unshine { 0% { transform: translateX(100%); } 70%, 100% { transform: translateX(-100%); } }
 @media (prefers-reduced-motion: reduce) {
-  .zg, .zg-sweep { animation: none; }
-  .zg-lit { animation: zg-fade 1.8s ease-in-out infinite; }
+  .wk-arc, .wk-head, .wk-halo, .wk-shine, .wk-shine > .wk-text { animation: none; }
+  .wk-shine { display: none; }
 }
-@keyframes zg-fade { 50% { opacity: .3; } }
 @keyframes pulse { 0%, 100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
 
 /* composer: docked to the bottom edge, rounded on top only, with a soft tinted ring */
-.composer-wrap { flex: none; padding: 0 20px; }
+.composer-wrap { flex: none; padding: 0 var(--edge); }
 .composer {
-  position: relative; max-width: 780px; margin: 10px auto 0; padding: 14px 12px 10px 16px;
+  position: relative; max-width: var(--column); margin: 10px auto 0; padding: 14px 12px 10px calc(var(--gut) - 1px);
   border: 1px solid var(--line-strong); border-bottom: 0; border-radius: 18px 18px 0 0; background: var(--surface);
   box-shadow: 0 0 0 7px var(--ring), 0 -10px 30px -18px #00000040; transition: border-color .15s ease, box-shadow .15s ease;
   container-type: inline-size;
@@ -578,8 +642,6 @@ button.title-project { cursor: pointer; }
 .composer .input.empty::before { content: attr(data-placeholder); position: absolute; left: 0; top: 2px; color: var(--faint); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .composer-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .composer-controls { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; min-width: 0; margin-left: -4px; flex-wrap: wrap; }
-/* when the footer is tight the hint gives way first, never the model's name */
-.composer-foot .hint { flex: 0 1000 auto; margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 /* the pickers and Attach read as pills */
 .select.chip, .pill-btn {
   height: 30px; max-width: 220px; border: 0; border-radius: 99px; background-color: transparent; box-shadow: none;
@@ -596,7 +658,7 @@ button.title-project { cursor: pointer; }
 .pill-btn { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px 0 10px; cursor: pointer; font-family: var(--body); }
 .pill-btn .ico svg { display: block; width: 14px; height: 14px; }
 .pill-btn:disabled { opacity: .45; cursor: not-allowed; }
-@container (max-width: 640px) { .composer-foot .hint { display: none; } .composer-controls { margin-right: auto; } }
+@container (max-width: 640px) { .composer-controls { margin-right: auto; } }
 /* tight: Attach keeps its icon; Compact keeps its word, or it's an empty pill */
 @container (max-width: 440px) { .pill-btn:not(.compact-toggle) span:not(.ico) { display: none; } .pill-btn:not(.compact-toggle) { padding: 0 8px; } }
 /* composer pickers: a chip that opens a panel above it */
@@ -714,10 +776,10 @@ button.title-project { cursor: pointer; }
 .evo-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
 .evo-head .lede { max-width: 620px; text-wrap: pretty; line-height: 1.55; }
 .evo-status { flex: none; display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface); font-size: 12.5px; color: var(--muted); white-space: nowrap; margin-top: 2px; }
-.evo-status i { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.evo-status i { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
 .evo-status-time { font-size: 12px; color: var(--faint); }
 .evo-status.live { color: var(--ink); border-color: var(--accent-line); background: var(--accent-soft); }
-.evo-status.live i { background: var(--accent); animation: breathe 1.6s ease-in-out infinite; }
+.evo-status.live i { background: var(--accent); }
 .evo-status.live .evo-status-time { color: var(--accent-text); }
 .evo-status.done i { background: var(--keep); }
 .evo-status.failed i { background: var(--ink); }
@@ -748,14 +810,14 @@ button.title-project { cursor: pointer; }
 .evo-step { position: relative; padding-top: 12px; border-top: 2px solid var(--line); transition: border-color .2s ease, opacity .2s ease; }
 .evo-step-top { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
 .evo-step-top b { font: 600 13.5px/1.2 var(--display); }
-.evo-step-n { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: color-mix(in srgb, var(--ink) 7%, transparent); font: 600 10.5px/1 var(--body); color: var(--muted); flex: none; }
+.evo-step-n { position: relative; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: color-mix(in srgb, var(--ink) 7%, transparent); font: 600 10.5px/1 var(--body); color: var(--muted); flex: none; }
 .evo-step p { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); text-wrap: pretty; }
 .evo-step-now { margin-left: auto; font: 600 10.5px/1 var(--body); text-transform: uppercase; letter-spacing: .06em; color: var(--accent-text); }
 .evo-loop.live .evo-step:not(.active):not(.done) { opacity: .5; }
 .evo-step.done { border-top-color: var(--accent-line); }
 .evo-step.done .evo-step-n { background: var(--accent-soft); color: var(--accent-text); }
 .evo-step.active { border-top-color: var(--accent); }
-.evo-step.active .evo-step-n { background: var(--accent); color: var(--on-accent); animation: breathe 1.6s ease-in-out infinite; }
+.evo-step.active .evo-step-n { background: var(--accent); color: var(--on-accent); }
 
 .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 12px; }
 .card-head .hint { max-width: 620px; margin-top: 2px; text-wrap: pretty; }
@@ -952,12 +1014,33 @@ button.title-project { cursor: pointer; }
   .task .task-bar { display: none; }
 }
 
-/* tooltip: shown at once on hover (app.js moves each title here) */
+/* tooltip (app.js moves each title here): a small dark glass card, the same in both themes, with any
+   shortcut it ends in as keys; it eases in from the side of what it's about */
 .tip {
-  position: fixed; inset: auto; margin: 0; border: 0; z-index: 60; max-width: 320px; padding: 5px 9px; border-radius: 7px; pointer-events: none;
-  background: var(--ink); color: var(--bg); font: 500 12px/1.45 var(--body); white-space: pre-line; overflow-wrap: anywhere;
-  box-shadow: 0 6px 18px -8px #00000066;
+  --tip-bg: #18181b;
+  position: fixed; inset: auto; margin: 0; z-index: 60; max-width: 300px; padding: 6px 10px; pointer-events: none;
+  align-items: center; gap: 10px;
+  border: 1px solid #ffffff14; border-radius: 9px; background: var(--tip-bg);
+  color: #f4f4f5; font: 500 12px/1.45 var(--body); letter-spacing: .005em; white-space: pre-line; overflow-wrap: anywhere; text-wrap: pretty;
+  box-shadow: 0 0 0 .5px #00000066, 0 1px 0 #ffffff0a inset, 0 10px 28px -10px #000000b3, 0 3px 8px -4px #00000066;
+  opacity: 1; transform: none; transition: opacity .14s var(--ease), transform .14s var(--ease);
 }
+/* only while open: a display of its own on .tip would beat the browser's "a closed popover isn't shown",
+   and a hidden tip would stay on screen where it last was */
+.tip:popover-open { display: flex; }
+@starting-style {
+  .tip:popover-open { opacity: 0; transform: translateY(-3px) scale(.97); }
+  .tip:popover-open[data-side="top"] { transform: translateY(3px) scale(.97); }
+}
+.tip.warm { transition: none; }
+.tip-text { min-width: 0; }
+.tip-keys { flex: none; display: inline-flex; gap: 3px; margin-right: -3px; }
+.tip-keys kbd {
+  min-width: 18px; padding: 1px 5px; border-radius: 5px; background: #ffffff14; box-shadow: inset 0 -1px 0 #ffffff0f;
+  font: 500 10.5px/1.5 var(--body); color: #d4d4d8; text-align: center;
+}
+@media (prefers-color-scheme: light) { .tip { --tip-bg: #111113; border-color: #0000000f; } }
+@media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
 
 /* Quote: floats just above words selected in a reply (app.js places it) */
 .quote-pop {
@@ -1121,7 +1204,6 @@ dialog p { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
 .git-badge[data-state="draft"], .git-badge[data-state="closed"] { background: var(--faint); }
 .git-badge[data-state="merged"] { background: var(--ink); }
 .git-badge[data-checks="failed"] { background: var(--warn); }
-.git-badge[data-checks="running"] { animation: breathe 1.6s ease-in-out infinite; }
 
 /*
  * Closing, its column narrows to nothing while the content, kept at full width and pinned to the right, is cut off
@@ -1310,9 +1392,9 @@ body.resizing .git-panel { transition: none; }
   .bar { padding: 24px 14px 10px 56px; min-height: 68px; flex-wrap: wrap; }
   .page-inner { padding-top: 64px; }
   .select.chip { max-width: 100%; }
-  .feed { padding: 20px 14px; }
-  .composer-wrap { padding: 0 8px; }
-  .composer { padding: 12px 10px 10px 14px; }
+  :root { --edge: 8px; --gut: 15px; }
+  .feed { padding-top: 20px; padding-bottom: 20px; }
+  .composer { padding-top: 12px; padding-right: 10px; }
 }
 /* ---------- phones: the notch and the home bar, toasts up top, Settings full screen ---------- */
 @media (max-width: 820px) {
@@ -1326,9 +1408,8 @@ body.resizing .git-panel { transition: none; }
   /* the composer's surface runs under the home bar; with the keyboard up there's no home bar to clear */
   .composer { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
   html.keyboard .composer { padding-bottom: 10px; }
-  .composer-wrap { padding-left: calc(8px + env(safe-area-inset-left)); padding-right: calc(8px + env(safe-area-inset-right)); }
-  /* a stuck message takes less of a small screen */
-  .turn > .msg-u:first-child .msg-user { max-height: 22dvh; }
+  .composer-wrap { padding-left: calc(var(--edge) + env(safe-area-inset-left)); padding-right: calc(var(--edge) + env(safe-area-inset-right)); }
+  .feed { padding-left: calc(var(--edge) + var(--gut) + env(safe-area-inset-left)); padding-right: calc(var(--edge) + var(--gut) + env(safe-area-inset-right)); }
   /* and a long one shows three lines, not five, before Show more (app.js: userLines) */
   .msg-user.clamped .msg-user-body { max-height: calc(3 * 1.7em); }
   /* toasts drop from the top, clear of the composer and the keyboard */
@@ -1422,7 +1503,7 @@ body.resizing .git-panel { transition: none; }
     -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
   }
   /* the mono labels, a size up: read at arm's length, not a desk */
-  .msg-meta, .turn-meta, .tool-count, .code-head, .git-at, .git-when, .git-fact, .git-sha, .git-count, .queued-label { font-size: 11.5px; }
+  .msg-meta, .turn-meta, .tool-count, .code-head, .git-at, .git-when, .git-fact, .git-sha, .git-count, .queue-label { font-size: 11.5px; }
   .tool-name, .tool-detail, .compact-time, .compact-facts, .git-path, .path { font-size: 12.5px; }
   .thread-link .age { font-size: 12px; }
   .git-chg { width: 68px; font-size: 11px; }
@@ -1493,7 +1574,7 @@ body.resizing .git-panel { transition: none; }
 .bp-where .pop-note { padding: 0 0 6px; overflow-wrap: anywhere; }
 
 /* ---------- linked threads: one thread's agent started another, talks to it, waits for it ---------- */
-.link-card { margin: 6px 0; padding: 10px 14px 11px; border-radius: 12px; background: var(--fill); font-size: 13px; }
+.link-card { margin-block: 6px; padding-block: 10px 11px; border-radius: 12px; background: var(--fill); font-size: 13px; }
 .link-card.waiting { background: var(--accent-soft); }
 .link-card.failed { background: var(--warn-soft); }
 .link-head { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
@@ -1608,22 +1689,58 @@ details.mem[open] .mem-more { rotate: 45deg; margin-bottom: 4px; }
 @media (hover: hover) { .att-pic:hover { box-shadow: 0 0 0 2px var(--accent-line); } .att-pic:hover .att-pic-name { opacity: 1; } }
 @media (hover: none) { .att-pic-name { opacity: 1; } }
 
-/* the composer's @ and / menu: above the box, a short list to pick from with the arrows */
+/* the composer's @ and / menu: a card above the box, a list to pick from with the arrows, the keys at its foot */
 .mention-pop {
-  position: absolute; left: 10px; right: 10px; bottom: calc(100% + 8px); z-index: 40; max-height: 300px; overflow: auto;
-  display: grid; gap: 1px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow), 0 12px 32px -12px #00000059;
+  position: absolute; left: 10px; right: 10px; bottom: calc(100% + 10px); z-index: 40;
+  display: flex; flex-direction: column; max-height: min(360px, 52vh); overflow: hidden;
+  border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface);
+  box-shadow: var(--shadow), 0 18px 40px -18px #000000a6;
+  animation: mention-in .14s var(--ease) both;
 }
+@keyframes mention-in { from { opacity: 0; transform: translateY(4px); } }
 .mention-pop[hidden] { display: none; }
-.mention-item {
-  display: flex; align-items: baseline; gap: 10px; min-width: 0; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px; background: none;
-  color: var(--ink); text-align: left; cursor: pointer; font: 400 13px var(--body);
+.mention-head {
+  flex: none; display: flex; align-items: center; gap: 7px; padding: 10px 14px 6px;
+  font: 500 11.5px var(--body); color: var(--faint); letter-spacing: .01em;
 }
-.mention-item.on { background: var(--accent-soft); }
-.mention-main { flex: none; font: 500 12.5px var(--mono); }
-.mention-item.on .mention-main { color: var(--accent-text); }
-.mention-args { flex: none; font: 400 12px var(--mono); color: var(--faint); }
+.mention-head .mention-ico { width: 13px; height: 13px; color: var(--muted); }
+.mention-crumb { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.mention-list { flex: 1 1 auto; min-height: 0; overflow: auto; display: grid; gap: 1px; padding: 4px 6px 6px; }
+.mention-item {
+  display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; min-height: 34px; padding: 6px 10px; border: 0; border-radius: 9px; background: none;
+  color: var(--ink); text-align: left; cursor: pointer; font: 400 13.5px var(--body); transition: none;
+}
+.mention-item.on { background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.mention-ico { flex: none; width: 16px; height: 16px; display: grid; place-items: center; color: var(--faint); }
+.mention-ico > svg { width: 100%; height: 100%; }
+.mention-item.dir .mention-ico { color: var(--accent-text); }
+.mention-item.on .mention-ico { color: var(--ink); }
+.mention-item.on.dir .mention-ico { color: var(--accent-text); }
+.mention-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.mention-hit { background: none; color: var(--accent-text); font-weight: 600; }
+/* where it is: the end of the path shows when it's cut (the folder nearest the name tells most) */
+.mention-path {
+  flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+  color: var(--faint); font-size: 12.5px;
+}
+.mention-chev { flex: none; width: 14px; height: 14px; margin-left: auto; color: var(--faint); opacity: 0; }
+.mention-chev > svg { width: 100%; height: 100%; display: block; }
+.mention-item.on .mention-chev { opacity: 1; }
+.mention-path + .mention-chev { margin-left: 0; }
+/* a / command */
+.mention-main { flex: none; font: 600 13px var(--body); }
+.mention-args { flex: none; font: 400 12.5px var(--body); color: var(--faint); }
 .mention-sub { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12.5px; }
-.mention-none { padding: 8px 10px; color: var(--muted); font-size: 12.5px; }
+.mention-none { padding: 10px 10px 12px; color: var(--muted); font-size: 13px; }
+.mention-foot {
+  flex: none; display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 8px 14px 9px; border-top: 1px solid var(--line);
+  font: 400 11.5px var(--body); color: var(--faint);
+}
+.mention-foot > span { display: inline-flex; align-items: center; gap: 5px; }
+.mention-foot kbd {
+  min-width: 18px; padding: 0 5px; border-radius: 5px; background: color-mix(in srgb, var(--ink) 7%, transparent);
+  font: 500 10.5px/17px var(--body); color: var(--muted); text-align: center;
+}
 /* a page's first row starts below the window buttons when they're drawn over it (min() is 0 without them) */
 .page-inner > :first-child { margin-top: min(var(--wco), 26px); }
 /* The fixed sidebar toggle sits over a header row that drags the window, and Electron doesn't let a no-drag box laid
@@ -1642,15 +1759,15 @@ details.mem[open] .mem-more { rotate: 45deg; margin-bottom: 4px; }
 .diff-stat .d-plus { font-weight: 500; color: #2f9e5b; }
 .diff-stat .d-minus { font-weight: 500; color: #d65252; }
 @media (prefers-color-scheme: dark) { .diff-stat .d-plus { color: #4cc27a; } .diff-stat .d-minus { color: #ef6b6b; } }
-.tool-out.tool-diff { padding: 0; background: none; border: 0; white-space: normal; }
+.tool-out.tool-diff { padding: 0; margin-inline: 0; background: none; border: 0; white-space: normal; }
 .tool-diff .git-diff { margin: 4px 0 6px; max-height: 360px; }
 .tool-fail { margin: 0 0 6px; padding: 8px 10px; border-radius: 8px; background: var(--warn-soft); font: 400 11.5px/1.5 var(--mono); white-space: pre-wrap; }
-.turn-files { margin: 10px 0 2px; border-radius: 12px; background: var(--fill); overflow: hidden; }
-.turn-files-head { display: flex; align-items: center; gap: 10px; padding: 8px 8px 2px 14px; }
+.turn-files { margin-block: 10px 2px; padding-inline: 0; border-radius: 12px; background: var(--fill); overflow: hidden; }
+.turn-files-head { display: flex; align-items: center; gap: 10px; padding: 8px 8px 2px var(--gut); }
 .turn-files-title { font-weight: 600; font-size: 13px; color: var(--ink); }
 .turn-files-review { margin-left: auto; }
 .turn-file-list { list-style: none; margin: 0; padding: 2px 0 10px; }
-.turn-file { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 3px 14px; font-size: 12.5px; }
+.turn-file { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 3px var(--gut); font-size: 12.5px; }
 .turn-file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 12px var(--mono); color: var(--muted); direction: ltr; }
 .turn-file.more { display: block; }
 .turn-file.more summary { cursor: pointer; color: var(--accent-text); font-size: 12px; }
@@ -1689,12 +1806,13 @@ dialog.keys-sheet { width: min(480px, calc(100vw - 32px)); padding: 18px 20px 20
 /* the working line: its clock */
 .working-time { font: 400 11.5px var(--mono); color: var(--faint); font-variant-numeric: tabular-nums; }
 .working-time:empty { display: none; }
-/* a file picked with @, in the composer: a chip that's sent as @path */
+/* a file or folder picked with @, in the composer and in sent messages: a chip (sent as @path) */
 .mention {
-  display: inline-flex; align-items: baseline; gap: 1px; padding: 0 6px; margin: 0 1px; border-radius: 6px;
-  background: var(--accent-soft); color: var(--accent-text); font: 500 13px var(--mono); white-space: nowrap; user-select: all;
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 7px 0 5px; margin: 0 1px; border-radius: 6px; vertical-align: baseline;
+  background: var(--accent-soft); color: var(--accent-text); font: 500 .94em/1.5 var(--body); white-space: nowrap; user-select: all;
 }
-.mention-at { opacity: .7; }
+.mention .mention-ico { width: 13px; height: 13px; color: inherit; opacity: .8; }
+.mention .mention-name { font-weight: 500; }
 .mention-from { flex: none; margin-left: auto; padding: 0 6px; border-radius: 99px; border: 1px solid var(--line); font-size: 10.5px; color: var(--faint); }
 
 /* back to the latest, when scrolled up: a round button over the composer's top edge, "New" when more came in */
@@ -1734,8 +1852,9 @@ button.turn-file-path { border: 0; background: none; padding: 0; text-align: lef
 
 /* ---------- a long thread opens and scrolls without laying out what's off screen ----------
    Each turn off screen is skipped (its size estimated, then remembered once drawn): a 600-item thread
-   spent ~200ms laying out every turn on open. Its sticky message still sticks inside it. */
-.feed > section.turn { content-visibility: auto; contain-intrinsic-size: auto 480px; }
+   spent ~200ms laying out every turn on open. */
+/* It clips what it draws to its box: the box takes in the gutters, so the cards' fills that reach into them show. */
+.feed > section.turn { content-visibility: auto; contain-intrinsic-size: auto 480px; margin-inline: calc(-1 * var(--gut)); padding-inline: var(--gut); }
 /* the turns above those drawn */
 .feed-earlier { align-self: center; margin: 4px auto 10px; padding: 6px 14px; border: 0; border-radius: 99px; background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--muted); font: 500 12px var(--body); cursor: pointer; }
 @media (hover: hover) { .feed-earlier:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 10%, transparent); } }

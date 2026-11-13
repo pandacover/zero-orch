@@ -85,8 +85,8 @@ export const make = (home: string) =>
     const projects: Array<Project> = readJson(join(home, "projects.json"), [])
     const db = openThreadDb(join(home, "zero.db"))
     importJsonThreads(home, db)
-    // A turn can't still be going after a restart.
-    const metas = new Map<string, ThreadMeta>(db.metas().map((m) => [m.id, { ...m, status: "idle" }]))
+    // A turn can't still be going after a restart, nor a message be waiting on one.
+    const metas = new Map<string, ThreadMeta>(db.metas().map(({ queued: _q, waiting: _w, ...m }) => [m.id, { ...m, status: "idle" }]))
     /** Threads whose items have been read: the same object every time one is asked for. */
     const loaded = new Map<string, Thread>()
     /** Each loaded thread's items as last written, by id: an item that's a different object now was replaced. */

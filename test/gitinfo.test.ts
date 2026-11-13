@@ -105,6 +105,25 @@ describe("a thread's git view", () => {
     expect(v.pr?.number).toBe(4)
   })
 
+  it("takes GitHub's default branch as the base over a stale origin/HEAD, and origin/HEAD when gh can't say", async () => {
+    const rules = (gh: Exec): Array<[string, Exec]> => [
+      ["rev-parse --is-inside-work-tree", ok("true\n")],
+      ["branch --show-current", ok("feat\n")],
+      ["rev-parse --verify --quiet refs/heads/feat", ok("abc\n")],
+      ["gh repo view --json defaultBranchRef", gh],
+      // Set at clone time, when the default was another branch.
+      ["refs/remotes/origin/HEAD", ok("origin/zero/dogfood\n")],
+      ["gh pr view feat", no("no pull requests found")],
+      ["log", ok("")]
+    ]
+    expect((await gitView("repo-a", "feat", fake(rules(ok("main\n"))))).base).toBe("origin/main")
+    expect((await gitView("repo-b", "feat", fake(rules(no("gh: not logged in"))))).base).toBe("origin/zero/dogfood")
+    // Asked once, then remembered for a while.
+    const calls: Array<string> = []
+    await gitView("repo-a", "feat", fake(rules(ok("other\n")), calls))
+    expect(calls.some((c) => c.startsWith("gh repo view"))).toBe(false)
+  })
+
   it("falls back to the checked-out branch when the thread's is gone", async () => {
     const exec = fake([
       ["rev-parse --is-inside-work-tree", ok("true")],

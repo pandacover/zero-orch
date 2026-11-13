@@ -225,7 +225,11 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
           if (!a) return error(400, "an attached file is gone; attach it again")
           attachments.push(a)
         }
-        if (threads.isRunning(thread.id)) return error(409, "this thread is still working; stop it or wait")
+        // Sent while the thread works: it waits, and runs when the turn ends.
+        if (threads.isRunning(thread.id)) {
+          threads.enqueue(thread, text, attachments)
+          return reply(202, { queued: true })
+        }
         const project = store.project(thread.projectId)
         if (!project) return error(409, "this thread's project was removed")
         const status = (await providers())[thread.provider]
@@ -234,6 +238,13 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
         const compactFirst = body["compact"] === true && compactionOffered(thread)
         runtime.runFork(threads.turn(thread, project, text, attachments, { compactFirst }))
         return reply(202, { started: true })
+      }
+      // Take back a message waiting for the turn to end: DELETE threads/<id>/queue/<its id>. The answer is the
+      // message, its words and its files, for the page to put back in the composer.
+      if (m === "DELETE" && parts[2] === "queue" && parts[3]) {
+        const back = threads.unqueue(thread, parts[3])
+        if (!back) return error(409, "that message already ran")
+        return reply(200, { text: back.text, attachments: back.attachments.map(({ id, name, mime, size }) => ({ id, name, mime, size })) })
       }
       // The slash commands its session takes, for / in its composer.
       if (m === "GET" && parts[2] === "commands") return reply(200, threads.commands(thread.id))

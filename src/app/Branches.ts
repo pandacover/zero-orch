@@ -8,7 +8,7 @@
  */
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { type Exec, isRefName, type Run, run } from "./GitInfo.ts"
+import { type Exec, isRefName, remoteDefault, type Run, run } from "./GitInfo.ts"
 
 export interface Branch {
   readonly name: string
@@ -93,13 +93,13 @@ export const listBranches = async (cwd: string, exec: Run = run): Promise<Branch
     out(exec, cwd, ["branch", "--show-current"]),
     out(exec, cwd, ["for-each-ref", `--format=%(refname:short)${FS}%(worktreepath)${FS}%(committerdate:iso-strict)${FS}%(upstream:short)${FS}%(upstream:track,nobracket)`, "--sort=-committerdate", "refs/heads"]),
     out(exec, cwd, ["for-each-ref", "--format=%(refname:short)", "--sort=-committerdate", "refs/remotes"]),
-    out(exec, cwd, ["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"]),
+    remoteDefault(cwd, exec),
     out(exec, cwd, ["rev-parse", "--absolute-git-dir"]),
     out(exec, cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
   ])
   const local = parseLocal(heads ?? "", cwd)
   const remote = parseRemote(remotes ?? "", local)
-  const defaultBranch = remoteHead && remoteHead !== "origin/HEAD" ? remoteHead.replace(/^origin\//, "") : ""
+  const defaultBranch = remoteHead ? remoteHead.replace(/^origin\//, "") : ""
   // The default branch as a local branch if there is one (it may be ahead of origin's), else origin's.
   const base = defaultBranch
     ? local.some((b) => b.name === defaultBranch) ? defaultBranch : `origin/${defaultBranch}`

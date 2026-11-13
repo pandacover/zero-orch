@@ -112,14 +112,32 @@ function clearThreadToasts(threadId) {
 const fail = (e) => toast(e.message, true)
 const threadName = (id) => S.threads.find((t) => t.id === id)?.title ?? "A thread"
 
-// ---------- tooltips: shown at once, not after the browser's delay ----------
+// ---------- tooltips: zero's own, not the browser's ----------
 // Elements keep using `title`; on hover it moves to data-tip (so the native one never shows) and this one shows it.
 // A manual popover: it shows in the top layer, so it stays above an open modal (Settings, a confirm).
+// The first waits a moment (passing the pointer over a list shouldn't spray tips); once one has shown,
+// the next shows at once while the pointer goes from one control to the next.
 const tip = el("div", { class: "tip", role: "tooltip", popover: "manual" })
 document.body.append(tip)
 let tipFor = null
+let tipTimer = 0
+let tipHiddenAt = 0
+const TIP_DELAY_MS = 320
+const TIP_WARM_MS = 450
 const tipShown = () => tip.matches(":popover-open")
-const hideTip = () => { if (tipShown()) tip.hidePopover(); tipFor = null }
+const hideTip = () => {
+  clearTimeout(tipTimer)
+  if (tipShown()) { tip.hidePopover(); tipHiddenAt = performance.now() }
+  tipFor = null
+}
+/** A tip's words, with a shortcut it ends in ("Stop (Esc)", "Search (Ctrl K)") drawn as keys. */
+const KEYS_AT_END = /^([\s\S]*\S)\s+\(((?:Ctrl|Cmd|Shift|Alt|Option|Esc|Enter|Tab|Space|Backspace|Delete|[A-Z0-9?/,.\[\]⌘⇧⌥⌃↑↓←→]|[\s+])+)\)$/
+function tipContent(text) {
+  const m = KEYS_AT_END.exec(text)
+  if (!m) return [text]
+  return [el("span", { class: "tip-text", text: m[1] }),
+    el("span", { class: "tip-keys" }, m[2].split(/\s*\+\s*|\s+/).filter(Boolean).map((k) => el("kbd", { text: k })))]
+}
 /** Move an element's title into data-tip, keeping it as the accessible name when it's the only one. */
 function adoptTitle(n) {
   const text = n.getAttribute("title")
@@ -128,11 +146,14 @@ function adoptTitle(n) {
   n.dataset.tip = text
   if (text && !n.hasAttribute("aria-label") && !n.textContent.trim()) n.setAttribute("aria-label", text)
 }
-function showTip(n) {
+function showTip(n, warm = false) {
+  clearTimeout(tipTimer)
   const text = n.dataset.tip
   if (!text || !n.isConnected) return hideTip()
   tipFor = n
-  tip.textContent = text
+  tip.replaceChildren(...tipContent(text))
+  // Going from one tip to the next, it moves without easing in again.
+  tip.classList.toggle("warm", warm)
   // Shown afresh each time so it lands above anything that opened in the top layer since.
   if (tipShown()) tip.hidePopover()
   tip.showPopover()
@@ -140,8 +161,10 @@ function showTip(n) {
   const w = tip.offsetWidth
   const h = tip.offsetHeight
   let x = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, innerWidth - w - 8))
-  const below = r.bottom + 6
-  const y = below + h > innerHeight - 8 ? r.top - h - 6 : below
+  const below = r.bottom + 8
+  const above = below + h > innerHeight - 8
+  const y = above ? r.top - h - 8 : below
+  tip.dataset.side = above ? "top" : "bottom"
   // The desktop window's minimize, maximize and close buttons are drawn over the page's top right, above
   // everything it shows: a tip that would reach under them moves left of them.
   const wco = navigator.windowControlsOverlay
@@ -159,7 +182,12 @@ document.addEventListener("pointerover", (e) => {
   const n = e.target.closest?.("[title], [data-tip]")
   if (!n) return hideTip()
   if (n.hasAttribute("title")) adoptTitle(n)
-  if (n !== tipFor || !tipShown()) showTip(n)
+  if (n === tipFor) return // shown, or about to be
+  const warm = tipShown() || performance.now() - tipHiddenAt < TIP_WARM_MS
+  hideTip()
+  tipFor = n
+  if (warm) return void showTip(n, true)
+  tipTimer = setTimeout(() => { if (tipFor === n) showTip(n) }, TIP_DELAY_MS)
 })
 document.addEventListener("pointerout", (e) => { if (tipFor && !tipFor.contains(e.relatedTarget)) hideTip() })
 for (const type of ["pointerdown", "keydown", "wheel"]) document.addEventListener(type, hideTip, true)
@@ -169,7 +197,7 @@ new MutationObserver((records) => {
   for (const r of records) {
     if (!r.target.hasAttribute("title")) continue
     adoptTitle(r.target)
-    if (r.target === tipFor) showTip(r.target)
+    if (r.target === tipFor && tipShown()) showTip(r.target, true)
   }
 }).observe(document.body, { attributes: true, attributeFilter: ["title"], subtree: true })
 
@@ -208,12 +236,14 @@ function actionSheet(title, actions) {
  * move between its items. Only one is open at a time.
  */
 let ctxMenu = null
-function contextMenu(x, y, title, actions) {
+/** `anchor`: the button that opened it, if one did; the menu then opens left of `x` (the button's right edge). */
+function contextMenu(x, y, title, actions, anchor = null) {
   ctxMenu?.close()
   const back = document.activeElement
   const m = el("div", { class: "ctx-menu", role: "menu", "aria-label": title, popover: "auto" },
     actions.map((a) => el("button", { class: `ctx-item${a.danger ? " danger" : ""}`, type: "button", role: "menuitem", tabindex: -1,
-      onclick: () => { close(); a.run() } }, a.icon ? icon(a.icon) : el("span", { class: "ico" }), el("span", { text: a.label }))))
+      // An icon column only when some item has an icon.
+      onclick: () => { close(); a.run() } }, a.icon ? icon(a.icon) : actions.some((b) => b.icon) ? el("span", { class: "ico" }) : null, el("span", { text: a.label }))))
   /** Put away: by a pick, a key, or the browser's light dismiss (a click elsewhere). Safe to run twice. */
   const close = () => {
     if (!m.isConnected) return
@@ -222,6 +252,7 @@ function contextMenu(x, y, title, actions) {
     removeEventListener("resize", close)
     removeEventListener("scroll", close, true)
     m.remove()
+    anchor?.setAttribute("aria-expanded", "false")
     if (ctxMenu?.node === m) ctxMenu = null
     // Back to where focus was, unless a click put it somewhere else since.
     if (!document.activeElement || document.activeElement === document.body) back?.focus?.({ preventScroll: true })
@@ -241,13 +272,16 @@ function contextMenu(x, y, title, actions) {
   m.showPopover()
   // Opens down and right of the pointer, flipped where that would leave the window.
   const w = m.offsetWidth, h = m.offsetHeight
-  m.style.left = `${Math.max(6, x + w > innerWidth - 6 ? x - w : x)}px`
-  m.style.top = `${Math.max(6, y + h > innerHeight - 6 ? y - h : y)}px`
+  m.style.left = `${Math.max(6, anchor || x + w > innerWidth - 6 ? x - w : x)}px`
+  // Under a button: flipped above it (not over it) where below would leave the window.
+  const above = anchor ? anchor.getBoundingClientRect().top - 4 - h : y - h
+  m.style.top = `${Math.max(6, y + h > innerHeight - 6 ? above : y)}px`
+  if (anchor) anchor.setAttribute("aria-expanded", "true")
   addEventListener("blur", close)
   addEventListener("resize", close)
   addEventListener("scroll", close, true)
   m.querySelector(".ctx-item")?.focus({ preventScroll: true })
-  ctxMenu = { node: m, close }
+  ctxMenu = { node: m, close, anchor }
 }
 /**
  * The actions `menu()` names ({ title, actions }) on a long press of `node` by a finger (a sheet up from the
@@ -1407,15 +1441,27 @@ function attChip(tag, { name, mime, src, attrs = {} }) {
 function mentions(text) {
   const out = []
   let last = 0
-  for (const m of text.matchAll(/(^|\s)@([\w.-]+(?:[/\\][\w.-]+)*\.\w+)(?=\s|$|[,;:!?)])/g)) {
+  // A file (it has an extension) or a folder (it ends in a slash), as the @ menu puts them in.
+  for (const m of text.matchAll(/(^|\s)@([\w.-]+(?:[/\\][\w.-]+)*(?:\.\w+|[/\\]))(?=\s|$|[,;:!?)])/g)) {
     const at = m.index + m[1].length
     if (at > last) out.push(text.slice(last, at))
     const path = m[2]
-    out.push(el("span", { class: "mention", title: path }, el("span", { class: "mention-at", text: "@" }), path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1)))
+    out.push(mentionChip(path.replace(/\\/g, "/")))
     last = at + 1 + path.length
   }
   if (last < text.length) out.push(text.slice(last))
   return out
+}
+/**
+ * A file or folder picked with @: its icon and name, the whole path on hover. A folder's path ends in a slash.
+ * In the composer (`inComposer`) it can't be edited inside, and is sent as @path.
+ */
+function mentionChip(path, inComposer = false) {
+  const dir = path.endsWith("/")
+  const bare = dir ? path.slice(0, -1) : path
+  const name = bare.slice(bare.lastIndexOf("/") + 1)
+  return el("span", { class: `mention${dir ? " dir" : ""}`, title: path, ...(inComposer ? { contenteditable: "false", "data-path": path } : {}) },
+    icon(dir ? FOLDER_PATHS : FILE_PATHS, "mention-ico"), el("span", { class: "mention-name", text: name }))
 }
 /** A sent message: its words, with each attached file as a chip where it was put. */
 function userNodes(item) {
@@ -1439,13 +1485,14 @@ function userNodes(item) {
 }
 
 /**
- * zero's mark, the slanted 0 with its slash, as the working sign (drawn in app.css, by masks): a faint mark, a light
- * that sweeps round it (lighting the slash as it crosses) with a glow under it, and now and then the whole mark
- * turns over like a coin. Only transforms and opacity move, so it keeps time while the page is busy drawing.
+ * The working sign (drawn in app.css): a hairline orbit with a comet of light easing round it, slowing as it
+ * comes over the top, about a softly breathing core. Only transforms and opacity move, so it keeps time while
+ * the page is busy drawing.
  */
-const ZERO_GLYPH = '<span class="zg"><span class="zg-mark zg-base"></span>' +
-  '<span class="zg-glow"><span class="zg-mark zg-lit"><span class="zg-sweep"></span></span></span>' +
-  '<span class="zg-mark zg-lit"><span class="zg-sweep"></span></span></span>'
+const WORKING_GLYPH = '<span class="wk-halo"></span><span class="wk-ring"></span><span class="wk-arc"></span><span class="wk-head"></span><span class="wk-core"></span>'
+/** The working line's words, with a light passing over them: the words twice, the bright copy seen through a moving window. */
+const workingLabel = () => el("span", { class: "working-label" }, el("span", { class: "wk-text", text: "Working" }),
+  el("span", { class: "wk-shine", "aria-hidden": "true" }, el("span", { class: "wk-text", text: "Working" })))
 const COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>'
 const CHECK_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>'
 /** The row under a message that shows on hover: a copy button for `text()`, then any `extra` (a response's turn details). */
@@ -1546,8 +1593,6 @@ function userMessage(item) {
     const lines = parseFloat(getComputedStyle(body).lineHeight) * userLines()
     more.hidden = !(body.scrollHeight > lines + 2)
     bubble.classList.toggle("clamped", !more.hidden && !open)
-    // Opened in full, it reads in the feed: not stuck to the top, not scrolling inside itself.
-    bubble.parentElement?.classList.toggle("expanded", !more.hidden && open)
     more.textContent = open ? "Show less" : "Show more"
     more.setAttribute("aria-expanded", String(open))
   }
@@ -1684,23 +1729,40 @@ function discardDraft(key) {
  * it lands as a chip where the caret was. Each file uploads as it lands;
  * Send waits until they all have.
  */
-/** How well a file's path matches what was typed after @: its name first, then anywhere in its path; -1 if not at all. */
-function fileScore(path, q) {
-  if (!q) return 1 / (1 + path.length)
+/**
+ * How well an entry's path matches what was typed after @: its name first (exactly, then at its start, then
+ * anywhere), then anywhere in its path; -1 if not at all. Shorter paths win a tie.
+ */
+function pathScore(path, q) {
   const p = path.toLowerCase()
   const base = p.slice(p.lastIndexOf("/") + 1)
-  const s = base.startsWith(q) ? 3 : base.includes(q) ? 2 : p.includes(q) ? 1 : -1
+  const s = base === q ? 4 : base.startsWith(q) ? 3 : base.includes(q) ? 2 : p.includes(q) ? 1 : -1
   return s < 0 ? -1 : s + 1 / (1 + path.length)
 }
+/** The files the project lists, and every folder they're in: [{ path, dir }], folders first. */
+function pathEntries(files) {
+  const dirs = new Set()
+  for (const f of files) for (let i = f.indexOf("/"); i > 0; i = f.indexOf("/", i + 1)) dirs.add(f.slice(0, i))
+  return [...[...dirs].sort().map((path) => ({ path, dir: true })), ...files.map((path) => ({ path, dir: false }))]
+}
+/** `text` with the first `q` in it marked, for the menu's names. */
+function hitMarked(text, q) {
+  const i = q ? text.toLowerCase().indexOf(q) : -1
+  if (i < 0) return [text]
+  return [text.slice(0, i), el("mark", { class: "mention-hit", text: text.slice(i, i + q.length) }), text.slice(i + q.length)]
+}
+const CHEVRON_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 4 4 4-4 4"/></svg>'
 
 /**
- * The composer's menu for @ (a file in the project, put in as `@path`) and / (one of `commands`, at the
- * start of the box). Arrows move, Enter or Tab picks, Esc closes.
+ * The composer's menu for @ (a file or folder in the project, put in as `@path`, a folder's ending in a slash)
+ * and / (one of `commands`, at the start of the box). Arrows move, Enter picks, Tab opens a folder to pick
+ * inside it (or picks a file), Esc closes. With nothing typed after @, or a folder and a slash, it lists
+ * that folder: its folders, then its files.
  */
 function mentionMenu(input, { files, commands = [] }) {
   const pop = el("div", { class: "mention-pop", role: "listbox", hidden: true })
   pop.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
-  let items = [], at = 0, match = null, list = null, asked = 0
+  let items = [], at = 0, match = null, entries = null, asked = 0
   /** zero's own commands, then the provider session's (a function: those arrive once a turn has started). */
   const cmdList = () => typeof commands === "function" ? commands() : commands
   const close = () => { pop.hidden = true; items = []; match = null }
@@ -1715,15 +1777,27 @@ function mentionMenu(input, { files, commands = [] }) {
     if (slash) return { kind: "command", node, start: 0, end, q: slash[1].toLowerCase() }
     return null
   }
+  const keys = (...pairs) => el("div", { class: "mention-foot" }, pairs.map(([k, what]) => el("span", {}, el("kbd", { text: k }), what)))
   const paint = () => {
-    pop.replaceChildren(...items.map((it, i) => {
-      const b = el("button", { class: `mention-item${i === at ? " on" : ""}`, type: "button", role: "option", "aria-selected": String(i === at), tabindex: "-1", onclick: () => pick(i) }, ...it.view)
+    const rows = items.map((it, i) => {
+      const b = el("button", { class: `mention-item${it.dir ? " dir" : ""}${i === at ? " on" : ""}`, type: "button", role: "option", "aria-selected": String(i === at), tabindex: "-1", onclick: () => pick(i) }, ...it.view)
       b.addEventListener("mousemove", () => { if (at !== i) { at = i; paint() } })
       return b
-    }))
-    if (!items.length) pop.append(el("div", { class: "mention-none", text: match?.kind === "file" ? (list ? "No file matches." : "Looking for files…") : "No command matches." }))
+    })
+    const isFiles = match?.kind === "file"
+    const browsing = isFiles && match.browse !== undefined
+    const head = isFiles ? el("div", { class: "mention-head" },
+      browsing && match.browse ? [icon(FOLDER_PATHS, "mention-ico"), el("span", { class: "mention-crumb", text: `‎${match.browse}‎` })] : el("span", { text: browsing ? "Files and folders" : "Matching files and folders" })) : null
+    const none = items.length ? null
+      : el("div", { class: "mention-none", text: isFiles ? (entries ? (browsing ? "This folder is empty." : "Nothing in the project matches.") : "Looking through the project…") : "No command matches." })
+    const dirOn = items[at]?.dir
+    const foot = touchFirst.matches || !items.length ? null
+      : isFiles ? keys(["↑↓", "move"], ["↵", dirOn ? "add folder" : "add"], ...(dirOn ? [["Tab", "open"]] : []), ["Esc", "close"])
+      : keys(["↑↓", "move"], ["↵", "pick"], ["Esc", "close"])
+    pop.classList.toggle("files", isFiles)
+    pop.replaceChildren(...[head, el("div", { class: "mention-list" }, rows, none), foot].filter(Boolean))
     pop.hidden = false
-    pop.querySelector(".on")?.scrollIntoView({ block: "nearest" })
+    pop.querySelector(".mention-item.on")?.scrollIntoView({ block: "nearest" })
   }
   const update = async () => {
     match = typed()
@@ -1737,34 +1811,51 @@ function mentionMenu(input, { files, commands = [] }) {
       }))
       return paint()
     }
-    const q = match.q, mine = ++asked
-    if (!list) {
+    const m = match, q = m.q, mine = ++asked
+    // Nothing typed, or a folder and its slash: that folder's contents.
+    if (q === "" || q.endsWith("/")) m.browse = q.slice(0, -1)
+    if (!entries) {
       items = []
       paint()
-      try { list = await files() } catch { list = { files: [] } }
-      if (mine !== asked || !match) return
+      try { entries = pathEntries((await files()).files) } catch { entries = [] }
+      if (mine !== asked || match !== m) return
     }
-    items = list.files.map((f) => [f, fileScore(f, q)]).filter(([, s]) => s >= 0).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([f]) => {
-      const cut = f.lastIndexOf("/")
-      return { value: f, view: [el("span", { class: "mention-main", text: f.slice(cut + 1) }), cut > 0 ? el("span", { class: "mention-sub", text: f.slice(0, cut) }) : null] }
+    const inside = (p) => m.browse === "" ? !p.includes("/") : p.startsWith(`${m.browse}/`) && !p.slice(m.browse.length + 1).includes("/")
+    const found = m.browse !== undefined
+      ? entries.filter((e) => inside(e.path.toLowerCase()))
+        .sort((a, b) => (b.dir - a.dir) || a.path.localeCompare(b.path, undefined, { sensitivity: "base" })).slice(0, 200)
+      : entries.map((e) => [e, pathScore(e.path, q)]).filter(([, sc]) => sc >= 0).sort((a, b) => b[1] - a[1]).slice(0, 50).map(([e]) => e)
+    const hit = m.browse !== undefined ? "" : q.slice(q.lastIndexOf("/") + 1)
+    items = found.map((e) => {
+      const cut = e.path.lastIndexOf("/")
+      return { value: e.path, dir: e.dir, view: [
+        icon(e.dir ? FOLDER_PATHS : FILE_PATHS, "mention-ico"),
+        el("span", { class: "mention-name" }, hitMarked(e.path.slice(cut + 1), hit)),
+        // Where it is, when that isn't the folder being looked at.
+        m.browse === undefined && cut > 0 ? el("span", { class: "mention-path", text: `‎${e.path.slice(0, cut)}‎` }) : null,
+        e.dir ? el("span", { class: "mention-chev", "aria-hidden": "true", html: CHEVRON_SVG }) : null
+      ] }
     })
     paint()
   }
-  /** Put the pick in place of what was typed: a file as `@path `; a command runs, or is put in to add words to. */
-  const pick = (i) => {
-    const it = items[i], m = match
-    if (!it || !m) return
+  /** Select what was typed (from the @ or / to the caret): it's what a pick replaces. */
+  const selectTyped = (m) => {
     const r = document.createRange()
     r.setStart(m.node, m.start)
     r.setEnd(m.node, m.end)
     const s = getSelection()
     s.removeAllRanges()
     s.addRange(r)
+    return r
+  }
+  /** Put the pick in place of what was typed: a file or folder as a chip; a command runs, or is put in to add words to. */
+  const pick = (i) => {
+    const it = items[i], m = match
+    if (!it || !m) return
+    const r = selectTyped(m)
     close()
     if (m.kind === "file") {
-      // The file goes in as a chip: its name, with the whole path on hover; it's sent as @path.
-      const cut = it.value.lastIndexOf("/")
-      const chip = el("span", { class: "mention", contenteditable: "false", "data-path": it.value, title: it.value }, el("span", { class: "mention-at", text: "@" }), it.value.slice(cut + 1))
+      const chip = mentionChip(it.dir ? `${it.value}/` : it.value, true)
       const space = document.createTextNode(" ")
       r.deleteContents()
       r.insertNode(space)
@@ -1772,6 +1863,7 @@ function mentionMenu(input, { files, commands = [] }) {
       const after = document.createRange()
       after.setStart(space, 1)
       after.collapse(true)
+      const s = getSelection()
       s.removeAllRanges()
       s.addRange(after)
       input.dispatchEvent(new Event("input"))
@@ -1780,12 +1872,21 @@ function mentionMenu(input, { files, commands = [] }) {
     if (it.value.run) { document.execCommand("delete"); return void it.value.run() }
     document.execCommand("insertText", false, `/${it.value.name} `)
   }
+  /** Into a folder: what was typed becomes `@folder/`, and the menu lists what's in it. */
+  const open = (i) => {
+    const it = items[i], m = match
+    if (!it?.dir || !m) return
+    selectTyped(m)
+    document.execCommand("insertText", false, `@${it.value}/`)
+    update()
+  }
   /** Keys while the menu is open; true when the key was its. */
   const key = (e) => {
     if (pop.hidden) return false
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       if (items.length) { at = (at + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length; paint() }
-    } else if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey && items.length) pick(at)
+    } else if (e.key === "Tab" && !e.shiftKey && items.length) items[at]?.dir ? open(at) : pick(at)
+    else if (e.key === "Enter" && !e.shiftKey && items.length) pick(at)
     else if (e.key === "Escape") close()
     else return false
     e.preventDefault()
@@ -1804,24 +1905,30 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   const picker = el("input", { type: "file", multiple: true, hidden: true, tabindex: "-1" })
   const attach = el("button", { class: "pill-btn", type: "button", title: "Attach files. You can paste or drop them too." }, icon(CLIP_PATHS), el("span", { text: "Attach" }))
   const send = el("button", { class: "send", type: "button" })
-  const hint = el("span", { class: "hint" })
   let busy = running
   let canAttach = true
   let range = null // where the caret last was inside the box
 
   const uploading = () => input.querySelector('.att[data-state="uploading"]') !== null
   const empty = () => !input.querySelector(".att") && serialize(input).trim() === ""
-  const paint = () => {
-    send.className = `send${busy ? " stop" : ""}`
-    send.title = busy ? "Stop (Esc)" : uploading() ? "Waiting for files to upload" : "Send (Enter)"
-    send.setAttribute("aria-label", busy ? "Stop" : "Send")
-    send.innerHTML = busy
-      ? '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>'
-      : '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>'
-    send.disabled = !busy && (disabled || empty() || uploading())
+  /** Working with nothing typed: the button stops the turn. With a message typed it sends it, to wait for the turn's end. */
+  const stops = () => busy && empty()
+  const STOP_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>'
+  const SEND_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>'
+  let painted = ""
+  /** The button as things stand; it's touched only when that changed (each key typed comes through here). */
+  const paint = (isEmpty = empty()) => {
+    const stop = busy && isEmpty
+    const up = uploading()
+    const state = `${stop}|${busy}|${up}|${disabled}|${isEmpty}|${canAttach}`
+    if (state === painted) return
+    painted = state
+    send.className = `send${stop ? " stop" : ""}`
+    send.title = stop ? "Stop (Esc)" : up ? "Waiting for files to upload" : busy ? "Queue: runs when this turn ends (Enter)" : "Send (Enter)"
+    send.setAttribute("aria-label", stop ? "Stop" : busy ? "Queue" : "Send")
+    send.innerHTML = stop ? STOP_SVG : SEND_SVG
+    send.disabled = !stop && (disabled || isEmpty || up)
     attach.disabled = disabled || !canAttach
-    hint.textContent = busy ? (touchFirst.matches ? "Working. The square stops it." : "Working. Esc stops it.") : ""
-    hint.hidden = !busy
   }
   /** After any change: an empty box is truly empty (so its placeholder shows). */
   const sync = () => {
@@ -1839,7 +1946,7 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
       // The sidebar's Drafts follow along, once per burst of typing.
       if (Boolean(was) !== !isEmpty || (was && was.title !== drafts.get(draftKey)?.title)) paintDraftsSoon()
     }
-    paint()
+    paint(isEmpty)
   }
   const track = () => {
     if (!input.isConnected) return document.removeEventListener("selectionchange", track)
@@ -1867,6 +1974,22 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     after.collapse(true)
     caretTo(after)
   }
+  // A chip can move to another composer with its draft: it tells the box it's in now, not this one.
+  const changed = (box) => box?.dispatchEvent(new Event("input"))
+  /** A file chip in the box, with its × to take the file out. */
+  const removable = (chip, name) => {
+    const x = el("button", { class: "att-x", type: "button", tabindex: "-1", "aria-label": `Remove ${name}`, title: "Remove", text: "×" })
+    x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
+    x.addEventListener("click", () => {
+      const box = chip.closest(".input")
+      const next = chip.nextSibling
+      if (next?.nodeType === Node.TEXT_NODE && next.nodeValue === " ") next.remove()
+      chip.remove()
+      changed(box)
+    })
+    chip.append(x)
+    return chip
+  }
   const addFiles = (files) => {
     if (disabled) return
     if (!canAttach) return toast(attach.title, true)
@@ -1874,19 +1997,7 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     for (const file of files) {
       if (file.size > MAX_FILE) { toast(`${file.name} is over 25 MB, too big to attach.`, true); continue }
       const local = isRaster(file.type) ? URL.createObjectURL(file) : null
-      const chip = attChip("span", { name: file.name || "pasted file", mime: file.type, src: local, attrs: { contenteditable: "false", "data-state": "uploading", title: "Uploading…" } })
-      const x = el("button", { class: "att-x", type: "button", tabindex: "-1", "aria-label": `Remove ${file.name || "file"}`, title: "Remove", text: "×" })
-      x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
-      // A chip can move to another composer with its draft: it tells the box it's in now, not this one.
-      const changed = (box) => box?.dispatchEvent(new Event("input"))
-      x.addEventListener("click", () => {
-        const box = chip.closest(".input")
-        const next = chip.nextSibling
-        if (next?.nodeType === Node.TEXT_NODE && next.nodeValue === " ") next.remove()
-        chip.remove()
-        changed(box)
-      })
-      chip.append(x)
+      const chip = removable(attChip("span", { name: file.name || "pasted file", mime: file.type, src: local, attrs: { contenteditable: "false", "data-state": "uploading", title: "Uploading…" } }), file.name || "file")
       nodes.push(chip, document.createTextNode(" "))
       // The preview gives way to the server's copy once it's there.
       upload(file).then((a) => {
@@ -1908,19 +2019,13 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     if (nodes.length) { insert(nodes); sync() }
   }
 
-  /** The send button: Stop while the thread works, Send otherwise. */
+  /** The send button: Stop while the thread works and nothing's typed, Send (or queue) otherwise. */
   const submit = async () => {
-    if (busy) return onStop?.()
+    if (stops()) return onStop?.()
     return sendNow()
   }
-  /**
-   * Enter never stops a turn: someone typing their next message while the agent works hits Enter
-   * out of habit, and that used to stop the turn mid-call (the call then showed as failed).
-   */
-  const enter = () => {
-    if (!busy) return sendNow()
-    toast("Still working. Your message stays here until the turn ends; the square button or Esc stops it.")
-  }
+  /** Enter never stops a turn: while the agent works it queues the message for when the turn ends. */
+  const enter = () => sendNow()
   const sendNow = async () => {
     if (disabled || uploading() || empty()) return
     const text = serialize(input).trim()
@@ -1931,6 +2036,7 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
       range = null
       remember(text)
     } catch (e) { fail(e) }
+    painted = "" // the button was disabled by hand above
     sync()
   }
 
@@ -1999,7 +2105,7 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   send.addEventListener("mousedown", (e) => e.preventDefault())
   send.addEventListener("click", submit)
   // Attach on the left; the model picker sits on the right, beside Send.
-  node.append(menu.pop, input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach, tools), hint, el("div", { class: "composer-end" }, controls, send)), picker)
+  node.append(menu.pop, input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach, tools), el("div", { class: "composer-end" }, controls, send)), picker)
   sync()
   // Focus once the view is on screen, without scrolling: focusing while it's still being built laid the whole
   // thread out an extra time (a long thread opened ~140ms slower for it).
@@ -2038,6 +2144,32 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
       document.execCommand("insertText", false, `${empty() ? "" : "\n\n"}${block}\n\n`)
       sync()
     },
+    /**
+     * A message taken back (from the queue): its words and files go at the end of what's written, below it,
+     * to be edited and sent again.
+     */
+    restore: (text, attachments = []) => {
+      const known = new Map(attachments.map((a) => [a.id, a]))
+      const nodes = []
+      let last = 0
+      for (const m of text.matchAll(ATT)) {
+        if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)))
+        const a = known.get(m[1])
+        // Chips keep their file: serialize() turns each back into its marker.
+        if (a) nodes.push(removable(attChip("span", { name: a.name, mime: a.mime, src: isRaster(a.mime) ? fileUrl(a.id) : null, attrs: { contenteditable: "false", "data-att": a.id, title: `${a.name} · ${bytes(a.size)}` } }), a.name))
+        last = m.index + m[0].length
+      }
+      if (last < text.length) nodes.push(document.createTextNode(text.slice(last)))
+      if (!nodes.length) return
+      if (!empty()) nodes.unshift(document.createTextNode("\n\n"))
+      input.append(...nodes)
+      sync()
+      input.focus()
+      const r = document.createRange()
+      r.selectNodeContents(input)
+      r.collapse(false)
+      caretTo(r)
+    },
     fill: (text) => {
       input.textContent = text
       sync()
@@ -2067,7 +2199,7 @@ function threadView(t) {
   })
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
   const working = el("div", { class: "working", hidden: true, role: "status", "aria-label": "Working" },
-    el("span", { class: "zero-glyph", html: ZERO_GLYPH }), el("span", { class: "working-label" }), el("span", { class: "working-time" }))
+    el("span", { class: "wk", "aria-hidden": "true", html: WORKING_GLYPH }), workingLabel(), el("span", { class: "working-time" }))
   const scroll = el("div", { class: "scroll" }, list)
   // Compact: shown when the context is filling. On, the next message waits while the session compacts first.
   const compact = el("button", { class: "pill-btn compact-toggle", type: "button", role: "switch", onclick: () => {
@@ -2077,7 +2209,7 @@ function threadView(t) {
   // The thread's branch: switch it, or move the thread to a new worktree from a base you pick.
   const branched = (meta, words) => {
     Object.assign(S.open ?? {}, meta)
-    for (const k of ["cwd", "workTree", "pr"]) if (!(k in meta) && S.open) delete S.open[k]
+    for (const k of ["cwd", "workTree", "pr", "queued", "waiting"]) if (!(k in meta) && S.open) delete S.open[k]
     toast(words)
     if (gitPanel?.threadId === t.id) loadGit()
   }
@@ -2116,7 +2248,8 @@ function threadView(t) {
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
-  const queued = el("div", { class: "queued", hidden: true })
+  // What waits to be sent: a tray on the composer's top edge.
+  const queued = el("div", { class: "queue-tray", hidden: true, role: "list", "aria-label": "Queued messages" })
   const links = linksNode(t)
   // The turns above the ones drawn: a button for them, which also loads them as it scrolls into view.
   const earlier = el("button", { class: "feed-earlier", type: "button", onclick: () => showEarlier() }, el("span"))
@@ -2170,7 +2303,7 @@ function threadView(t) {
             el("button", { class: "icon-btn bar-tool", type: "button", title: "Open this thread's folder in VS Code", "aria-label": "Open in VS Code", html: CODE_ICON, onclick: () => openOut(vscodeUrl(threadDir(t, project))) }),
             el("button", { class: "icon-btn bar-tool", type: "button", title: "Show this thread's folder", "aria-label": "Show folder", html: FOLDER_ICON, onclick: () => openOut(folderUrl(threadDir(t, project))) })) : null),
         scroll,
-        el("div", { class: "composer-wrap" }, jump, box.node)),
+        el("div", { class: "composer-wrap" }, jump, queued, box.node)),
       git.node,
       git.toggle)
   ]
@@ -2262,25 +2395,49 @@ function paintWorking() {
   feed.working.hidden = !running || asking
   // While a compaction runs, the working line says so (its card in the feed shows the detail).
   const compacting = running && S.open.items.some((i) => i.kind === "compact" && i.state === "running")
-  feed.working.querySelector(".working-label").textContent = compacting ? "Compacting context" : ""
+  const words = compacting ? "Compacting context" : "Working"
+  for (const n of feed.working.querySelectorAll(".wk-text")) if (n.textContent !== words) n.textContent = words
   feed.working.setAttribute("aria-label", compacting ? "Compacting context" : "Working")
   // How long this turn has run, from your message (the call it's on shows just above).
   const since = S.open.items.findLast((i) => i.kind === "user")?.at
   feed.working.dataset.since = running && since ? since : ""
   tickWorking()
-  // A message waiting for the session to compact first.
-  feed.queued.hidden = !S.open.queued
-  if (S.open.queued && feed.queued.dataset.text !== S.open.queued) {
-    feed.queued.dataset.text = S.open.queued
-    feed.queued.replaceChildren(el("span", { class: "queued-label", text: "Queued · runs once the context is compacted" }), el("div", { class: "queued-text", text: S.open.queued }))
-  }
+  paintQueue()
   // Moved only when out of place: moving it restarts its animation (each tool call came through here).
-  if (feed.working.previousElementSibling !== feed.queued || feed.list.lastElementChild !== feed.working) feed.list.append(feed.queued, feed.working)
+  if (feed.list.lastElementChild !== feed.working) feed.list.append(feed.working)
   feed.composer.setBusy(running)
   feed.models.setBusy(running)
   feed.branch?.setBusy(running)
   paintCompact(S.open)
 }
+/**
+ * The tray on the composer: a message waiting for the session to compact first, and the ones sent while the
+ * turn runs. One sent while it runs can be taken back: out of the queue, into the composer, to edit.
+ */
+function paintQueue() {
+  const tray = feed.queued
+  const waiting = S.open.waiting ?? []
+  tray.hidden = !S.open.queued && !waiting.length
+  const key = JSON.stringify([S.open.queued ?? "", waiting])
+  if (tray.dataset.key === key) return
+  tray.dataset.key = key
+  const id = S.open.id
+  const row = (label, text, action) => el("div", { class: "queue-item", role: "listitem" },
+    el("span", { class: "queue-label", text: label }), el("span", { class: "queue-text", text }), action)
+  const takeBack = (m) => el("button", { class: "queue-edit", type: "button", title: "Edit: back to the composer, out of the queue",
+    "aria-label": "Edit this message: back to the composer", html: PENCIL_SVG, onclick: async (e) => {
+      const b = e.currentTarget
+      b.disabled = true
+      try {
+        const back = await api("DELETE", `threads/${id}/queue/${m.id}`)
+        if (feed?.queued === tray) feed.composer.restore(back.text, back.attachments)
+      } catch (err) { b.disabled = false; fail(err) }
+    } })
+  tray.replaceChildren(
+    S.open.queued ? row("After compaction", S.open.queued, null) : null,
+    ...waiting.map((m) => row("Queued", m.text, takeBack(m))))
+}
+const PENCIL_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 3.5l2 2L6 12H4v-2z"/><path d="M9.5 4.5l2 2"/></svg>'
 /** The working line's clock: m:ss since the turn began, each second while it shows. */
 function tickWorking() {
   const w = feed?.working
@@ -2385,7 +2542,7 @@ function renderFeed() {
   feed.groups = groups
   feed.hidden = hidden
   if (hidden) feed.earlier.querySelector("span").textContent = `Show earlier (${hidden} more)`
-  reconcile(feed.list, [...(hidden ? [feed.earlier] : []), ...sections, feed.queued, feed.working])
+  reconcile(feed.list, [...(hidden ? [feed.earlier] : []), ...sections, feed.working])
   // Only a turn's last agent response (its answer, not the narration between tool calls) has the
   // action row, and the turn's details (model, time, cost, tokens) sit in that row beside Copy.
   for (const [id, { node }] of feed.cache) {
@@ -2594,10 +2751,8 @@ function paintGroup(g, key) {
     g.spinning = null
     g.shown = `summary:${last.id}`
     g.reel.replaceChildren(el("span", { class: "reel-line" }, el("span", { class: "tool-summary", text: summary })))
-    g.head.title = summary
     return
   }
-  g.head.removeAttribute("title")
   // A new call rolls up into the row, pushing what it showed (the call before, or the run's summary so far) out the
   // top; the same call just repaints.
   const roll = g.shown !== undefined && g.shown !== last.id && g.reel.firstElementChild && !matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -2874,7 +3029,7 @@ function paintLinks() { feed?.links?.paint() }
 // ---------- git panel: a right sidebar with the thread's branch and its pull request ----------
 const BRANCH_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="4.5" r="1.5"/><path d="M4.5 5v6M11.5 6c0 3.5-7 2.5-7 5"/>'
 const PLUS_PATHS = '<path d="M8 3.5v9M3.5 8h9"/>'
-const FOLDER_PATHS = '<path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/>'
+const FOLDER_PATHS = '<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/>'
 const PR_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7M8.5 3 7 4.5 8.5 6"/>'
 const OUT_PATHS = '<path d="M9.5 2.5h4v4M13.5 2.5 8 8M6.5 3.5h-3v9h9v-3"/>'
 const GIT = { min: 300, max: 680, base: 380 }
@@ -3312,10 +3467,24 @@ function paintGit(switched = false) {
 /** A small button in the panel; it's disabled while what it does runs. */
 const gitBtn = (label, run, { primary = false, title = null, disabled = false, cls = "" } = {}) =>
   el("button", { class: `btn ${primary ? "btn-primary" : "btn-quiet"} btn-xs ${cls}`.trim(), type: "button", title, disabled, onclick: (e) => withBusy(e.currentTarget, run) }, label)
-/** "More": the rest of a tab's actions, in a sheet. */
-const gitMore = (title, items) => items.length
-  ? el("button", { class: "icon-btn git-more-btn", type: "button", title: "More", "aria-label": "More actions", "aria-haspopup": "dialog", html: MORE_ICON, onclick: () => actionSheet(title, items) })
-  : null
+/**
+ * "More": the rest of a tab's actions, in a menu under the button, as the sidebar's right-click opens one;
+ * on a phone, a sheet. A second click puts the menu away.
+ */
+const gitMore = (title, items) => {
+  if (!items.length) return null
+  let wasOpen = false
+  const b = el("button", { class: "icon-btn git-more-btn", type: "button", title: "More", "aria-label": "More actions", "aria-haspopup": "menu", html: MORE_ICON })
+  // The menu's light dismiss closes it on the press, before the click: the click mustn't open it again.
+  b.addEventListener("pointerdown", () => { wasOpen = ctxMenu?.anchor === b })
+  b.addEventListener("click", () => {
+    if (wasOpen) { wasOpen = false; return }
+    if (touchFirst.matches) return actionSheet(title, items)
+    const r = b.getBoundingClientRect()
+    contextMenu(r.right, r.bottom + 4, title, items, b)
+  })
+  return b
+}
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`
 
 /** Summary: the branch against its upstream, and its pull request (or how to open one), its checks and description. */
@@ -3351,7 +3520,7 @@ function summaryTab(d, g) {
   }
   if (pr?.state === "CLOSED") more.push({ label: "Reopen pull request", run: () => gitAction("reopen", { number: pr.number }, `Reopened #${pr.number}.`) })
   if (pr && pr.state !== "OPEN" && d.gh.ok && !onBase) more.push({ label: "New pull request", run: () => createPr(d) })
-  if (!pr && d.gh.ok && !onBase) more.push({ label: "Ask the agent to open a pull request", run: () => askAgent(`Open a pull request for the branch ${d.branch}${baseName ? ` into ${baseName}` : ""}: push it if needed, and write a clear title and description from its commits.`) })
+  if (!pr && d.gh.ok && !onBase) more.push({ label: "Ask the agent to open a pull request", run: () => askAgent(`Open a pull request from the branch ${d.branch}${baseName ? ` into ${baseName} (\`--base ${baseName}\`)` : ""}: push it if needed, and write a clear title and description from its commits.`) })
   if (diverged) more.push({ label: `Ask the agent to rebase onto ${d.upstream}`, run: () => askAgent(`Rebase ${d.branch} onto ${d.upstream}: run \`git pull --rebase\`, resolve any conflicts, run the checks, and tell me what changed. Don't push.`) })
   more.push({ label: "Fetch from the remotes", run: async () => { gitFetched.set(g.threadId, Date.now()); await gitAction("fetch", {}, "Fetched.") } })
   if (d.upstream) more.push({ label: autoPullOn() ? "Stop pulling automatically" : "Pull automatically", run: () => {
@@ -4649,7 +4818,8 @@ function connect() {
       // A new branch or folder (the thread moved to a worktree, or back): the chip and Git panel read it again.
       const moved = S.open.branch !== meta.branch || S.open.cwd !== meta.cwd || S.open.workTree !== meta.workTree
       Object.assign(S.open, meta)
-      for (const k of ["cwd", "workTree", "pr"]) if (!(k in meta)) delete S.open[k]
+      // A field the meta no longer has was cleared (a queued message that ran, a worktree left).
+      for (const k of ["cwd", "workTree", "pr", "queued", "waiting"]) if (!(k in meta)) delete S.open[k]
       if ((ended || moved) && gitPanel?.threadId === meta.id) loadGit()
       if ((ended || moved) && feed?.branch) feed.branch.refresh()
       // Ended: its answer gets its action row, and the work before it folds away (see renderFeed).
