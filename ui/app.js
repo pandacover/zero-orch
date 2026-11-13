@@ -194,19 +194,68 @@ function actionSheet(title, actions) {
   d.showModal()
 }
 /**
- * `open` on a long press of `node` by a finger, or a right-click. The press doesn't also follow the
- * link under it, and the phone's own link menu stays away (app.css: -webkit-touch-callout).
+ * A right-click menu of `actions` ({ label, run, danger, icon }) at (`x`, `y`): a small list by the pointer,
+ * not a modal. A click elsewhere, Escape, a scroll or the window losing focus puts it away; Up and Down
+ * move between its items. Only one is open at a time.
  */
-function onHold(node, open) {
+let ctxMenu = null
+function contextMenu(x, y, title, actions) {
+  ctxMenu?.close()
+  const back = document.activeElement
+  const m = el("div", { class: "ctx-menu", role: "menu", "aria-label": title, popover: "auto" },
+    actions.map((a) => el("button", { class: `ctx-item${a.danger ? " danger" : ""}`, type: "button", role: "menuitem", tabindex: -1,
+      onclick: () => { close(); a.run() } }, a.icon ? icon(a.icon) : el("span", { class: "ico" }), el("span", { text: a.label }))))
+  /** Put away: by a pick, a key, or the browser's light dismiss (a click elsewhere). Safe to run twice. */
+  const close = () => {
+    if (!m.isConnected) return
+    if (m.matches(":popover-open")) m.hidePopover()
+    removeEventListener("blur", close)
+    removeEventListener("resize", close)
+    removeEventListener("scroll", close, true)
+    m.remove()
+    if (ctxMenu?.node === m) ctxMenu = null
+    // Back to where focus was, unless a click put it somewhere else since.
+    if (!document.activeElement || document.activeElement === document.body) back?.focus?.({ preventScroll: true })
+  }
+  m.addEventListener("toggle", (e) => { if (e.newState === "closed") close() })
+  m.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return }
+    const items = [...m.querySelectorAll(".ctx-item")]
+    const i = items.indexOf(document.activeElement)
+    const to = e.key === "ArrowDown" ? (i + 1) % items.length : e.key === "ArrowUp" ? (i - 1 + items.length) % items.length
+      : e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : -1
+    if (to < 0) return
+    e.preventDefault()
+    items[to].focus()
+  })
+  document.body.append(m)
+  m.showPopover()
+  // Opens down and right of the pointer, flipped where that would leave the window.
+  const w = m.offsetWidth, h = m.offsetHeight
+  m.style.left = `${Math.max(6, x + w > innerWidth - 6 ? x - w : x)}px`
+  m.style.top = `${Math.max(6, y + h > innerHeight - 6 ? y - h : y)}px`
+  addEventListener("blur", close)
+  addEventListener("resize", close)
+  addEventListener("scroll", close, true)
+  m.querySelector(".ctx-item")?.focus({ preventScroll: true })
+  ctxMenu = { node: m, close }
+}
+/**
+ * The actions `menu()` names ({ title, actions }) on a long press of `node` by a finger (a sheet up from the
+ * bottom), or a right-click (a menu at the pointer). The press doesn't also follow the link under it, and the
+ * phone's own link menu stays away (app.css: -webkit-touch-callout).
+ */
+function onHold(node, menu) {
   let timer = 0
   let start = null
   let held = false
+  const sheet = () => { const { title, actions } = menu(); actionSheet(title, actions) }
   const cancel = () => { clearTimeout(timer); timer = 0 }
   node.addEventListener("pointerdown", (e) => {
     held = false
     if (e.pointerType === "mouse") return
     start = { x: e.clientX, y: e.clientY }
-    timer = setTimeout(() => { timer = 0; held = true; navigator.vibrate?.(8); open() }, 450)
+    timer = setTimeout(() => { timer = 0; held = true; navigator.vibrate?.(8); sheet() }, 450)
   })
   // Moving the finger (a scroll) isn't a press.
   node.addEventListener("pointermove", (e) => { if (timer && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8) cancel() })
@@ -214,8 +263,13 @@ function onHold(node, open) {
   node.addEventListener("click", (e) => { if (held) { e.preventDefault(); e.stopPropagation(); held = false } }, true)
   node.addEventListener("contextmenu", (e) => {
     e.preventDefault()
-    if (held || timer) { cancel(); if (!held) { held = true; open() } return }
-    open()
+    // A finger's long press fires this too: that's the sheet's.
+    if (held || timer) { cancel(); if (!held) { held = true; sheet() } return }
+    // The keyboard's menu key has no pointer: the menu opens at the row.
+    const r = node.getBoundingClientRect()
+    const keyed = e.button !== 2 && e.clientX === 0 && e.clientY === 0
+    const { title, actions } = menu()
+    contextMenu(keyed ? r.left + 12 : e.clientX, keyed ? r.bottom - 4 : e.clientY, title, actions)
   })
 }
 
@@ -309,10 +363,11 @@ function renderSide() {
         el("span", { class: "proj-actions" },
           el("button", { class: "icon-btn", type: "button", title: `New thread in ${p.name}`, "aria-label": `New thread in ${p.name}`, onclick: () => go(`#/new/${p.id}`) }, "+"),
           el("button", { class: "icon-btn proj-remove", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, onclick: () => removeProject(p) }, "×"))),
-        () => actionSheet(p.name, [
-          { label: "New thread", run: () => go(`#/new/${p.id}`) },
-          { label: "Remove from zero", danger: true, run: () => removeProject(p) }
-        ])),
+        () => ({ title: p.name, actions: [
+          { label: "New thread", icon: PLUS_PATHS, run: () => go(`#/new/${p.id}`) },
+          { label: "Copy folder path", icon: COPY_PATHS, run: () => copyText(p.path, "Folder path copied.") },
+          { label: "Remove from zero", icon: TRASH_PATHS, danger: true, run: () => removeProject(p) }
+        ] })),
       el("ul", { class: "threads", inert: closed },
         threads.length === 0
           // Every thread of it is up in Drafts: it still has threads, just none to list here.
@@ -369,7 +424,7 @@ function threadRow(t, where = "") {
     // Pinning and deleting live here, on the row's hover, rather than in the thread's header (a long press, by touch).
     el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => pinThread(t) }),
     el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })),
-  () => threadSheet(t))
+  () => threadMenu(t))
 }
 /**
  * Where a thread stands for the person: "ask" (waiting for their approval), "failed" or "done" (a turn
@@ -429,15 +484,28 @@ function nested(list) {
   return out
 }
 const CHILD_PATHS = '<path d="M4 3v5.5A1.5 1.5 0 0 0 5.5 10H12M9.5 7.5 12 10l-2.5 2.5"/>'
+// The right-click menu's icons: the paths of the row's own icons below.
+const COPY_PATHS = '<rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/>'
+const PIN_PATHS = '<path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/>'
+const TRASH_PATHS = '<path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/>'
+const DISCARD_PATHS = '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>'
 /** `node`, with `open` on a long press or right-click. */
 const held = (node, open) => { onHold(node, open); return node }
 const pinThread = (t) => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail)
-/** What a long press on a thread offers: what its row's hover buttons do. */
-const threadSheet = (t, draftKey = "") => actionSheet(t.title, [
-  ...(draftKey ? [{ label: "Discard draft", run: () => discardDraft(draftKey) }] : []),
-  { label: t.pinned ? "Unpin" : "Pin to the top", run: () => pinThread(t) },
-  { label: "Delete thread", danger: true, run: () => deleteThread(t) }
-])
+/** What a right-click or long press on a thread offers: what its row's hover buttons do, and copying its id. */
+const threadMenu = (t, draftKey = "") => ({ title: t.title, actions: [
+  ...(draftKey ? [{ label: "Discard draft", icon: DISCARD_PATHS, run: () => discardDraft(draftKey) }] : []),
+  { label: t.pinned ? "Unpin" : "Pin to the top", icon: PIN_PATHS, run: () => pinThread(t) },
+  { label: "Copy thread ID", icon: COPY_PATHS, run: () => copyText(t.id, "Thread ID copied.") },
+  { label: "Delete thread", icon: TRASH_PATHS, danger: true, run: () => deleteThread(t) }
+] })
+/** Put `text` on the clipboard, and say so. */
+async function copyText(text, said = "Copied.") {
+  try {
+    await navigator.clipboard.writeText(text)
+    toast(said)
+  } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
+}
 /** A thread's dot (working, waiting for an approval, or ended unseen) and its pin, ahead of its title. */
 const DOTS = {
   working: ["run-dot", "Working"],
@@ -499,14 +567,14 @@ function draftsSection(inbox = new Set()) {
           el("span", { class: "age", text: ago(d.at) })),
         el("button", { class: "icon-btn thread-pin", type: "button", title: "Discard draft", "aria-label": `Discard draft in ${thread.title}`, html: DISCARD_ICON, onclick: () => discardDraft(key) }),
         el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${thread.title}`, html: TRASH_ICON, onclick: () => deleteThread(thread) })),
-      () => threadSheet(thread, key))
+      () => threadMenu(thread, key))
       return held(el("li", { class: "thread-row draft-row" },
         el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: where, "aria-current": active ? "page" : null },
           el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
           el("span", { class: "t", text: d.title }),
           el("span", { class: "age", text: ago(d.at) })),
         el("button", { class: "icon-btn thread-del", type: "button", title: "Discard draft", "aria-label": `Discard draft: ${d.title}`, html: TRASH_ICON, onclick: () => discardDraft(key) })),
-      () => actionSheet(d.title, [{ label: "Discard draft", danger: true, run: () => discardDraft(key) }]))
+      () => ({ title: d.title, actions: [{ label: "Discard draft", icon: TRASH_PATHS, danger: true, run: () => discardDraft(key) }] }))
     })))
 }
 /** Repaint only the Drafts section: typing changes nothing else in the sidebar. */
@@ -939,6 +1007,11 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
   }
 }
 
+/** A branch's name in a list: its folder part (zero/, origin/) quiet, so the part that tells branches apart stands out. */
+function branchLabel(name) {
+  const cut = name.lastIndexOf("/") + 1
+  return el("span", { class: "bp-branch" }, cut ? el("span", { class: "bp-dir", text: name.slice(0, cut) }) : null, name.slice(cut))
+}
 /** What's wrong with `name` as a new branch's name, in words; "" when it's fine or empty. `taken` is the local branches' names. */
 const branchNameProblem = (name, taken) =>
   !name ? ""
@@ -1019,6 +1092,7 @@ function branchPicker({ load, onSwitch, onCreate, onWorktree, onJoin, onLeave = 
   }
   // Made once, outside pop.paint, so typing in the search box never loses its caret.
   const filter = own(el("input", { class: "bp-filter", type: "search", placeholder: "Find a branch, or type a new name", "aria-label": "Find a branch, or type a new name", "data-key": "filter", autocomplete: "off", spellcheck: "false" }))
+  const filterBox = el("label", { class: "bp-search" }, icon('<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/>'), filter)
   const listBox = el("div", { class: "pop-scroll bp-list", role: "menu", "aria-label": "Branches" })
   const cmdBox = el("div", { class: "bp-cmds" })
   filter.addEventListener("input", () => { state.filter = filter.value; paintList() })
@@ -1066,14 +1140,15 @@ function branchPicker({ load, onSwitch, onCreate, onWorktree, onJoin, onLeave = 
           else act(async () => { state.pending = null; await onSwitch(b.name) })
         } },
         el("span", { class: "pop-check", "aria-hidden": "true", text: on ? "✓" : "" }),
-        el("span", { class: "bp-branch", text: b.name }),
+        branchLabel(b.name),
         el("span", { class: "bp-meta" }, ...tags))
     })
-    const remoteRows = remote.map((r) => {
-      const item = popItem({ key: `r/${r}`, on: false, text: r, disabled: locked, onPick: () => act(async () => { state.pending = null; await onSwitch(r) }) })
-      item.title = `Make a local branch that tracks ${r}, and switch to it`
-      return item
-    })
+    const remoteRows = remote.map((r) =>
+      el("button", { class: "pop-item bp-row", type: "button", role: "menuitemradio", "aria-checked": "false", "data-key": `r/${r}`, disabled: locked,
+        title: `Make a local branch that tracks ${r}, and switch to it`,
+        onclick: () => act(async () => { state.pending = null; await onSwitch(r) }) },
+        el("span", { class: "pop-check", "aria-hidden": "true" }),
+        branchLabel(r)))
     listBox.replaceChildren(...[
       local.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Local branches" }, el("div", { class: "pop-head", text: "Branches" }), rows) : null,
       remote.length ? el("div", { class: "pop-group", role: "group", "aria-label": "Remote branches" }, el("div", { class: "pop-head", text: "Remote" }), remoteRows) : null,
@@ -1105,7 +1180,7 @@ function branchPicker({ load, onSwitch, onCreate, onWorktree, onJoin, onLeave = 
               el("button", { class: "btn btn-quiet btn-xs", type: "button", "data-key": "leave", disabled: locked, onclick: () => act(onLeave) }, "Work in the project folder"))
             : null
       pop.panel.replaceChildren(el("div", { class: "pop-col bp-pick" },
-        filter,
+        filterBox,
         state.running ? el("div", { class: "pop-note", text: "Branches switch once this turn ends." }) : null,
         state.working ? el("div", { class: "pop-note", text: "Working…" }) : null,
         state.problem ? el("p", { class: "bp-error", role: "alert", text: state.problem }) : null,
@@ -2065,6 +2140,7 @@ function threadView(t) {
       el("div", { class: "main-col" },
         el("div", { class: "bar" },
           toggleSpot(),
+          gitSpot(),
           // One line: the project (click it for a new thread there), a middle dot, the thread's title (editable in place).
           el("div", { class: "title-wrap title-line" },
             project
@@ -2346,7 +2422,7 @@ function paintTurnFiles(node, edited) {
     el("div", { class: "turn-files-head" },
       el("span", { class: "turn-files-title", text: `Changed ${files.length} file${files.length === 1 ? "" : "s"}` }),
       diffStat(total),
-      el("button", { class: "btn btn-quiet btn-xs turn-files-review", type: "button", title: "Open the Git panel (Alt+G) to see the diffs and commit", onclick: () => { if (gitPanel && !gitOpenNow()) setGitOpen(true) } }, "Review in Git")),
+      el("button", { class: "btn btn-quiet btn-xs turn-files-review", type: "button", title: "See the diffs and commit, in the Git panel's Code tab (Alt+G)", onclick: () => { if (!gitPanel) return; setGitTab("code"); if (!gitOpenNow()) setGitOpen(true) } }, "Review in Git")),
     el("ul", { class: "turn-file-list" }, ...files.slice(0, SHOWN).map(row),
       rest > 0 ? el("li", { class: "turn-file more" }, el("details", {}, el("summary", { text: `${rest} more` }), el("ul", { class: "turn-file-list" }, ...files.slice(SHOWN).map(row)))) : null))
 }
@@ -2727,7 +2803,6 @@ const BRANCH_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12
 const PLUS_PATHS = '<path d="M8 3.5v9M3.5 8h9"/>'
 const FOLDER_PATHS = '<path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/>'
 const PR_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7M8.5 3 7 4.5 8.5 6"/>'
-const REFRESH_PATHS = '<path d="M13.2 8A5.2 5.2 0 1 1 11.6 4.3M13.2 2.3v3.2H10"/>'
 const OUT_PATHS = '<path d="M9.5 2.5h4v4M13.5 2.5 8 8M6.5 3.5h-3v9h9v-3"/>'
 const GIT = { min: 300, max: 680, base: 380 }
 /** The one panel on screen (the open thread's), or null. */
@@ -2767,6 +2842,15 @@ const githubMd = (s) => s
   .trim()
 const prose = (body) => mdNodes(githubMd(body))
 
+/**
+ * The Git panel's tabs: the branch and its pull request at a glance, what happened on it (commits and the
+ * conversation, newest first), and the code (what's uncommitted, and what the pull request changes).
+ */
+const GIT_TABS = [["summary", "Summary"], ["timeline", "Timeline"], ["code", "Code"]]
+/** In a row that drags the window, the spot under the fixed Git toggle stays clickable (see toggleSpot). */
+const gitSpot = () => el("span", { class: "git-spot", "aria-hidden": "true" })
+const MORE_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.5" cy="8" r="1.25"/></svg>'
+
 function makeGitPanel(t) {
   if (gitPanel) clearInterval(gitPanel.timer)
   // One toggle for open and closed, fixed at the window's top right like the left sidebar's: it never moves.
@@ -2775,33 +2859,64 @@ function makeGitPanel(t) {
   const count = el("span", { class: "git-count-chip", hidden: true })
   const toggle = el("button", { class: "icon-btn git-toggle", type: "button", "aria-controls": "git-panel", onclick: () => setGitOpen(!gitOpenNow()),
     html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BRANCH_PATHS}</svg><span class="git-word">Git</span>` }, count, badge)
-  const body = el("div", { class: "git-body" }, el("p", { class: "git-empty", text: "Loading…" }))
-  const refresh = el("button", { class: "icon-btn git-refresh", type: "button", title: "Refresh", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${REFRESH_PATHS}</svg>`, onclick: () => loadGit() })
+  const body = el("div", { class: "git-body", role: "tabpanel" }, el("p", { class: "git-empty", text: "Loading…" }))
+  const sub = el("div", { class: "git-sub" })
+  const tabs = el("div", { class: "git-tabs", role: "tablist", "aria-label": "Git" },
+    GIT_TABS.map(([key, label]) => el("button", { class: "git-tab", type: "button", role: "tab", "data-tab": key, onclick: () => setGitTab(key) },
+      el("span", { text: label }), el("span", { class: "git-tab-n" }))))
+  // The arrows move between tabs, as in any tab list.
+  tabs.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key]
+    if (!step || !gitPanel) return
+    e.preventDefault()
+    const i = GIT_TABS.findIndex(([k]) => k === gitPanel.tab)
+    const next = GIT_TABS[(i + step + GIT_TABS.length) % GIT_TABS.length][0]
+    setGitTab(next)
+    tabs.querySelector(`[data-tab="${next}"]`)?.focus()
+  })
   const resize = el("div", { class: "git-resize", role: "separator", "aria-orientation": "vertical", "aria-label": "Resize Git panel", tabindex: "0", title: "Drag to resize · double-click to reset" })
   // Closed, it stays in the page (inert) so it can slide and fade both ways; see setGitOpen.
   const node = el("aside", { class: "git-panel", id: "git-panel", "aria-label": "Git" },
     resize,
-    el("div", { class: "git-head" },
-      el("h2", { text: "Git" }),
-      el("span", { class: "git-at" }),
-      refresh),
+    el("div", { class: "git-head" }, tabs, gitSpot()),
+    sub,
     body)
   showGit(node, load("gitOpen", false))
-  gitPanel = { node, body, toggle, badge, count, refresh, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "", folds: new Map() }
+  const saved = load("gitTab", "summary")
+  gitPanel = {
+    node, body, sub, tabs, toggle, badge, count, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "",
+    tab: GIT_TABS.some(([k]) => k === saved) ? saved : "summary", tops: {}
+  }
   setGitWidth(load("gitWidth", GIT.base), false)
   wireGitResize(resize)
   paintGitToggle()
   loadGit()
-  // While it's open, look again: often while checks run, now and then otherwise.
+  // Keeping it current is zero's job, not a button's: while it's open it looks again on its own (often while
+  // checks run), when the window comes back to the front, after a turn and after each of its actions.
   gitPanel.timer = setInterval(() => {
     const g = gitPanel
     if (g && !document.hidden && autoPullOn() && Date.now() - (gitFetched.get(g.threadId) ?? 0) > AUTO_PULL_MS) autoSync()
     if (!g || !gitOpenNow() || document.hidden || g.loading) return
     const waiting = g.data?.pr?.checks.some((c) => c.state === "running" || c.state === "pending")
-    if (Date.now() - g.at > (waiting ? 15_000 : 90_000)) loadGit()
+    if (Date.now() - g.at > (waiting ? 15_000 : 45_000)) loadGit()
   }, 5_000)
   return { node, toggle }
 }
+function setGitTab(key) {
+  const g = gitPanel
+  if (!g || g.tab === key) return
+  g.tops[g.tab] = g.body.scrollTop
+  g.tab = key
+  save("gitTab", key)
+  paintGit(true)
+}
+/** Back to the window after a while away: the open panel catches up. */
+function gitCatchUp() {
+  const g = gitPanel
+  if (g && gitOpenNow() && !document.hidden && !g.loading && Date.now() - g.at > 5_000) loadGit()
+}
+addEventListener("focus", gitCatchUp)
+document.addEventListener("visibilitychange", gitCatchUp)
 const gitOpenNow = () => !!gitPanel && !gitPanel.node.classList.contains("closed")
 /** Open or close the panel's node: the CSS slides it and fades its content; closed, it can't be focused or clicked. */
 function showGit(node, open) {
@@ -2920,7 +3035,6 @@ async function loadGit() {
   const g = gitPanel
   if (!g || g.loading) return
   g.loading = true
-  g.refresh.classList.add("spinning")
   try {
     const data = await api("GET", `threads/${g.threadId}/git`)
     if (gitPanel !== g) return
@@ -2934,7 +3048,6 @@ async function loadGit() {
   } finally {
     g.loading = false
     g.at = Date.now()
-    g.refresh.classList.remove("spinning")
   }
   paintGitToggle()
   paintGit()
@@ -2959,47 +3072,6 @@ function askAgent(text) {
   if (!feed?.composer) return
   feed.composer.fill(text)
   if (narrow.matches || innerWidth < 1100) setGitOpen(false)
-}
-
-function paintGit() {
-  const g = gitPanel
-  if (!g) return
-  const d = g.data
-  g.node.querySelector(".git-at").textContent = g.at ? `updated ${agoText(new Date(g.at).toISOString())}` : ""
-  // Keep where the person was: a comment half-written and the scroll position.
-  const draft = g.body.querySelector(".git-comment textarea")
-  if (draft) g.draft = draft.value
-  const top = g.body.scrollTop
-  if (!d) return g.body.replaceChildren(el("p", { class: "git-empty", text: g.error || "Loading…" }))
-  if (!d.repo) {
-    return g.body.replaceChildren(el("div", { class: "git-empty" },
-      el("b", { text: "Not a git repository" }),
-      el("p", { text: "This thread's project folder isn't in git, so there's no branch or pull request to show." })))
-  }
-  const kids = [
-    g.error ? el("p", { class: "git-note warn", text: g.error }) : null,
-    branchCard(d),
-    d.pr ? prCard(d.pr, d) : noPrCard(d),
-    ...(d.pr ? prSections(d.pr) : []),
-    gitSec("commits", d.pr ? "Commits on this branch" : "Commits", d.commits.length, d.commits.length
-      ? el("ol", { class: "git-list" }, d.commits.map((c) => el("li", { class: "git-commit" },
-        el("code", { class: "git-sha", text: c.sha.slice(0, 7), title: c.sha }),
-        el("span", { class: "git-subject", text: c.subject, title: c.subject }),
-        el("span", { class: "git-when", text: ago(c.at), title: `${c.author} · ${new Date(c.at).toLocaleString()}` }))))
-      : el("p", { class: "git-none", text: "No commits yet." })),
-    gitSec("changes", d.current && d.current !== d.branch ? `Uncommitted on ${d.current}` : "Uncommitted changes", d.changes.length, d.changes.length
-      ? el("div", {}, el("ul", { class: "git-list" }, d.changes.map((c) => changeRow(g, c))), commitBox(g))
-      : el("p", { class: "git-none", text: "The working tree is clean." }), d.changes.length > 0 && d.changes.length <= 30)
-  ]
-  g.body.replaceChildren(...kids.filter(Boolean))
-  // A section the person folded or unfolded stays that way through refreshes.
-  for (const s of g.body.querySelectorAll("details.git-sec")) {
-    if (g.folds.has(s.dataset.key)) s.open = g.folds.get(s.dataset.key)
-    s.addEventListener("toggle", () => g.folds.set(s.dataset.key, s.open))
-  }
-  const ta = g.body.querySelector(".git-comment textarea")
-  if (ta && g.draft) ta.value = g.draft
-  g.body.scrollTop = top
 }
 
 /** A changed file: its row opens its diff below it, read on demand and kept until the panel loads again. */
@@ -3075,83 +3147,6 @@ function diffView(text) {
   })), cut ? el("span", { class: "d-meta", text: "… more lines than shown here" }) : null)
 }
 
-/** Commit everything uncommitted: the person's message, or one the small model writes from the diff. */
-function commitBox(g) {
-  const ta = el("textarea", { rows: 2, placeholder: "Commit message", "aria-label": "Commit message" })
-  ta.value = g.commitDraft ?? ""
-  const commit = el("button", { class: "btn btn-primary btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, async () => {
-    if (!ta.value.trim()) return toast("Write a commit message first, or let Claude write one.", true)
-    if (await gitAction("commit", { message: ta.value }, "Committed.")) g.commitDraft = ""
-  }) }, "Commit all")
-  const write = el("button", { class: "btn btn-quiet btn-xs", type: "button", title: "Claude's small model reads the diff (up to 12,000 characters) and writes the message", onclick: (e) => withBusy(e.currentTarget, async () => {
-    try {
-      const r = await api("POST", `threads/${g.threadId}/git/message`, {})
-      ta.value = g.commitDraft = r.message
-      ta.focus()
-    } catch (err) { fail(err) }
-  }) }, "Write message")
-  ta.addEventListener("input", () => { g.commitDraft = ta.value })
-  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit.click() } })
-  return el("div", { class: "git-comment git-commit-box" }, ta, el("div", { class: "git-comment-foot" }, el("span", { class: "hint", text: "Ctrl+Enter commits" }), write, commit))
-}
-
-/** A section that folds: a title, a count, then its content. */
-function gitSec(key, title, count, content, openByDefault = true) {
-  return el("details", { class: "git-sec", "data-key": key, open: openByDefault },
-    el("summary", {}, el("span", { text: title }), count !== null && count !== undefined ? el("span", { class: "git-count", text: String(count) }) : null),
-    el("div", { class: "git-sec-body" }, content))
-}
-
-function branchCard(d) {
-  const facts = []
-  if (d.upstream) {
-    facts.push(el("span", { class: "git-fact", title: `Tracks ${d.upstream}` }, d.upstream))
-    if (d.ahead) facts.push(el("span", { class: "git-fact ahead", title: `${d.ahead} commit${d.ahead === 1 ? "" : "s"} not pushed` }, `↑${d.ahead}`))
-    if (d.behind) facts.push(el("span", { class: "git-fact", title: `${d.behind} commit${d.behind === 1 ? "" : "s"} on ${d.upstream} not here` }, `↓${d.behind}`))
-    if (!d.ahead && !d.behind) facts.push(el("span", { class: "git-fact", text: "up to date" }))
-  } else if (d.branch) {
-    facts.push(el("span", { class: "git-fact", text: "not pushed" }))
-  }
-  const canPush = d.branch && (!d.upstream || d.ahead > 0)
-  const canPull = d.upstream && d.behind > 0 && d.ahead === 0 && d.branch === d.current
-  const diverged = d.upstream && d.ahead > 0 && d.behind > 0
-  return el("div", { class: "git-card git-branch" },
-    el("div", { class: "git-branch-line" },
-      icon(BRANCH_PATHS, "git-branch-ico"),
-      el("code", { class: "git-branch-name", text: d.branch || "detached HEAD", title: d.branch })),
-    facts.length ? el("div", { class: "git-facts" }, facts) : null,
-    el("div", { class: "git-actions" },
-      canPull ? el("button", { class: "btn btn-primary btn-xs", type: "button", title: `Fast-forward ${d.branch} to ${d.upstream}`, onclick: (e) => withBusy(e.currentTarget, () => gitAction("pull", {}, `Pulled ${d.behind} commit${d.behind === 1 ? "" : "s"} into ${d.branch}.`)) }, `Pull ↓${d.behind}`) : null,
-      canPush ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("push", { branch: d.branch }, `Pushed ${d.branch}.`)) }, "Push") : null,
-      el("button", { class: "btn btn-quiet btn-xs", type: "button", title: "Ask the remotes what's new, and forget remote branches that were deleted", onclick: (e) => withBusy(e.currentTarget, async () => { gitFetched.set(gitPanel?.threadId, Date.now()); await gitAction("fetch", {}, "Fetched.") }) }, "Fetch")),
-    diverged ? el("p", { class: "git-note", text: `${d.branch} has ${d.ahead} commit${d.ahead === 1 ? "" : "s"} of its own and is ${d.behind} behind ${d.upstream}, so a pull can't fast-forward it.` }) : null,
-    diverged ? el("div", { class: "git-actions" },
-      el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(`Rebase ${d.branch} onto ${d.upstream}: run \`git pull --rebase\`, resolve any conflicts, run the checks, and tell me what changed. Don't push.`) }, "Ask the agent to rebase")) : null,
-    d.upstream ? el("label", { class: "check git-auto", title: "While this thread is open, zero fetches every few minutes and fast-forwards this branch when it is only behind and nothing is uncommitted. Never a merge or a rebase." },
-      el("input", { type: "checkbox", checked: autoPullOn(), onchange: (e) => {
-        save("gitAutoPull", e.currentTarget.checked)
-        if (e.currentTarget.checked && gitPanel) { gitFetched.delete(gitPanel.threadId); autoSync() }
-      } }),
-      "Pull automatically") : null,
-    d.worktree ? el("p", { class: "git-note", title: d.cwd, text: `In a worktree: ${d.cwd}` }) : null,
-    d.current && d.branch !== d.current
-      ? el("p", { class: "git-note", text: `The project is on ${d.current} now; this thread last worked on ${d.branch}.` })
-      : null)
-}
-
-function noPrCard(d) {
-  const baseName = d.base?.replace(/^origin\//, "") ?? ""
-  if (!d.gh.ok) return el("div", { class: "git-card" }, el("p", { class: "git-note", text: d.gh.detail || "GitHub isn't reachable from here." }))
-  const onBase = !d.branch || d.branch === baseName
-  return el("div", { class: "git-card git-nopr" },
-    el("div", { class: "git-nopr-line" }, icon(PR_PATHS, "git-pr-ico"), el("span", { text: "No pull request yet" })),
-    onBase
-      ? el("p", { class: "git-note", text: d.branch ? `${d.branch} is the default branch; a pull request comes from a branch of its own.` : "Check out a branch to open a pull request." })
-      : el("div", { class: "git-actions" },
-        el("button", { class: "btn btn-primary btn-xs", type: "button", onclick: () => createPr(d) }, d.upstream ? "Create pull request" : "Push and create pull request"),
-        el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(`Open a pull request for the branch ${d.branch}${baseName ? ` into ${baseName}` : ""}: push it if needed, and write a clear title and description from its commits.`) }, "Ask the agent")))
-}
-
 async function createPr(d) {
   const baseName = d.base?.replace(/^origin\//, "") ?? ""
   const first = d.commits.at(-1)?.subject ?? d.branch
@@ -3164,47 +3159,6 @@ async function createPr(d) {
   if (!(await dialog({ title: `Pull request for ${d.branch}`, text: d.upstream ? "" : `${d.branch} is pushed to origin first.`, ok: "Create pull request", body }))) return
   const v = (n) => body.querySelector(`[name=${n}]`)
   await gitAction("create", { branch: d.branch, base: v("base").value.trim(), title: v("title").value, body: v("body").value, draft: v("draft").checked }, "Pull request created.")
-}
-
-function prCard(pr, d) {
-  const state = prState(pr)
-  const pills = []
-  if (pr.reviewDecision && REVIEW_LABEL[pr.reviewDecision]) pills.push(el("span", { class: `git-pill review-${pr.reviewDecision.toLowerCase()}`, text: REVIEW_LABEL[pr.reviewDecision] }))
-  if (state === "open" && MERGE_STATE[pr.mergeState]) pills.push(el("span", { class: `git-pill merge-${pr.mergeState.toLowerCase()}`, text: MERGE_STATE[pr.mergeState] }))
-  for (const l of pr.labels) pills.push(el("span", { class: "git-pill label", text: l }))
-  const actions = [
-    el("a", { class: "btn btn-quiet btn-xs", href: pr.url, target: "_blank", rel: "noopener noreferrer" }, icon(OUT_PATHS), "GitHub")
-  ]
-  if (pr.state === "OPEN") {
-    actions.push(pr.isDraft
-      ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("ready", { number: pr.number }, "Marked ready for review.")) }, "Ready for review")
-      : el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("ready", { number: pr.number, draft: true }, "Converted to a draft.")) }, "Convert to draft"))
-    actions.push(el("button", { class: "btn btn-primary btn-xs", type: "button", disabled: pr.isDraft, title: pr.isDraft ? "A draft can't be merged" : null, onclick: () => mergePr(pr) }, "Merge…"))
-    if (pr.mergeState === "BEHIND") actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", title: `Bring ${pr.head} up to date with ${pr.base}, on GitHub`, onclick: (e) => withBusy(e.currentTarget, () => gitAction("update", { number: pr.number }, `Updated ${pr.head} from ${pr.base}.`)) }, "Update branch"))
-    actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", "aria-haspopup": "dialog", onclick: () => actionSheet(`#${pr.number} ${pr.title}`, [
-      { label: "Edit title and description", run: () => editPr(pr) },
-      { label: "Request reviewers", run: () => requestReviewers(pr) },
-      { label: `Update branch from ${pr.base}`, run: () => gitAction("update", { number: pr.number }, `Updated ${pr.head} from ${pr.base}.`) },
-      { label: "Close pull request", danger: true, run: () => closePr(pr) }
-    ]) }, "More…"))
-  }
-  if (pr.state === "CLOSED") actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, () => gitAction("reopen", { number: pr.number }, `Reopened #${pr.number}.`)) }, "Reopen"))
-  if (pr.state !== "OPEN" && d.gh.ok && d.branch && d.branch !== (d.base?.replace(/^origin\//, "") ?? "")) actions.push(el("button", { class: "btn btn-quiet btn-xs", type: "button", title: `Open another pull request for ${d.branch}`, onclick: () => createPr(d) }, "New pull request"))
-  return el("div", { class: `git-card git-pr pr-${state}` },
-    el("div", { class: "git-pr-top" },
-      el("span", { class: `git-state st-${state}` }, icon(PR_PATHS), PR_STATE_LABEL[state] ?? pr.state),
-      el("span", { class: "git-when", text: state === "merged" && pr.mergedAt ? `merged ${agoText(pr.mergedAt)}` : `updated ${agoText(pr.updatedAt)}` })),
-    el("a", { class: "git-pr-title", href: pr.url, target: "_blank", rel: "noopener noreferrer" }, el("span", { class: "git-pr-num", text: `#${pr.number}` }), " ", pr.title),
-    el("div", { class: "git-pr-meta" },
-      el("span", { text: pr.author }),
-      el("span", { class: "git-refs" }, el("code", { text: pr.base }), " ← ", el("code", { text: pr.head }))),
-    el("div", { class: "git-pr-meta" },
-      el("span", { class: "git-add", text: `+${pr.additions}` }),
-      el("span", { class: "git-del", text: `−${pr.deletions}` }),
-      el("span", { text: `${pr.changedFiles} file${pr.changedFiles === 1 ? "" : "s"}` }),
-      pr.reviewers.length ? el("span", { text: `review asked of ${pr.reviewers.join(", ")}` }) : null),
-    pills.length ? el("div", { class: "git-pills" }, pills) : null,
-    el("div", { class: "git-actions" }, actions))
 }
 
 async function mergePr(pr) {
@@ -3248,11 +3202,143 @@ async function requestReviewers(pr) {
   await gitAction("reviewers", { number: pr.number, reviewers: names }, "Review requested.")
 }
 
+function paintGit(switched = false) {
+  const g = gitPanel
+  if (!g) return
+  const d = g.data
+  // Keep where the person was: a comment half-written, and the scroll position (each tab its own).
+  const draft = g.body.querySelector(".git-comment:not(.git-commit-box) textarea")
+  if (draft) g.draft = draft.value
+  const top = switched ? (g.tops[g.tab] ?? 0) : g.body.scrollTop
+  for (const b of g.tabs.children) {
+    const on = b.dataset.tab === g.tab
+    b.setAttribute("aria-selected", String(on))
+    b.tabIndex = on ? 0 : -1
+  }
+  g.tabs.hidden = !!d && !d.repo
+  if (!d || !d.repo) {
+    g.sub.replaceChildren()
+    if (!d) return g.body.replaceChildren(el("p", { class: "git-empty", text: g.error || "Loading…" }))
+    return g.body.replaceChildren(el("div", { class: "git-empty" },
+      el("b", { text: "Not a git repository" }),
+      el("p", { text: "This thread's project folder isn't in git, so there's no branch or pull request to show." })))
+  }
+  // A count beside a tab only where it's news: the conversation's size, and what's uncommitted.
+  const counts = { summary: 0, timeline: d.pr?.notes.length ?? 0, code: d.changes.length }
+  for (const b of g.tabs.children) b.querySelector(".git-tab-n").textContent = counts[b.dataset.tab] ? String(counts[b.dataset.tab]) : ""
+  const view = (g.tab === "timeline" ? timelineTab : g.tab === "code" ? codeTab : summaryTab)(d, g)
+  g.sub.replaceChildren(el("div", { class: "git-sub-info" }, view.info), el("div", { class: "git-sub-actions" }, view.actions))
+  g.body.replaceChildren(...[g.error ? el("p", { class: "git-note warn", text: g.error }) : null, ...view.body.flat()].filter(Boolean))
+  const ta = g.body.querySelector(".git-comment:not(.git-commit-box) textarea")
+  if (ta && g.draft) ta.value = g.draft
+  g.body.scrollTop = top
+}
+
+/** A small button in the panel; it's disabled while what it does runs. */
+const gitBtn = (label, run, { primary = false, title = null, disabled = false, cls = "" } = {}) =>
+  el("button", { class: `btn ${primary ? "btn-primary" : "btn-quiet"} btn-xs ${cls}`.trim(), type: "button", title, disabled, onclick: (e) => withBusy(e.currentTarget, run) }, label)
+/** "More": the rest of a tab's actions, in a sheet. */
+const gitMore = (title, items) => items.length
+  ? el("button", { class: "icon-btn git-more-btn", type: "button", title: "More", "aria-label": "More actions", "aria-haspopup": "dialog", html: MORE_ICON, onclick: () => actionSheet(title, items) })
+  : null
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`
+
+/** Summary: the branch against its upstream, and its pull request (or how to open one), its checks and description. */
+function summaryTab(d, g) {
+  const baseName = d.base?.replace(/^origin\//, "") ?? ""
+  const pr = d.pr
+  const canPush = d.branch && (!d.upstream || d.ahead > 0)
+  const canPull = d.upstream && d.behind > 0 && d.ahead === 0 && d.branch === d.current
+  const diverged = d.upstream && d.ahead > 0 && d.behind > 0
+  const onBase = !d.branch || d.branch === baseName
+  const where = !d.upstream
+    ? (d.branch ? "not pushed" : "")
+    : [d.ahead ? `↑${d.ahead}` : "", d.behind ? `↓${d.behind}` : "", !d.ahead && !d.behind ? "up to date" : ""].filter(Boolean).join(" ")
+  const info = [
+    icon(BRANCH_PATHS, "git-sub-ico"),
+    el("span", { class: "git-branch-name", title: [d.branch, d.upstream ? `tracks ${d.upstream}` : ""].filter(Boolean).join("\n") }, d.branch ? branchLabel(d.branch) : "detached HEAD"),
+    where ? el("span", { class: `git-sub-state${d.ahead ? " ahead" : ""}`, text: where, title: d.upstream ? `Against ${d.upstream}` : "" }) : null
+  ]
+  const actions = []
+  if (canPull) actions.push(gitBtn(`Pull ↓${d.behind}`, () => gitAction("pull", {}, `Pulled ${plural(d.behind, "commit")} into ${d.branch}.`), { title: `Fast-forward ${d.branch} to ${d.upstream}` }))
+  if (canPush) actions.push(gitBtn(d.upstream ? `Push ↑${d.ahead}` : "Push", () => gitAction("push", { branch: d.branch }, `Pushed ${d.branch}.`), { title: d.upstream ? `Push to ${d.upstream}` : `Push ${d.branch} to origin` }))
+  if (pr?.state === "OPEN") actions.push(gitBtn("Merge…", () => mergePr(pr), { primary: true, disabled: pr.isDraft, title: pr.isDraft ? "A draft can't be merged" : `Merge #${pr.number} into ${pr.base}` }))
+  else if (!pr && d.gh.ok && !onBase) actions.push(gitBtn("Create PR", () => createPr(d), { primary: true, title: d.upstream ? `Open a pull request for ${d.branch}` : `Push ${d.branch}, then open a pull request for it` }))
+  const more = []
+  if (pr) more.push({ label: "Open on GitHub", run: () => openOut(pr.url) })
+  if (pr?.state === "OPEN") {
+    more.push(pr.isDraft
+      ? { label: "Ready for review", run: () => gitAction("ready", { number: pr.number }, "Marked ready for review.") }
+      : { label: "Convert to draft", run: () => gitAction("ready", { number: pr.number, draft: true }, "Converted to a draft.") })
+    more.push({ label: "Edit title and description", run: () => editPr(pr) })
+    more.push({ label: "Request reviewers", run: () => requestReviewers(pr) })
+    more.push({ label: `Update branch from ${pr.base}`, run: () => gitAction("update", { number: pr.number }, `Updated ${pr.head} from ${pr.base}.`) })
+  }
+  if (pr?.state === "CLOSED") more.push({ label: "Reopen pull request", run: () => gitAction("reopen", { number: pr.number }, `Reopened #${pr.number}.`) })
+  if (pr && pr.state !== "OPEN" && d.gh.ok && !onBase) more.push({ label: "New pull request", run: () => createPr(d) })
+  if (!pr && d.gh.ok && !onBase) more.push({ label: "Ask the agent to open a pull request", run: () => askAgent(`Open a pull request for the branch ${d.branch}${baseName ? ` into ${baseName}` : ""}: push it if needed, and write a clear title and description from its commits.`) })
+  if (diverged) more.push({ label: `Ask the agent to rebase onto ${d.upstream}`, run: () => askAgent(`Rebase ${d.branch} onto ${d.upstream}: run \`git pull --rebase\`, resolve any conflicts, run the checks, and tell me what changed. Don't push.`) })
+  more.push({ label: "Fetch from the remotes", run: async () => { gitFetched.set(g.threadId, Date.now()); await gitAction("fetch", {}, "Fetched.") } })
+  if (d.upstream) more.push({ label: autoPullOn() ? "Stop pulling automatically" : "Pull automatically", run: () => {
+    const on = !autoPullOn()
+    save("gitAutoPull", on)
+    toast(on ? `While a thread is open, zero fetches every few minutes and fast-forwards its branch when that's safe.` : "Stopped pulling automatically.")
+    if (on && gitPanel) { gitFetched.delete(gitPanel.threadId); autoSync() }
+    paintGit()
+  } })
+  if (pr?.state === "OPEN") more.push({ label: "Close pull request", danger: true, run: () => closePr(pr) })
+  actions.push(gitMore(pr ? `#${pr.number} ${pr.title}` : d.branch || "Git", more))
+
+  const body = []
+  if (pr) body.push(prHead(pr), checksBlock(pr), descriptionBlock(pr))
+  else {
+    const why = !d.gh.ok ? d.gh.detail || "GitHub isn't reachable from here."
+      : onBase ? (d.branch ? `${d.branch} is the default branch: a pull request comes from a branch of its own.` : "Check out a branch to open a pull request.")
+        : `Create one for ${d.branch} from here, or ask the agent (under More) to write it from the commits.`
+    body.push(el("div", { class: "git-lead" }, el("h3", { class: "git-lead-title", text: "No pull request yet" }), el("p", { class: "git-note", text: why })))
+  }
+  const notes = [
+    diverged ? `${d.branch} has ${plural(d.ahead, "commit")} of its own and is ${d.behind} behind ${d.upstream}, so a pull can't fast-forward it.` : "",
+    d.worktree ? `In a worktree: ${d.cwd}` : "",
+    d.current && d.branch !== d.current ? `The project is on ${d.current} now; this thread last worked on ${d.branch}.` : "",
+    d.upstream && autoPullOn() ? "Pulls automatically while this thread is open." : ""
+  ].filter(Boolean)
+  if (notes.length) body.push(el("div", { class: "git-foot-notes" }, notes.map((n) => el("p", { class: "git-note", text: n, title: n }))))
+  return { info, actions, body }
+}
+
+/** The pull request: its state, title, who and where, its size, and its review and merge state. */
+function prHead(pr) {
+  const state = prState(pr)
+  const pills = []
+  if (pr.reviewDecision && REVIEW_LABEL[pr.reviewDecision]) pills.push(el("span", { class: `git-pill review-${pr.reviewDecision.toLowerCase()}`, text: REVIEW_LABEL[pr.reviewDecision] }))
+  if (state === "open" && MERGE_STATE[pr.mergeState]) pills.push(el("span", { class: `git-pill merge-${pr.mergeState.toLowerCase()}`, text: MERGE_STATE[pr.mergeState] }))
+  for (const l of pr.labels) pills.push(el("span", { class: "git-pill label", text: l }))
+  return el("div", { class: `git-pr pr-${state}` },
+    el("div", { class: "git-pr-top" },
+      el("span", { class: `git-state st-${state}` }, icon(PR_PATHS), PR_STATE_LABEL[state] ?? pr.state),
+      el("span", { class: "git-when", text: state === "merged" && pr.mergedAt ? `merged ${agoText(pr.mergedAt)}` : `updated ${agoText(pr.updatedAt)}` })),
+    el("a", { class: "git-pr-title", href: pr.url, target: "_blank", rel: "noopener noreferrer", title: "Open on GitHub" }, pr.title),
+    el("p", { class: "git-pr-meta" },
+      el("span", { class: "git-pr-num", text: `#${pr.number}` }), ` by ${pr.author} · `,
+      el("span", { class: "git-ref", text: pr.head }), " into ", el("span", { class: "git-ref", text: pr.base })),
+    el("p", { class: "git-pr-meta" },
+      el("span", { class: "git-add", text: `+${pr.additions}` }), " ", el("span", { class: "git-del", text: `−${pr.deletions}` }),
+      ` · ${plural(pr.changedFiles, "file")}`, pr.reviewers.length ? ` · review asked of ${pr.reviewers.join(", ")}` : ""),
+    pills.length ? el("div", { class: "git-pills" }, pills) : null)
+}
+
+/** A titled part of a tab: a heading in type, not a box. */
+const gitBlock = (title, count, extra, ...content) => el("section", { class: "git-block" },
+  el("h3", { class: "git-h" }, el("span", { text: title }), count ? el("span", { class: "git-h-n", text: String(count) }) : null, extra),
+  ...content)
+
 /** Checks in the order they matter: what failed, what's still going, then what passed or didn't run. */
 const CHECK_ORDER = ["failed", "running", "pending", "cancelled", "passed", "neutral", "skipped"]
 const QUIET_CHECK = new Set(["passed", "neutral", "skipped"])
-function prSections(pr) {
+function checksBlock(pr) {
   const checks = [...pr.checks].sort((a, b) => CHECK_ORDER.indexOf(a.state) - CHECK_ORDER.indexOf(b.state))
+  if (!checks.length) return null
   // Many checks: the ones that passed or were skipped fold away behind a button.
   const fold = checks.length > 10 && !gitPanel?.allChecks
   const quiet = fold ? checks.filter((c) => QUIET_CHECK.has(c.state)) : []
@@ -3262,64 +3348,73 @@ function prSections(pr) {
   const runs = [...new Set(failed.map((c) => c.runId).filter(Boolean))]
   const summary = [["passed", "passed"], ["failed", "failed"], ["running", "running"], ["pending", "waiting"], ["skipped", "skipped"], ["cancelled", "cancelled"]]
     .map(([s, w]) => [count(s), w, s]).filter(([n]) => n > 0)
-  const checksSec = gitSec("checks", "Checks", checks.length, checks.length
-    ? [
-      el("p", { class: "git-check-sum" }, summary.map(([n, w, s]) => el("span", { class: `sum-${s}`, text: `${n} ${w}` }))),
-      el("ul", { class: "git-list" }, shown.map((c) => el("li", { class: `git-check ck-${c.state}` },
-        el("span", { class: "ck-mark", "aria-label": c.state, title: c.state, text: CHECK_MARK[c.state] }),
-        c.url ? el("a", { class: "ck-name", href: c.url, target: "_blank", rel: "noopener noreferrer", title: c.workflow ? `${c.workflow} / ${c.name}` : c.name }, c.workflow ? el("span", { class: "ck-wf", text: `${c.workflow} / ` }) : null, c.name)
-          : el("span", { class: "ck-name", text: c.name }),
-        el("span", { class: "git-when", text: c.completedAt && c.startedAt ? took(c.startedAt, c.completedAt) : c.state === "running" && c.startedAt ? `${ago(c.startedAt)}` : "" })))),
-      quiet.length
-        ? el("button", { class: "git-more", type: "button", onclick: () => { gitPanel.allChecks = true; paintGit() } }, `Show ${quiet.length} more (passed or skipped)`)
-        : null,
-      failed.length
-        ? el("div", { class: "git-actions" },
-          runs.length ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: (e) => withBusy(e.currentTarget, async () => { for (const id of runs) if (!(await gitAction("rerun", { runId: id }))) return; toast(`Re-running ${runs.length === 1 ? "the failed jobs" : `${runs.length} runs' failed jobs`}.`) }) }, "Re-run failed") : null,
-          el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(fixChecksPrompt(pr, failed)) }, "Ask the agent to fix"))
-        : null
-    ]
-    : el("p", { class: "git-none", text: "No checks ran on this pull request." }), true)
-  const description = gitSec("description", "Description", null, pr.body.trim()
+  return gitBlock("Checks", 0, el("span", { class: "git-check-sum" }, summary.map(([n, w, s]) => el("span", { class: `sum-${s}`, text: `${n} ${w}` }))),
+    el("ul", { class: "git-list" }, shown.map((c) => el("li", { class: `git-check ck-${c.state}` },
+      el("span", { class: "ck-mark", "aria-label": c.state, title: c.state, text: CHECK_MARK[c.state] }),
+      c.url ? el("a", { class: "ck-name", href: c.url, target: "_blank", rel: "noopener noreferrer", title: c.workflow ? `${c.workflow} / ${c.name}` : c.name }, c.workflow ? el("span", { class: "ck-wf", text: `${c.workflow} / ` }) : null, c.name)
+        : el("span", { class: "ck-name", text: c.name }),
+      el("span", { class: "git-when", text: c.completedAt && c.startedAt ? took(c.startedAt, c.completedAt) : c.state === "running" && c.startedAt ? `${ago(c.startedAt)}` : "" })))),
+    quiet.length ? el("button", { class: "git-more", type: "button", onclick: () => { gitPanel.allChecks = true; paintGit() } }, `Show ${quiet.length} more (passed or skipped)`) : null,
+    failed.length
+      ? el("div", { class: "git-actions" },
+        runs.length ? gitBtn("Re-run failed", async () => { for (const id of runs) if (!(await gitAction("rerun", { runId: id }))) return; toast(`Re-running ${runs.length === 1 ? "the failed jobs" : `${runs.length} runs' failed jobs`}.`) }) : null,
+        el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(fixChecksPrompt(pr, failed)) }, "Ask the agent to fix"))
+      : null)
+}
+function descriptionBlock(pr) {
+  return gitBlock("Description", 0, null, pr.body.trim()
     ? el("div", { class: "prose git-prose" }, prose(pr.body))
-    : el("p", { class: "git-none", text: "No description." }), true)
-  const notes = pr.notes
-  const conversation = gitSec("conversation", "Conversation", notes.length, [
-    notes.length
-      ? el("ol", { class: "git-notes" }, notes.map(noteNode))
-      : el("p", { class: "git-none", text: "No comments or reviews yet." }),
-    notes.some((n) => n.kind === "inline" || n.state === "CHANGES_REQUESTED" || n.kind === "comment")
-      ? el("div", { class: "git-actions" }, el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => askAgent(addressPrompt(pr)) }, "Ask the agent to address these"))
-      : null,
-    pr.state !== "CLOSED" ? commentBox(pr) : null
-  ], true)
-  const files = gitSec("files", "Files changed", pr.files.length, el("ul", { class: "git-list" }, pr.files.map((f) => el("li", { class: "git-file" },
-    el("span", { class: "git-path", text: f.path, title: f.path }),
-    el("span", { class: "git-add", text: `+${f.additions}` }),
-    el("span", { class: "git-del", text: `−${f.deletions}` })))), pr.files.length <= 20)
-  return [checksSec, description, conversation, files]
+    : el("p", { class: "git-none", text: "No description." }))
 }
 const took = (a, b) => {
   const s = Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 1000))
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
+/** Timeline: the branch's commits and the pull request's conversation, one list, newest first. */
+function timelineTab(d) {
+  const pr = d.pr
+  const notes = pr?.notes ?? []
+  const info = [el("span", { class: "git-sub-text", text: [plural(d.commits.length, "commit"), pr ? plural(notes.length, "comment") : ""].filter(Boolean).join(" · ") })]
+  const actions = pr && notes.some((n) => n.kind === "inline" || n.state === "CHANGES_REQUESTED" || n.kind === "comment")
+    ? [el("button", { class: "btn btn-quiet btn-xs", type: "button", title: "Put a prompt in the composer: address the review comments, run the checks, commit and push", onclick: () => askAgent(addressPrompt(pr)) }, "Ask the agent to address")]
+    : []
+  const events = [
+    ...d.commits.map((c) => ({ at: c.at, node: commitEvent(c) })),
+    ...notes.map((n) => ({ at: n.at, node: noteNode(n) }))
+  ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+  const body = [
+    pr && pr.state !== "CLOSED" ? commentBox(pr) : null,
+    events.length ? el("ol", { class: "git-timeline" }, events.map((e) => e.node)) : el("p", { class: "git-none", text: "Nothing on this branch yet." })
+  ]
+  return { info, actions, body }
+}
+function commitEvent(c) {
+  return el("li", { class: "git-ev git-ev-commit" },
+    el("span", { class: "git-ev-mark", "aria-hidden": "true" }),
+    el("div", { class: "git-ev-main" },
+      el("p", { class: "git-ev-title", text: c.subject, title: c.subject }),
+      el("p", { class: "git-ev-meta" },
+        el("code", { class: "git-sha", text: c.sha.slice(0, 7), title: c.sha }), ` · ${c.author} · `,
+        el("span", { text: agoText(c.at), title: new Date(c.at).toLocaleString() }))))
+}
 function noteNode(n) {
   const what = n.kind === "inline"
     ? el("span", { class: "note-where" }, "on ", el("code", { text: `${n.path}${n.line ? `:${n.line}` : ""}` }))
     : n.kind === "review"
       ? el("span", { class: `note-verdict v-${(n.state || "").toLowerCase()}`, text: ({ APPROVED: "approved", CHANGES_REQUESTED: "asked for changes", COMMENTED: "reviewed", DISMISSED: "review dismissed" })[n.state] ?? "reviewed" })
-      : null
-  return el("li", { class: `git-note-item note-${n.kind}` },
-    el("div", { class: "note-head" },
-      el("b", { text: n.author }),
-      what,
-      n.url ? el("a", { class: "git-when", href: n.url, target: "_blank", rel: "noopener noreferrer", text: ago(n.at), title: new Date(n.at).toLocaleString() }) : el("span", { class: "git-when", text: ago(n.at) })),
-    n.body.trim() ? el("div", { class: "prose git-prose" }, prose(n.body)) : null)
+      : el("span", { class: "note-verdict", text: "commented" })
+  const when = n.url
+    ? el("a", { class: "git-when", href: n.url, target: "_blank", rel: "noopener noreferrer", text: agoText(n.at), title: new Date(n.at).toLocaleString() })
+    : el("span", { class: "git-when", text: agoText(n.at) })
+  return el("li", { class: `git-ev git-ev-note note-${n.kind}${n.state ? ` v-${n.state.toLowerCase()}` : ""}` },
+    el("span", { class: "git-ev-mark", "aria-hidden": "true" }),
+    el("div", { class: "git-ev-main" },
+      el("p", { class: "note-head" }, el("b", { text: n.author }), " ", what, " · ", when),
+      n.body.trim() ? el("div", { class: "prose git-prose" }, prose(n.body)) : null))
 }
-
 function commentBox(pr) {
-  const ta = el("textarea", { rows: "3", placeholder: `Comment on #${pr.number}…`, "aria-label": "Comment" })
+  const ta = el("textarea", { rows: "2", placeholder: `Comment on #${pr.number}…`, "aria-label": "Comment" })
   const send = el("button", { class: "btn btn-primary btn-xs", type: "button" }, "Comment")
   const post = () => withBusy(send, async () => {
     if (!ta.value.trim()) return
@@ -3328,6 +3423,53 @@ function commentBox(pr) {
   send.addEventListener("click", post)
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); post() } })
   return el("div", { class: "git-comment" }, ta, el("div", { class: "git-comment-foot" }, el("span", { class: "hint", text: "Ctrl+Enter posts it to GitHub" }), send))
+}
+
+/** Code: what's uncommitted (each file's diff on demand) with its commit message, then what the pull request changes. */
+function codeTab(d, g) {
+  const pr = d.pr
+  const n = d.changes.length
+  const on = d.current && d.current !== d.branch ? d.current : d.branch
+  const info = [el("span", { class: "git-sub-text", text: n ? `${n} uncommitted${on ? ` on ${on}` : ""}` : "Nothing uncommitted" })]
+  const actions = n
+    ? [gitBtn("Write message", () => writeCommitMessage(g), { title: "Claude's small model reads the diff (up to 12,000 characters) and writes the message" }),
+      gitBtn("Commit", () => commitAll(g), { primary: true, cls: "git-commit-go", title: "Commit everything uncommitted (Ctrl+Enter in the message)" })]
+    : []
+  const body = n
+    ? [commitBox(g), el("ul", { class: "git-list git-changes" }, d.changes.map((c) => changeRow(g, c)))]
+    : [el("p", { class: "git-none", text: "The working tree is clean." })]
+  if (pr?.files.length) {
+    body.push(gitBlock(`Changed in #${pr.number}`, pr.files.length, null,
+      el("ul", { class: "git-list" }, pr.files.map((f) => el("li", { class: "git-pr-file" },
+        el("span", { class: "git-path", text: f.path, title: f.path }),
+        el("span", { class: "git-add", text: `+${f.additions}` }),
+        el("span", { class: "git-del", text: `−${f.deletions}` }))))))
+  }
+  return { info, actions, body }
+}
+/** The commit message: the person's, or one the small model writes from the diff. */
+function commitBox(g) {
+  const ta = el("textarea", { rows: 2, placeholder: "Commit message", "aria-label": "Commit message" })
+  ta.value = g.commitDraft ?? ""
+  ta.addEventListener("input", () => { g.commitDraft = ta.value })
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); g.sub.querySelector(".git-commit-go")?.click() } })
+  return el("div", { class: "git-comment git-commit-box" }, ta)
+}
+async function commitAll(g) {
+  const message = g.commitDraft ?? ""
+  if (!message.trim()) {
+    g.body.querySelector(".git-commit-box textarea")?.focus()
+    return toast("Write a commit message first, or let Claude write one.", true)
+  }
+  if (await gitAction("commit", { message }, "Committed.")) g.commitDraft = ""
+}
+async function writeCommitMessage(g) {
+  try {
+    const r = await api("POST", `threads/${g.threadId}/git/message`, {})
+    g.commitDraft = r.message
+    const ta = g.body.querySelector(".git-commit-box textarea")
+    if (ta) { ta.value = r.message; ta.focus() }
+  } catch (err) { fail(err) }
 }
 
 /** Disable a button while its action runs. */
@@ -3782,10 +3924,10 @@ const EVO_KINDS = {
   evolve: { label: "Evolve", verb: "Start evolving", what: "Generations back to back, each starting from what the last one kept, until the count or the money runs out." }
 }
 const EVO_STEPS = [
-  ["measure", "Measure", "The solver works each benchmark task; hidden tests it never sees score the result."],
-  ["propose", "Propose", "The improver reads the scores and earlier attempts, recalls the most similar past win, and edits genome/."],
-  ["judge", "Judge", "The new genome is benchmarked. It wins with a higher score, or the same score for at least 15% less."],
-  ["keep", "Keep", "A win is committed and stored in memory for the next improver. A loss is put back and logged."]
+  ["measure", "Measure", "The solver works every benchmark task; hidden tests it never sees score it."],
+  ["propose", "Propose", "The improver studies the scores and earlier tries, recalls a past win, and edits genome/."],
+  ["judge", "Judge", "The new genome is benchmarked. It wins with a higher score, or the same for 15% less."],
+  ["keep", "Keep", "A win is committed and remembered for the next improver. A loss is put back."]
 ]
 const EVO_FILES = [
   ["genome/solver.md", "solver.md", "The instructions every solver agent starts with."],
@@ -3799,6 +3941,9 @@ const EVO_KNOBS = [
   ["improverModel", "Improver model", "Rewrites the genome", modelName],
   ["improverEffort", "Improver effort", "How hard it thinks each turn"]
 ]
+/** The page's tabs: [key, label]. Overview has what's needed to run; the rest is for reading. */
+const EVO_TABS = [["overview", "Overview"], ["history", "History"], ["genome", "Genome"], ["bench", "Benchmark"]]
+let evoTab = load("evoTab", "overview")
 
 const EVO_LEDE = "zero rewrites its own genome, the instructions and settings its agents run with, and keeps a change only when a benchmark with hidden tests shows it's better."
 function evolutionView() {
@@ -3824,15 +3969,16 @@ function loadEvo() {
 /** Before the first answer: the page's shape, so nothing jumps when it arrives. */
 function evoSkeleton() {
   const bar = (w, h = 12) => el("span", { class: "skel", style: `width:${w};height:${h}px` })
-  const tile = (label) => el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, bar("55%", 26)), el("div", { class: "kpi-sub" }, bar("80%", 10)))
+  const stat = (label) => el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, bar("55%", 26)), el("div", { class: "kpi-sub" }, bar("80%", 10)))
   return [
-    el("header", { class: "evo-head" },
-      el("div", {}, el("h1", { text: "Evolution" }), el("p", { class: "lede", text: EVO_LEDE })),
-      el("span", { class: "evo-status" }, el("i"), "Loading…")),
-    evoLoop({ job: null, log: [] }),
-    el("section", { class: "kpis", "aria-busy": "true" }, ["Score", "Cost per task", "Generations", "Spent"].map(tile)),
-    el("section", { class: "card", "aria-busy": "true" }, el("h2", { text: "Lineage" }), bar("60%", 10), el("div", { class: "chart" }, bar("100%", 240))),
-    el("div", { class: "evo-grid" }, el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Run" })), el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Output" })))
+    evoHeader(null),
+    evoTabs(null),
+    el("div", { class: "evo-tab" },
+      el("section", { class: "kpis", "aria-busy": "true" }, ["Score", "Cost per task", "Generations", "Spent"].map(stat)),
+      evoLoop({ job: null, log: [] }),
+      el("div", { class: "evo-main" },
+        el("section", { class: "card evo-chart-card", "aria-busy": "true" }, el("h2", { text: "Lineage" }), bar("60%", 10), el("div", { class: "chart" }, bar("100%", 240))),
+        el("section", { class: "card evo-skel-tall" }, el("h2", { text: "Run" }))))
   ]
 }
 /** Rebuild one section in place, leaving the rest of the page (and where it's scrolled) alone. */
@@ -3879,6 +4025,7 @@ function evoEstimate(E) {
   return evoMode === "generation" ? first : Math.min(first + one * (evoGens - 1), evoMore)
 }
 
+/** Paint the page: the header and tabs, then the open tab. Where the page is scrolled stays put. */
 function paintEvo() {
   const root = $("evo")
   if (!root || !S.evo) return
@@ -3886,40 +4033,70 @@ function paintEvo() {
   const running = evoRunning(E)
   clearInterval(evoClock)
   if (running) evoClock = setInterval(() => { const n = $("evo-elapsed"); if (n && S.evo?.job) n.textContent = elapsed(S.evo.job.startedAt); else clearInterval(evoClock) }, 1000)
-  root.replaceChildren(
-    evoHeader(E),
-    evoLoop(E),
-    evoStats(E),
-    evoChart(E),
-    el("div", { class: "evo-grid" }, evoRun(E), evoOutput(E)),
-    evoHistory(E),
-    el("div", { class: "evo-grid evo-grid-wide" }, evoGenome(E), el("div", { class: "evo-stack" }, evoBench(E), evoMemory(E)))
-  )
+  if (!EVO_TABS.some(([k]) => k === evoTab)) evoTab = "overview"
+  const body = {
+    overview: () => [
+      evoStats(E),
+      evoLoop(E),
+      el("div", { class: "evo-main" }, evoChart(E), evoRun(E)),
+      evoOutput(E),
+      evoLatest(E)
+    ],
+    history: () => [evoHistory(E)],
+    genome: () => [el("div", { class: "evo-main evo-main-genome" }, evoGenome(E), evoMemory(E))],
+    bench: () => [evoBench(E)]
+  }[evoTab]
+  root.replaceChildren(evoHeader(E), evoTabs(E), el("div", { class: "evo-tab", id: "evo-tab", role: "tabpanel", "aria-labelledby": `evo-tab-${evoTab}` }, body()))
   const log = $("evo-log")
   if (log) log.scrollTop = log.scrollHeight
 }
+/** Open a tab of the page, and keep focus on its tab when it had it. */
+function evoGo(tab) {
+  const had = document.activeElement?.closest?.(".evo-tabs")
+  evoTab = tab
+  save("evoTab", tab)
+  paintEvo()
+  if (had) $(`evo-tab-${tab}`)?.focus()
+}
 
 function evoStatus(E) {
+  if (!E) return el("span", { class: "evo-status" }, el("i"), "Loading…")
   const j = E.job
   if (evoRunning(E)) {
     return el("span", { class: "evo-status live" }, el("i"),
       j.state === "stopping" ? "Stopping…" : `${EVO_KINDS[j.request.kind].label} running`,
-      el("span", { class: "mono", id: "evo-elapsed", text: elapsed(j.startedAt) }))
+      el("span", { class: "evo-status-time", id: "evo-elapsed", text: elapsed(j.startedAt) }))
   }
   if (!j) return el("span", { class: "evo-status" }, el("i"), "Idle")
   const when = ago(j.endedAt ?? j.startedAt)
   const said = { done: "Last run finished", failed: "Last run failed", stopped: "Last run stopped" }[j.state] ?? "Idle"
-  return el("span", { class: `evo-status ${j.state}` }, el("i"), said, el("span", { class: "mono", text: when === "now" ? "just now" : `${when} ago` }))
+  return el("span", { class: `evo-status ${j.state}` }, el("i"), said, el("span", { class: "evo-status-time", text: when === "now" ? "just now" : `${when} ago` }))
 }
 
 function evoHeader(E) {
   return el("header", { class: "evo-head" },
-    el("div", {},
+    el("div", { class: "evo-title" },
       el("h1", { text: "Evolution" }),
       el("p", { class: "lede", text: EVO_LEDE })),
     evoStatus(E))
 }
 
+/** The tabs under the header. History counts its generations. Left and Right move between them. */
+function evoTabs(E) {
+  const keys = EVO_TABS.map(([k]) => k)
+  return el("nav", { class: "evo-tabs", role: "tablist", "aria-label": "Evolution" },
+    EVO_TABS.map(([k, label]) => el("button", {
+      class: "evo-tabbtn", type: "button", role: "tab", id: `evo-tab-${k}`, "aria-selected": String(k === evoTab), tabindex: k === evoTab ? 0 : -1,
+      onclick: () => { if (E && k !== evoTab) evoGo(k) },
+      onkeydown: (e) => {
+        if (!E || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return
+        e.preventDefault()
+        evoGo(keys[(keys.indexOf(k) + (e.key === "ArrowRight" ? 1 : keys.length - 1)) % keys.length])
+      }
+    }, label, k === "history" && E?.attempts.length ? el("span", { class: "evo-tab-n", text: String(E.attempts.length) }) : null)))
+}
+
+/** How a generation works, as four steps; during a run, which one it's on. */
 function evoLoop(E) {
   const stage = evoStage(E)
   const at = EVO_STEPS.findIndex(([k]) => k === stage)
@@ -3936,19 +4113,19 @@ function evoStats(E) {
   const first = E.measures[0]
   const kept = E.attempts.filter((a) => a.accepted).length
   const benchUsd = E.measures.reduce((s, m) => s + m.costUsd, 0)
-  const tile = (label, value, sub, good = null) =>
+  const stat = (label, value, sub, good = null) =>
     el("div", { class: "kpi" }, el("div", { class: "kpi-label", text: label }), el("div", { class: "kpi-value" }, value),
       el("div", { class: "kpi-sub" }, good ? el("span", { class: "kpi-good", text: good }) : null, sub))
   const saved = now && first ? share(perTask(first), perTask(now)) : 0
   return el("section", { class: "kpis", "aria-label": "Where zero stands" },
-    tile("Score", now ? [pct(now.score), el("small", { text: "%" })] : "—",
+    stat("Score", now ? [pct(now.score), el("small", { text: "%" })] : "—",
       now ? `${now.solved} of ${now.tasks} tasks fully solved${(now.reps ?? 1) > 1 ? ` · ${now.reps} reps` : ""}` : "Run a benchmark to score this genome"),
-    tile("Cost per task", now ? usd(perTask(now)) : "—",
-      now && first ? (saved > 0 ? `from ${usd(perTask(first))} at the start` : `${usd(perTask(first))} at the start`) : "What one solver run costs, on average",
+    stat("Cost per task", now ? usd(perTask(now)) : "—",
+      now && first ? (saved > 0 ? `from ${usd(perTask(first))}` : `${usd(perTask(first))} at the start`) : "One solver run, on average",
       saved > 0 ? `${saved}% less` : null),
-    tile("Generations", String(E.attempts.length),
+    stat("Generations", String(E.attempts.length),
       E.attempts.length ? `${kept} kept · ${E.attempts.length - kept} turned down` : "None yet"),
-    tile("Spent", usd(E.spentUsd), `${usd(benchUsd)} benchmarks · ${usd(E.spentUsd - benchUsd)} improvers`))
+    stat("Spent", usd(E.spentUsd), `${usd(benchUsd)} benchmarks · ${usd(E.spentUsd - benchUsd)} improvers`))
 }
 
 function evoChart(E) {
@@ -3960,16 +4137,16 @@ function evoChart(E) {
     [["score", "Score"], ["cost", "Cost"]].map(([m, l]) =>
       el("button", { type: "button", role: "radio", "aria-checked": String(m === metric), onclick: () => { evoMetric = m; save("evoMetric", m); swapEvo("evo-chart", evoChart)?.querySelector("[aria-checked=true]")?.focus() } }, l)))
   const key = (cls, text) => el("span", { class: "legend-item" }, el("span", { class: `legend-mark ${cls}` }), text)
-  const card = el("section", { class: "card", id: "evo-chart" },
+  const card = el("section", { class: "card evo-chart-card", id: "evo-chart" },
     el("div", { class: "card-head" },
       el("div", {}, el("h2", { text: "Lineage" }),
-        el("p", { class: "hint hint-2", text: metric === "cost"
-          ? "What a full benchmark run cost the genome each generation started from. Lower is better; the line drops when a cheaper genome is kept."
-          : "The genome's score, generation by generation. The line moves only when a change is kept." })),
+        el("p", { class: "hint", text: metric === "cost"
+          ? "A full benchmark run's cost, generation by generation. It drops when a cheaper genome is kept."
+          : "The genome's score, generation by generation. It moves only when a change is kept." })),
       seg),
     chart,
     E.attempts.length === 0 && !evoNow(E) ? null : el("div", { class: "legend" }, key("lm-start", "First measured"), key("lm-kept", "Kept"), key("lm-down", "Turned down"), key("lm-guard", "Stopped by a guard"),
-      flat && metric === "score" ? el("span", { class: "legend-note", text: "Every genome scores the same here, so Cost tells more." }) : null))
+      flat && metric === "score" ? el("span", { class: "legend-note", text: "Every genome scores the same: Cost tells more." }) : null))
   drawLineage(chart, E, evoRunning(E) && E.job.request.kind !== "bench", metric)
   return card
 }
@@ -3992,31 +4169,33 @@ function evoRun(E) {
   }
   const field = (label, help, control, off = false) =>
     el("div", { class: `evo-field${off ? " off" : ""}` },
-      el("div", {}, el("div", { class: "evo-field-label" }, label, el("span", { class: "only", text: "Evolve only" })), el("div", { class: "row-help", text: help })), control)
+      el("div", { class: "evo-field-text" },
+        el("div", { class: "evo-field-label" }, label, el("span", { class: "only", text: "Evolve only" })),
+        el("div", { class: "row-help", text: help })),
+      control)
   const more = el("input", { id: "evo-more", type: "number", min: 1, max: 500, step: 1, value: evoMore, inputmode: "decimal", disabled: notEvolve })
   more.addEventListener("change", () => { evoMore = Math.min(500, Math.max(1, Number(more.value) || 5)); more.value = evoMore; save("evoMore", evoMore); paintEvoEstimate() })
-  const modes = el("div", { class: "modes", role: "radiogroup", "aria-label": "What to run" },
-    Object.entries(EVO_KINDS).map(([m, k]) =>
+  const kinds = Object.keys(EVO_KINDS)
+  const pick = (m) => { evoMode = m; save("evoMode", m); paintRun() }
+  const modes = el("div", { class: "seg evo-modes", role: "radiogroup", "aria-label": "What to run" },
+    kinds.map((m) =>
       el("button", {
-        class: "mode", type: "button", role: "radio", "aria-checked": String(m === evoMode), tabindex: m === evoMode ? 0 : -1,
-        onclick: () => { evoMode = m; save("evoMode", m); paintRun() },
+        type: "button", role: "radio", "aria-checked": String(m === evoMode), tabindex: m === evoMode ? 0 : -1,
+        onclick: () => pick(m),
         onkeydown: (e) => {
           if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key)) return
           e.preventDefault()
-          const ks = Object.keys(EVO_KINDS)
-          evoMode = ks[(ks.indexOf(m) + (e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : ks.length - 1)) % ks.length]
-          save("evoMode", evoMode)
-          paintRun()
+          pick(kinds[(kinds.indexOf(m) + (e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : kinds.length - 1)) % kinds.length])
         }
-      }, el("span", { class: "mode-dot" }), el("span", {}, el("b", { text: k.label }), el("span", { text: k.what })))))
+      }, EVO_KINDS[m].label)))
   return el("section", { class: "card evo-run", id: "evo-run" },
-    el("h2", { text: "Run" }),
-    el("p", { class: "hint", text: "Runs use real agent sessions and cost real money." }),
+    el("div", { class: "card-head" }, el("h2", { text: "Run" }), el("span", { class: "hint", text: "Real sessions, real money" })),
     modes,
+    el("p", { class: "evo-mode-what", text: EVO_KINDS[evoMode].what }),
     el("div", { class: "evo-fields" },
-      field("Reps per task", "Run each task more than once to average out luck. Multiplies the benchmark's cost.", stepper("evo-reps", evoReps, 1, 5, (n) => { evoReps = n; save("evoReps", n) })),
+      field("Reps per task", "Runs each task more than once to average out luck.", stepper("evo-reps", evoReps, 1, 5, (n) => { evoReps = n; save("evoReps", n) })),
       field("Generations", "At most this many in a row.", stepper("evo-gens", evoGens, 1, 50, (n) => { evoGens = n; save("evoGens", n) }, notEvolve), notEvolve),
-      field("Spend up to", `More from here, on top of the ${usd(E.spentUsd)} spent so far. Checked before each generation, so the last one can go a little over.`,
+      field("Spend up to", `More, on top of the ${usd(E.spentUsd)} spent so far.`,
         el("label", { class: "money" }, el("span", { text: "$" }), more), notEvolve)),
     // Whatever the mode: the same note, so choosing one doesn't move the page.
     dirty
@@ -4034,13 +4213,13 @@ function evoRun(E) {
 }
 /** The Run card alone, after a choice in it: same size in every mode, focus kept on the chosen one. */
 function paintRun() {
-  const had = document.activeElement?.closest?.(".modes")
+  const had = document.activeElement?.closest?.(".evo-modes")
   const fresh = swapEvo("evo-run", evoRun)
-  if (had) fresh?.querySelector(".mode[aria-checked=true]")?.focus()
+  if (had) fresh?.querySelector(".evo-modes [aria-checked=true]")?.focus()
 }
 function evoEstimateText(E, est) {
   if (est === null) return [el("span", { class: "hint", text: "The cost shows once the genome has a score." })]
-  return [el("span", { class: "hint", text: evoMode === "evolve" ? "Up to about" : "About" }), el("b", { class: "mono", text: usd(est) })]
+  return [el("span", { class: "hint", text: evoMode === "evolve" ? "Up to about" : "About" }), el("b", { text: usd(est) })]
 }
 function paintEvoEstimate() {
   const n = $("evo-est")
@@ -4051,14 +4230,28 @@ function evoOutput(E) {
   const j = E.job
   const running = evoRunning(E)
   const args = j ? ["zero", ...(j.request.kind === "bench" ? ["bench"] : [j.request.kind])].join(" ") : ""
-  const log = el("div", { class: "log", id: "evo-log", role: "log", "aria-live": "off" },
+  const log = el("div", { class: `log${E.log.length ? "" : " empty"}`, id: "evo-log", role: "log", "aria-live": "off" },
     E.log.length ? E.log.map((l) => logLine(l.line))
-      : el("div", { class: "log-empty" }, el("b", { text: "Nothing has run since zero started." }), "Start a run and its output streams here, line by line."))
+      : el("div", { class: "log-empty", text: "Nothing has run since zero started. A run's output streams here, line by line." }))
   return el("section", { class: "card evo-out" },
     el("div", { class: "card-head" },
-      el("div", {}, el("h2", { text: "Output" }), el("p", { class: "hint", text: j ? `${EVO_KINDS[j.request.kind].label} · ${{ running: "running", stopping: "stopping", done: "finished", failed: "failed", stopped: "stopped" }[j.state]} · ${args}` : "The live output of the current or last run." })),
+      el("div", { class: "evo-out-title" }, el("h2", { text: "Output" }),
+        j ? el("span", { class: "hint", text: `${EVO_KINDS[j.request.kind].label} · ${{ running: "running", stopping: "stopping", done: "finished", failed: "failed", stopped: "stopped" }[j.state]}` }) : null,
+        j ? el("code", { class: "file-chip", text: args }) : null),
       running ? el("button", { class: "btn btn-quiet btn-xs", type: "button", disabled: j.state === "stopping", onclick: stopEvo }, j.state === "stopping" ? "Stopping…" : "Stop") : null),
     log)
+}
+
+/** Overview's last few generations, with a way to all of them. */
+function evoLatest(E) {
+  const last = E.attempts.slice(-3).reverse()
+  return el("section", { class: "card" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Latest generations" }), el("p", { class: "hint", text: "Open one to see what the improver tried, why, and what the benchmark said." })),
+      E.attempts.length > last.length ? el("button", { class: "btn btn-quiet btn-xs", type: "button", onclick: () => evoGo("history") }, `See all ${E.attempts.length}`) : null),
+    last.length === 0
+      ? el("div", { class: "evo-empty" }, el("b", { text: "No generations yet." }), "Run one: the first measures the genome as it is, then tries to beat it.")
+      : el("ol", { class: "attempts" }, last.map((a) => evoAttempt(E, a))))
 }
 
 function evoHistory(E) {
@@ -4079,7 +4272,7 @@ function evoHistory(E) {
 }
 function evoAttempt(E, a) {
   const guard = a.childScore === null
-  const verdict = a.accepted ? "Kept" : guard ? "Stopped by a guard" : "Turned down"
+  const verdict = a.accepted ? "Kept" : guard ? "Guard" : "Turned down"
   const pc = judgedCost(E, a.parentId, a.at)
   const cc = guard ? null : judgedCost(E, a.childId, a.at)
   const dScore = guard ? null : a.childScore - a.parentScore
@@ -4088,20 +4281,21 @@ function evoAttempt(E, a) {
   const d = el("details", { class: `attempt ${a.accepted ? "kept" : guard ? "guard" : "down"}`, id: `evo-att-${a.generation}`, open: evoOpen.has(a.generation) },
     el("summary", {},
       el("span", { class: "gen", text: `#${a.generation}` }),
-      el("span", { class: "att-main" }, el("span", { class: "verdict", text: verdict }), el("span", { class: "att-sum", text: a.summary || "No summary." })),
+      el("span", { class: "verdict", text: verdict, title: guard ? "Stopped by a guard before it was measured" : null }),
+      el("span", { class: "att-sum", text: a.summary || "No summary." }),
       el("span", { class: "att-nums" },
         guard ? el("span", { class: "delta", text: "not measured" })
-          : [Math.abs(dScore) < 0.0005 ? delta(0, "score =") : delta(dScore, `${dScore > 0 ? "+" : ""}${(dScore * 100).toFixed(1)} pts`, dScore > 0),
-            dCost === null ? null : delta(dCost, dCost === 0 ? "cost =" : `${dCost > 0 ? "+" : ""}${dCost}% cost`, dCost < 0)],
+          : [Math.abs(dScore) < 0.0005 ? delta(0, "same score") : delta(dScore, `${dScore > 0 ? "+" : ""}${(dScore * 100).toFixed(1)} pts`, dScore > 0),
+            dCost === null ? null : delta(dCost, dCost === 0 ? "same cost" : `${dCost > 0 ? "+" : "−"}${Math.abs(dCost)}% cost`, dCost < 0)],
         el("span", { class: "when", text: `${ago(a.at)} ago`.replace("now ago", "just now"), title: new Date(a.at).toLocaleString() }))),
     el("div", { class: "att-body" },
       el("dl", {},
         a.hypothesis ? [el("dt", { text: "Why it tried this" }), el("dd", { text: a.hypothesis })] : null,
         el("dt", { text: "Verdict" }), el("dd", { text: a.reason }),
-        el("dt", { text: "Score" }), el("dd", { class: "mono", text: `${pct(a.parentScore)}% → ${guard ? "—" : `${pct(a.childScore)}%`}` }),
-        el("dt", { text: "Benchmark cost" }), el("dd", { class: "mono", text: `${pc === null ? "—" : usd(pc)} → ${cc === null ? "—" : usd(cc)}` }),
+        el("dt", { text: "Score" }), el("dd", { class: "num", text: `${pct(a.parentScore)}% → ${guard ? "—" : `${pct(a.childScore)}%`}` }),
+        el("dt", { text: "Benchmark cost" }), el("dd", { class: "num", text: `${pc === null ? "—" : usd(pc)} → ${cc === null ? "—" : usd(cc)}` }),
         el("dt", { text: "Files" }), el("dd", {}, a.files.length ? a.files.map((f) => el("code", { class: "file-chip", text: f })) : el("span", { class: "hint", text: "None" })),
-        el("dt", { text: "Improver cost" }), el("dd", { class: "mono", text: usd(a.improverCostUsd) }),
+        el("dt", { text: "Improver cost" }), el("dd", { class: "num", text: usd(a.improverCostUsd) }),
         a.commit ? [el("dt", { text: "Commit" }), el("dd", {}, el("code", { class: "file-chip", text: a.commit.slice(0, 10), title: a.commit }))] : null)))
   d.addEventListener("toggle", () => (d.open ? evoOpen.add(a.generation) : evoOpen.delete(a.generation)))
   return d
@@ -4110,6 +4304,8 @@ function evoAttempt(E, a) {
 function openAttempt(gen) {
   evoOpen.add(gen)
   evoFilter = "all"
+  evoTab = "history"
+  save("evoTab", evoTab)
   paintEvo()
   const n = $(`evo-att-${gen}`)
   n?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" })
@@ -4125,13 +4321,13 @@ function evoGenome(E) {
   return el("section", { class: "card evo-genome", id: "evo-genome" },
     el("div", { class: "card-head" },
       el("div", {}, el("h2", { text: "Current genome" }),
-        el("p", { class: "hint", text: "What generations change: the settings below and three instruction files, all in genome/ and versioned in git." })),
+        el("p", { class: "hint", text: "What generations change: these settings and three instruction files, all in genome/ and versioned in git." })),
       el("code", { class: "file-chip", text: g.id, title: "The genome's id: a hash of all four files" })),
     el("dl", { class: "knobs" }, EVO_KNOBS.map(([k, label, help, show]) =>
-      el("div", { class: "knob" }, el("dt", { text: label }), el("dd", { text: show ? show(g.knobs[k]) : String(g.knobs[k]) }), el("div", { class: "row-help", text: help })))),
+      el("div", { class: "knob", title: help }, el("dt", { text: label }), el("dd", { text: show ? show(g.knobs[k]) : String(g.knobs[k]) })))),
     el("div", { class: "files" },
       el("div", { class: "file-tabs", role: "tablist", "aria-label": "Genome files" },
-        EVO_FILES.map(([f, name]) => el("button", { type: "button", role: "tab", "aria-selected": String(f === file[0]), onclick: () => { evoFile = f; swapEvo("evo-genome", evoGenome)?.querySelector("[aria-selected=true]")?.focus() } }, name))),
+        EVO_FILES.map(([f, name]) => el("button", { type: "button", role: "tab", "aria-selected": String(f === file[0]), onclick: () => { evoFile = f; swapEvo("evo-genome", evoGenome)?.querySelector(".file-tabs [aria-selected=true]")?.focus() } }, name))),
       el("p", { class: "hint", text: `${file[2]} ${text.trim().split("\n").length} lines.` }),
       el("pre", { class: "file-text", tabindex: 0, text: text.trim() || "(empty)" })),
     el("p", { class: "hint evo-uses" }, el("span", { class: `pill${on ? "" : " off"}` }, el("i"), on ? "In your threads" : "Off for threads"),
@@ -4141,20 +4337,23 @@ function evoGenome(E) {
 function evoBench(E) {
   const now = evoNow(E)
   const res = new Map((now?.results ?? []).map((r) => [r.id, r]))
-  const firstLine = (p) => p.split(/\n\s*\n/)[0].replace(/`/g, "").replace(/\s+/g, " ").trim()
+  const firstLine = (p) => p.split(/\n\s*\n/)[0].replace(/`/g, "").replace(/^#+\s*/, "").replace(/\s+/g, " ").trim()
   return el("section", { class: "card" },
-    el("h2", { text: "Benchmark" }),
-    el("p", { class: "hint", text: `${E.tasks.length} small programming tasks. Each has hidden tests the solver never sees; the score is the share of them passed.` }),
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Benchmark" }),
+        el("p", { class: "hint", text: `${E.tasks.length} small programming tasks. Each has hidden tests the solver never sees; the score is the share of them passed.` })),
+      now ? el("span", { class: "pill" }, el("i"), `${now.solved} of ${now.tasks} solved`) : null),
     el("ul", { class: "tasks" }, E.tasks.map((t) => {
       const r = res.get(t.id)
       const full = r && r.passed === r.total
-      return el("li", {},
-        el("details", {},
-          el("summary", {},
-            el("span", { class: "task-id mono", text: t.id }),
-            r ? el("span", { class: "task-bar", title: `${r.passed} of ${r.total} hidden cases passed` }, el("span", { style: `width:${(r.passed / Math.max(1, r.total)) * 100}%`, class: full ? "full" : "" })) : el("span", { class: "task-bar" }),
-            el("span", { class: "task-nums mono", text: r ? `${r.passed}/${r.total} · ${usd(r.costUsd / (now.reps ?? 1))}` : "not run" })),
-          el("p", { class: "task-prompt", text: firstLine(t.prompt) })))
+      const about = firstLine(t.prompt)
+      return el("li", { class: "task" },
+        el("div", { class: "task-text" },
+          el("span", { class: "task-id", text: t.id }),
+          el("span", { class: "task-prompt", text: about, title: about })),
+        r ? el("span", { class: "task-bar", title: `${r.passed} of ${r.total} hidden cases passed` }, el("span", { style: `width:${(r.passed / Math.max(1, r.total)) * 100}%`, class: full ? "full" : "" })) : el("span", { class: "task-bar" }),
+        el("span", { class: "task-nums", text: r ? `${r.passed}/${r.total}` : "not run" }),
+        el("span", { class: "task-cost", text: r ? usd(r.costUsd / (now.reps ?? 1)) : "" }))
     })))
 }
 
@@ -4166,17 +4365,18 @@ function evoMemory(E) {
       el("ul", { class: "memory" }, [0, 1].map(() => el("li", {}, el("span", { class: "skel", style: "width:70%;height:10px" })))))
   }
   const live = E.memory.filter((m) => !m.retired)
-  return el("section", { class: "card" },
-    el("h2", { text: "Memory" }),
-    el("p", { class: "hint", text: "Kept changes singularity stored. Before each generation it hands the improver the one most like the job at hand." }),
+  return el("section", { class: "card evo-memory" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", { text: "Memory" }),
+        el("p", { class: "hint", text: "Kept changes singularity stored. Before each generation it hands the improver the one most like the job at hand." })),
+      E.memory.length ? el("span", { class: "pill" }, el("i"), `${live.length} in use${E.memory.length > live.length ? ` · ${E.memory.length - live.length} retired` : ""}`) : null),
     E.memory.length === 0
       ? el("div", { class: "evo-empty" }, "Nothing stored yet. Each kept generation is stored here.")
       : el("ul", { class: "memory" }, E.memory.map((m) =>
         el("li", { class: m.retired ? "retired" : "" },
-          el("span", { class: "mem-title", text: m.title || m.task }),
-          el("code", { class: "file-chip", text: m.commit.slice(0, 7), title: m.commit }),
-          m.retired ? el("span", { class: "hint", text: "retired" }) : null))),
-    E.memory.length ? el("p", { class: "hint", text: `${live.length} in use${E.memory.length > live.length ? `, ${E.memory.length - live.length} retired` : ""}.` }) : null)
+          el("span", { class: "mem-title", text: m.title || m.task, title: m.title || m.task }),
+          m.retired ? el("span", { class: "hint", text: "retired" }) : null,
+          el("code", { class: "file-chip", text: m.commit.slice(0, 7), title: m.commit })))))
 }
 
 async function startEvo() {
@@ -4388,6 +4588,8 @@ function connect() {
   on["settings"] = (data) => { S.settings = data }
   on["limits"] = (data) => { S.limits = data; paintMeter() }
   on["commands"] = ({ threadId, commands }) => { S.commands.set(threadId, commands) }
+  // The desktop app couldn't do something the page asked of the OS (open a link in VS Code, a folder).
+  on["notice"] = ({ text, error }) => toast(text, Boolean(error))
   // Claude Code said which models it offers: the menus have them from the next time they open.
   on["providers"] = (data) => {
     S.providers = data
@@ -4404,6 +4606,7 @@ function connect() {
     const log = $("evo-log")
     if (log) {
       log.querySelector(".log-empty")?.remove()
+      log.classList.remove("empty")
       const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40
       log.append(logLine(entry.line))
       if (stick) log.scrollTop = log.scrollHeight
@@ -4536,7 +4739,6 @@ function newThread() {
   if (pid) go(`#/new/${pid}`)
   else addProject()
 }
-$("new-thread").addEventListener("click", newThread)
 $("open-palette").addEventListener("click", (e) => { e.preventDefault(); openPalette() })
 $("open-keys").addEventListener("click", () => openKeys())
 /** Every key zero answers to, grouped, in one sheet: opened with ?, from the palette, or the sidebar. */
