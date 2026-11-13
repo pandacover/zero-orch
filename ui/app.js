@@ -3688,6 +3688,8 @@ const SETTINGS_SECTIONS = [
   ["storage", "Storage", '<ellipse cx="8" cy="4" rx="5.5" ry="2"/><path d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2"/>']
 ]
 let settingsTab = load("settingsTab", "providers")
+/** Claude Code's and Codex's versions as the backend last said, so a repaint shows them at once. */
+let providerVersions = null
 function openSettings() {
   paintSettings()
   const d = $("settings")
@@ -3751,6 +3753,51 @@ function paintSettings() {
       el("span", { class: "row-end" }, s[p].enabled ? pill(ps?.available, "Ready", "Unavailable") : null,
         sw(() => s[p].enabled, (v) => (s[p].enabled = v), `${providerLabel(p)} on`)))
   }
+  /**
+   * The program a provider runs (Claude Code, the Codex CLI): its version, and an Update button when a newer
+   * one is out (src/app/ProviderUpdates.ts). The last answer paints at once; the backend's fills it in after.
+   */
+  const versionRow = (id, name) => {
+    const help = el("div", { class: "row-help" })
+    const end = el("span", { class: "row-end" })
+    const btn = (text, primary, onclick) => el("button", { class: `btn ${primary ? "btn-primary" : "btn-quiet"} btn-xs`, type: "button", text, onclick })
+    const paint = (v) => {
+      if (!v) {
+        help.textContent = "Looking for a newer version…"
+        return end.replaceChildren()
+      }
+      const now = v.current ? `${v.current}, ${v.updated ? "installed from here" : "as zero ships it"}.` : "Not in this copy of zero."
+      const news = v.updating ? "Updating…" : v.latest === null ? `Couldn't look for a newer one: ${v.error ?? "no answer"}` : v.newer ? `${v.latest} is out.` : "Up to date."
+      help.textContent = `${now} ${news}`
+      end.replaceChildren(
+        v.updating ? Object.assign(btn("Updating…", false), { disabled: true })
+        : v.newer ? btn(`${v.current ? "Update" : "Install"} to ${v.latest}`, true, async (e) => {
+          const b = e.currentTarget
+          b.disabled = true
+          b.textContent = "Updating…"
+          help.textContent = `${now} Downloading ${name} ${v.latest}; this can take a minute.`
+          try {
+            const r = await api("POST", `providers/${id}/update`, {})
+            providerVersions = { ...providerVersions, ...r }
+            paint(r[id])
+            toast(`${name} ${r[id].current} is installed. ${id === "claude" ? "Each thread moves to it at its next message." : "Codex turns run it from now on."}`)
+          } catch (err) { fail(err); paint(v) }
+        })
+        : btn("Look again", false, async (e) => {
+          e.currentTarget.disabled = true
+          try {
+            providerVersions = await api("GET", "providers/versions/fresh")
+            paint(providerVersions[id])
+          } catch (err) { fail(err); paint(v) }
+        }))
+    }
+    paint(providerVersions?.[id])
+    askVersions().then((all) => paint(all[id]), (err) => { if (!providerVersions) help.textContent = `Couldn't look for a newer version: ${err.message}` })
+    return el("div", { class: "row" }, el("div", {}, el("div", { class: "row-label", text: name }), help), end)
+  }
+  /** One look per paint, shared by the rows that show versions. */
+  let asked
+  const askVersions = () => asked ??= api("GET", "providers/versions").then((v) => (providerVersions = v))
   const copyBtn = (label, text) => el("button", { class: "btn btn-quiet btn-xs", type: "button", text: label, onclick: async (e) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -3824,9 +3871,11 @@ function paintSettings() {
         "Through the Claude Agent SDK, signed in the way Claude Code is on this machine.",
         row("On", "Off stops new turns; threads stay.", sw(() => s.claude.enabled, (v) => (s.claude.enabled = v), "Claude on")),
         row("Model for new threads", "Each thread can switch from its composer.", sel((st?.models ?? [s.claude.model]).map((m) => [m, modelName(m)]), () => s.claude.model, (v) => (s.claude.model = v), "Model")),
-        row("Effort for new threads", "How hard Claude thinks each step. Higher is slower and costs more.", sel(EFFORTS.claude, () => s.claude.effort, (v) => (s.claude.effort = v), "Effort"))),
+        row("Effort for new threads", "How hard Claude thinks each step. Higher is slower and costs more.", sel(EFFORTS.claude, () => s.claude.effort, (v) => (s.claude.effort = v), "Effort")),
+        versionRow("claude", "Claude Code")),
       group("More providers", "Their models join the model menu, grouped by provider. Switching a thread to another provider starts a new session.",
         other("codex", "OpenAI's Codex, signed in as the Codex CLI is. Runs in its own sandbox and can't stop to ask."),
+        s.codex.enabled ? versionRow("codex", "Codex CLI") : null,
         other("ollama", "Models on this machine through Ollama, as plain chat: no tools."))
     ],
     threads: () => [

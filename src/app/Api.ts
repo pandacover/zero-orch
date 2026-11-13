@@ -12,7 +12,8 @@ import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, remov
 import { makeEvolution } from "./Evolution.ts"
 import { createBranch, createWorktree, initRepo, listBranches, samePath, switchBranch, worktreeOf } from "./Branches.ts"
 import { fileDiff, gitView, listFiles, parseAction, pendingChange, runAction } from "./GitInfo.ts"
-import { commitMessage, loadClaudeModels } from "./providers/Claude.ts"
+import { commitMessage, loadClaudeModels, relistClaudeModels } from "./providers/Claude.ts"
+import { UPDATABLE, type Updatable, update, versions } from "./ProviderUpdates.ts"
 import { type Access, ACCESSES, compactionOffered, metaOf, type Project, type ProviderId, type Settings } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
@@ -51,6 +52,7 @@ export interface Api {
 }
 
 const isProvider = (x: unknown): x is ProviderId => x === "claude" || x === "codex" || x === "ollama"
+const isUpdatable = (x: unknown): x is Updatable => (UPDATABLE as ReadonlyArray<unknown>).includes(x)
 const isAccess = (x: unknown): x is Access => (ACCESSES as ReadonlyArray<unknown>).includes(x)
 const reply = (status: number, body: unknown): Reply => ({ status, body })
 const error = (status: number, message: string): Reply => ({ status, body: { error: message } })
@@ -108,6 +110,17 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
     if (m === "GET" && parts[0] === "search") return reply(200, store.search(decodeURIComponent(parts[1] ?? "")))
     if (m === "GET" && parts[0] === "bootstrap") {
       return reply(200, { settings: store.settings(), projects: store.projects(), threads: store.threads(), providers: await providers(), home: store.home, zeroRoot: root, limits: threads.limits() })
+    }
+    // Claude Code's and Codex's versions, and the newest out: GET providers/versions (fresh: GET providers/versions/fresh).
+    if (m === "GET" && parts[0] === "providers" && parts[1] === "versions") return reply(200, await versions(parts[2] === "fresh"))
+    // Install the newest beside zero; sessions started from now on run it.
+    if (m === "POST" && parts[0] === "providers" && isUpdatable(parts[1]) && parts[2] === "update") {
+      const id = parts[1]
+      const done = await update(id).then((v) => v, (e: unknown) => e instanceof Error ? e.message : String(e))
+      if (typeof done === "string") return error(502, done)
+      // A newer Claude Code may offer newer models: the menus take them once it has said.
+      if (id === "claude" && listModels) void relistClaudeModels().then(async (loaded) => { if (loaded) hub.send("providers", await providers()) })
+      return reply(200, { [id]: done })
     }
     if (m === "GET" && parts[0] === "providers") return reply(200, await providers())
 
