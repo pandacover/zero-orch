@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { cleanEnv } from "../../Proc.ts"
+import { codexExecutable } from "../ProviderUpdates.ts"
 import type { Provider, TurnEvent, TurnInput } from "./Provider.ts"
 import { keepOutput, short } from "./Provider.ts"
 
@@ -41,7 +42,8 @@ const statusOf = (item: ThreadItem, completed: boolean): "running" | "done" | "f
 }
 
 async function* turn(input: TurnInput): AsyncGenerator<TurnEvent> {
-  const codex = new Codex({ env: cleanEnv() })
+  // A newer Codex than the SDK's own, once one is installed from Settings.
+  const codex = new Codex(codexExecutable(cleanEnv()))
   const options = {
     workingDirectory: input.cwd,
     skipGitRepoCheck: true,

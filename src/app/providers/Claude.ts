@@ -15,6 +15,7 @@ import { z } from "zod"
 import { memoryHooks } from "../../Claude.ts"
 import { MODELS } from "../../Genome.ts"
 import { cleanEnv } from "../../Proc.ts"
+import { claudeExecutable } from "../ProviderUpdates.ts"
 import { inside, isMemoryRead } from "../../Policy.ts"
 import { type Access, ACCESSES, type Effort, isCompact, type UsageLimit } from "../Model.ts"
 import type { ModelLabel, Provider, SlashCommandInfo, ThreadTools, TurnEvent, TurnInput, Verdict } from "./Provider.ts"
@@ -57,7 +58,7 @@ export const loadClaudeModels = (): Promise<boolean> =>
     // A prompt that never comes: the session answers control requests, and sends nothing to a model.
     async function* nothing(): AsyncGenerator<SDKUserMessage> { await held }
     try {
-      const q = query({ prompt: nothing(), options: { abortController: abort, settingSources: [], persistSession: false, tools: [], env: cleanEnv() } })
+      const q = query({ prompt: nothing(), options: { abortController: abort, settingSources: [], persistSession: false, tools: [], env: cleanEnv(), ...claudeExecutable() } })
       const list = toLabels(await q.supportedModels())
       if (list.length) offered = list
       return list.length > 0
@@ -70,6 +71,12 @@ export const loadClaudeModels = (): Promise<boolean> =>
       abort.abort()
     }
   })()
+
+/** Ask again, as after Claude Code is updated: a newer one may offer newer models. */
+export const relistClaudeModels = (): Promise<boolean> => {
+  asking = undefined
+  return loadClaudeModels()
+}
 
 /** The model ids a thread can pick now. */
 export const claudeModels = (): Array<string> => (offered ? offered.map((m) => m.id) : CLAUDE_MODELS)
@@ -345,9 +352,12 @@ const end = (s: Session) => {
   s.reader?.inbox.end(new Error("Claude Code's session ended"))
 }
 
-/** The part of a turn's options a running session can't change: a change starts a new one. */
+/**
+ * The part of a turn's options a running session can't change: a change starts a new one. That
+ * includes which Claude Code runs it, so after an update each thread's next turn resumes on the new one.
+ */
 const configOf = (input: TurnInput): string =>
-  JSON.stringify([effortFor(input.model, input.settings.claude.effort) ?? null, input.instructions, input.threads !== undefined])
+  JSON.stringify([effortFor(input.model, input.settings.claude.effort) ?? null, input.instructions, input.threads !== undefined, claudeExecutable().pathToClaudeCodeExecutable ?? null])
 
 /** Whether a call may run, by the thread's access, asking the person when it says to. */
 const permit = (input: TurnInput): CanUseTool => async (tool, toolInput) => {
@@ -413,7 +423,9 @@ const open = (input: TurnInput, config: string): Session => {
       },
       // No background tasks: one would run on between turns, and its news start a turn no one reads.
       env: cleanEnv({ DISABLE_AUTO_COMPACT: undefined, DISABLE_COMPACT: undefined, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }),
-      ...(input.resume ? { resume: input.resume } : {})
+      ...(input.resume ? { resume: input.resume } : {}),
+      // A newer Claude Code than the SDK's own, once one is installed from Settings.
+      ...claudeExecutable()
     }
   })
   const s: Session = { q, config, cwd: input.cwd, model: input.model, id: undefined, send: inbox.push, reader: undefined, closed: false, idle: undefined, commands: undefined, commandsAsked: false }
@@ -711,7 +723,8 @@ const answer = async (prompt: string, system: string, model: string): Promise<st
         settingSources: [],
         persistSession: false,
         abortController: abort,
-        env: cleanEnv()
+        env: cleanEnv(),
+        ...claudeExecutable()
       }
     })
     for await (const m of messages as AsyncIterable<SDKMessage>) {
