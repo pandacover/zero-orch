@@ -761,8 +761,11 @@ const mid = matchMedia("(max-width: 1099px)")
 const app = $("app")
 S.sideOpen = narrow.matches ? false : !load("sideHidden", false)
 S.panelOpen = mid.matches ? false : load("gitOpen", false)
-S.sideW = load("sideWidth", 264)
-S.panelW = load("gitWidth", 340)
+/** The widths the person chose (kept), and the ones the window has room for now (S.sideW, S.panelW). */
+S.sideWant = load("sideWidth", 264)
+S.panelWant = load("gitWidth", 340)
+S.sideW = S.sideWant
+S.panelW = S.panelWant
 S.infoOpen = load("infoOpen", true)
 /** The card over a narrow thread: opened on purpose there, never kept. */
 S.infoOver = false
@@ -780,6 +783,7 @@ function setSide(open, persist = true) {
   S.sideOpen = open
   if (persist && !narrow.matches) save("sideHidden", !open)
   if (open && narrow.matches) S.panelOpen = false
+  clampWidths()
   applyShell()
   sideResized()
 }
@@ -791,6 +795,7 @@ function setPanel(open, persist = true) {
   S.panelOpen = open
   if (persist && !mid.matches) save("gitOpen", open)
   if (open && narrow.matches) S.sideOpen = false
+  clampWidths()
   applyShell()
   // Look again once it has slid open: repainting its content mid-slide would stall the animation.
   if (open && gitPanel && Date.now() - gitPanel.at > 10_000) setTimeout(loadGit, 260)
@@ -848,14 +853,16 @@ $("open-keys").innerHTML = I.keys
 const LIM = { side: [208, 420, 264], panel: [280, 560, 340] }
 function clampWidths() {
   const room = innerWidth - 420
-  S.sideW = Math.round(Math.max(LIM.side[0], Math.min(S.sideW, LIM.side[1], room - (S.panelOpen && !mid.matches ? S.panelW : 0))))
-  S.panelW = Math.round(Math.max(LIM.panel[0], Math.min(S.panelW, LIM.panel[1], mid.matches ? innerWidth - 40 : room - (S.sideOpen ? S.sideW : 0))))
+  S.sideW = Math.round(Math.max(LIM.side[0], Math.min(S.sideWant, LIM.side[1], room - (S.panelOpen && !mid.matches ? S.panelWant : 0))))
+  S.panelW = Math.round(Math.max(LIM.panel[0], Math.min(S.panelWant, LIM.panel[1], mid.matches ? innerWidth - 40 : room - (S.sideOpen ? S.sideW : 0))))
 }
 function sideResized() { if (S.route.name === "evolution" && S.evo) paintEvo() }
 function wireResize(handle, which) {
   const set = (w, persist = true) => {
-    if (which === "side") S.sideW = w; else S.panelW = w
+    if (which === "side") S.sideWant = w; else S.panelWant = w
     clampWidths()
+    // What the window had room for is what's kept: a drag past the limit doesn't remember the overshoot.
+    if (which === "side") S.sideWant = S.sideW; else S.panelWant = S.panelW
     applyShell()
     handle.setAttribute("aria-valuenow", String(which === "side" ? S.sideW : S.panelW))
     if (persist) save(which === "side" ? "sideWidth" : "gitWidth", which === "side" ? S.sideW : S.panelW)
@@ -1719,15 +1726,6 @@ function userNodes(item) {
   return out
 }
 
-/**
- * The working sign (drawn in app.css): a hairline orbit with a comet of light easing round it, slowing as it
- * comes over the top, about a softly breathing core. Only transforms and opacity move, so it keeps time while
- * the page is busy drawing.
- */
-const WORKING_GLYPH = '<span class="wk-halo"></span><span class="wk-ring"></span><span class="wk-arc"></span><span class="wk-head"></span><span class="wk-core"></span>'
-/** The working line's words, with a light passing over them: the words twice, the bright copy seen through a moving window. */
-const workingLabel = () => el("span", { class: "working-label" }, el("span", { class: "wk-text", text: "Working" }),
-  el("span", { class: "wk-shine", "aria-hidden": "true" }, el("span", { class: "wk-text", text: "Working" })))
 const COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>'
 const CHECK_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7"/></svg>'
 /** The row under a message that shows on hover: a copy button for `text()`, then any `extra` (a response's turn details). */
@@ -2867,7 +2865,6 @@ function paintQueue() {
   }
   tray.replaceChildren(...parts)
 }
-const PENCIL_SVG = I.pencil
 /** The working line's clock: m:ss since the turn began, each second while it shows. */
 function tickWorking() {
   const w = feed?.working
@@ -3463,7 +3460,6 @@ const BRANCH_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12
 const PLUS_PATHS = '<path d="M8 3.5v9M3.5 8h9"/>'
 const FOLDER_PATHS = '<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/>'
 const PR_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7M8.5 3 7 4.5 8.5 6"/>'
-const OUT_PATHS = '<path d="M9.5 2.5h4v4M13.5 2.5 8 8M6.5 3.5h-3v9h9v-3"/>'
 /** The one panel on screen (the open thread's), or null. */
 let gitPanel = null
 
@@ -3714,8 +3710,6 @@ const diffStat = ({ add, del }) => el("span", { class: "diff-stat", "aria-label"
 
 // ---------- out to the editor and the file manager (the desktop app only: a phone's would be the wrong machine) ----------
 const DESKTOP = location.protocol === "zero:"
-const CODE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5.5 4.5-3.5 3.5 3.5 3.5M10.5 4.5l3.5 3.5-3.5 3.5M9 2.5 7 13.5"/></svg>'
-const FOLDER_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/></svg>'
 /** Where a thread's work is: the worktree its agent moved to, else its worktree, else its project's folder. */
 const threadDir = (t, project) => {
   const m = S.open?.id === t.id ? S.open : t
