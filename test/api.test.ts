@@ -86,6 +86,23 @@ describe("the control plane's backend, without a transport", () => {
     expect(seen).toEqual(["thread"])
   })
 
+  it("starts a thread in the inbox, from this machine; settles it and brings it back without touching its age", async () => {
+    const projectId = ((await api.call("GET", "bootstrap")).body as { projects: Array<{ id: string }> }).projects[0]!.id
+    const t = (await api.call("POST", "threads", { projectId })).body as { id: string; settled: boolean; updatedAt: string; origin: { kind: string; device: string } }
+    expect(t.settled).toBe(false)
+    expect(t.origin.kind).toBe("local")
+    expect(t.origin.device.length).toBeGreaterThan(0)
+    // An origin a caller passes (remote access does) is the one kept.
+    const far = (await api.call("POST", "threads", { projectId }, { kind: "remote", device: "Chrome on Android" })).body as { origin: unknown }
+    expect(far.origin).toEqual({ kind: "remote", device: "Chrome on Android" })
+    const settled = (await api.call("PATCH", `threads/${t.id}`, { settled: true })).body as { settled: boolean; updatedAt: string }
+    expect(settled.settled).toBe(true)
+    expect(settled.updatedAt).toBe(t.updatedAt)
+    const back = (await api.call("PATCH", `threads/${t.id}`, { settled: false })).body as { settled: boolean; updatedAt: string }
+    expect(back.settled).toBe(false)
+    expect(back.updatedAt).toBe(t.updatedAt)
+  })
+
   it("lists a project's branches, and won't make a worktree from a branch that isn't there", async () => {
     const projectId = ((await api.call("GET", "bootstrap")).body as { projects: Array<{ id: string }> }).projects[0]!.id
     const b = await api.call("GET", `projects/${projectId}/branches`)

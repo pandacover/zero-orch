@@ -377,7 +377,8 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale, s
         if (raw === undefined) return json(res, 413, { error: "that request is too big" })
         try { body = raw.length ? JSON.parse(raw.toString("utf8")) : undefined } catch { return json(res, 400, { error: "the request body isn't JSON" }) }
       }
-      const r = await remote.call(m, rest, body)
+      // A thread started from here remembers the device: the paired browser, as it names itself.
+      const r = await remote.call(m, rest, body, { kind: "remote", device: deviceName(String(req.headers["user-agent"] ?? "")) })
       return json(res, r.status, r.body)
     }
     // An attachment: shown if it's an image, saved otherwise, never run.
@@ -484,9 +485,9 @@ export const withRemote = async (api: Api, { ui, home, tailnet = askTailscale, s
   const remote: Api = {
     ...api,
     subscribe,
-    call: async (method, path, body): Promise<Reply> => {
+    call: async (method, path, body, origin): Promise<Reply> => {
       const parts = path.split("/").filter(Boolean)
-      if (parts[0] !== "remote") return api.call(method, path, body)
+      if (parts[0] !== "remote") return api.call(method, path, body, origin)
       try {
         if (method === "GET" && parts.length === 1) return { status: 200, body: await status() }
         if (method === "POST" && parts[1] === "code" && parts.length === 2) {

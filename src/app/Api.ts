@@ -6,6 +6,7 @@
  * call it directly.
  */
 import * as NodeServices from "@effect/platform-node/NodeServices"
+import { hostname } from "node:os"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import * as Singularity from "../Singularity.ts"
 import { type Attachment, findAttachment, markersIn, MAX_ATTACHMENT_BYTES, removeAttachments, saveAttachment } from "./Attachments.ts"
@@ -14,7 +15,7 @@ import { createBranch, createWorktree, initRepo, listBranches, samePath, switchB
 import { fileDiff, gitView, listFiles, parseAction, pendingChange, runAction } from "./GitInfo.ts"
 import { commitMessage, loadClaudeModels, relistClaudeModels } from "./providers/Claude.ts"
 import { UPDATABLE, type Updatable, update, versions } from "./ProviderUpdates.ts"
-import { type Access, ACCESSES, compactionOffered, metaOf, type Project, type ProviderId, type Settings } from "./Model.ts"
+import { type Access, ACCESSES, compactionOffered, metaOf, type Origin, type Project, type ProviderId, type Settings } from "./Model.ts"
 import * as StoreModule from "./Store.ts"
 import { Store } from "./Store.ts"
 import { dirOf, gitDirOf, type Hub, makeThreads, PROVIDERS, worktreeRoot } from "./Threads.ts"
@@ -39,7 +40,11 @@ export interface Reply {
 export type Listener = (event: string, data: unknown) => void
 
 export interface Api {
-  readonly call: (method: string, path: string, body?: unknown) => Promise<Reply>
+  /**
+   * One request. `origin`: where it came from, kept on a thread it starts; without one it's zero's own
+   * window on this machine. Remote access (src/app/Remote.ts) names the paired device.
+   */
+  readonly call: (method: string, path: string, body?: unknown, origin?: Origin) => Promise<Reply>
   readonly upload: (name: string, mime: string, bytes: Uint8Array) => Reply
   readonly attachment: (id: string) => Attachment | undefined
   /** The settings as saved now; a change is also sent to subscribers as a `settings` event. */
@@ -104,7 +109,9 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
     return done.ok ? done.branch : error(409, done.error)
   }
 
-  const route = async (m: string, parts: ReadonlyArray<string>, body: Record<string, unknown>): Promise<Reply> => {
+  /** This machine, as a thread started in zero's own window remembers it. */
+  const here: Origin = { kind: "local", device: hostname() || "This computer" }
+  const route = async (m: string, parts: ReadonlyArray<string>, body: Record<string, unknown>, origin: Origin): Promise<Reply> => {
     // --- everything a page needs to start ---
     // Threads whose title or messages match: GET search/<the words, URI-encoded>.
     if (m === "GET" && parts[0] === "search") return reply(200, store.search(decodeURIComponent(parts[1] ?? "")))
@@ -186,13 +193,13 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
           if (typeof join === "string") {
             const found = await worktreeOf(project.path, join)
             if (!found.ok) return error(400, found.error)
-            return reply(201, threads.create(project, { ...choices(body), cwd: found.path, branch: found.branch }))
+            return reply(201, threads.create(project, { ...choices(body), cwd: found.path, branch: found.branch, origin }))
           }
           const made = await createWorktree(project.path, { base: String(base), branch: String(branch), root: worktreeRoot(store.home, project) })
           if (!made.ok) return error(400, made.error)
-          return reply(201, threads.create(project, { ...choices(body), cwd: made.path, branch: made.branch }))
+          return reply(201, threads.create(project, { ...choices(body), cwd: made.path, branch: made.branch, origin }))
         }
-        return reply(201, threads.create(project, choices(body)))
+        return reply(201, threads.create(project, { ...choices(body), origin }))
       }
       const thread = parts[1] ? store.thread(parts[1]) : undefined
       if (!thread) return error(404, "no such thread")
@@ -203,6 +210,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
           ...(typeof body["title"] === "string" ? { title: body["title"] } : {}),
           ...(typeof body["pinned"] === "boolean" ? { pinned: body["pinned"] } : {}),
           ...(body["seen"] === true ? { seen: true } : {}),
+          ...(typeof body["settled"] === "boolean" ? { settled: body["settled"] } : {}),
           ...choices(body)
         })
         return reply(200, metaOf(thread))
@@ -330,7 +338,7 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
       }
       if (m === "POST" && parts[2] === "stop") return threads.stop(thread.id) ? reply(202, { stopping: true }) : error(409, "this thread isn't working")
       if (m === "POST" && parts[2] === "permissions" && parts[3]) {
-        return threads.answer(thread.id, parts[3], body["allow"] === true)
+        return threads.answer(thread.id, parts[3], body["allow"] === true, body["always"] === true)
           ? reply(200, { answered: true })
           : error(409, "that request was already answered or the turn ended")
       }
@@ -354,10 +362,10 @@ export const makeApi = async ({ root, cli, blocked, listModels = false }: ApiOpt
   }
 
   return {
-    call: async (method, path, body) => {
+    call: async (method, path, body, origin) => {
       try {
         const b = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {}
-        return await route(method, path.split("/").filter(Boolean), b)
+        return await route(method, path.split("/").filter(Boolean), b, origin ?? here)
       } catch (e) {
         return error(500, String(e instanceof Error ? e.message : e))
       }
