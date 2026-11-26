@@ -1,4 +1,4 @@
-// The page's only way to the backend: three calls on `window.zero`, no Node.
+// The page's only way to the backend: a few calls on `window.zero`, no Node.
 // CommonJS because sandboxed preloads can't be ES modules.
 const { contextBridge, ipcRenderer } = require("electron")
 
@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld("zero", {
   call: (method, path, body) => ipcRenderer.invoke("call", method, path, body),
   /** A file's bytes: resolves to { status, body }, the saved attachment on success. */
   upload: (name, mime, bytes) => ipcRenderer.invoke("upload", name, mime, bytes),
+  /** Settings › Appearance: "system", "light" or "dark", for the window itself. */
+  theme: (pick) => ipcRenderer.invoke("theme", pick),
   /** Every live event, as (name, data). */
   on: (listener) => { ipcRenderer.on("event", (_e, event, data) => listener(event, data)) }
 })

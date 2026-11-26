@@ -4,72 +4,75 @@
   <meta charset="utf-8">
   <!-- On a phone (remote access): edge to edge, and the keyboard shrinks the page instead of covering the composer. -->
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#f2f2f2" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f5f5f4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e0e0e" media="(prefers-color-scheme: dark)">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="zero">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'">
   <title>zero</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='zero-bg' x1='8' y1='2' x2='56' y2='62' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%234f8dfb'/%3E%3Cstop offset='.5' stop-color='%232156e0'/%3E%3Cstop offset='1' stop-color='%230f2a8a'/%3E%3C/linearGradient%3E%3CradialGradient id='zero-sheen' cx='18' cy='10' r='40' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23fff' stop-opacity='.26'/%3E%3Cstop offset='1' stop-color='%23fff' stop-opacity='0'/%3E%3C/radialGradient%3E%3ClinearGradient id='zero-glyph' x1='32' y1='14' x2='32' y2='50' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23fff'/%3E%3Cstop offset='1' stop-color='%23dce7ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='15' fill='url(%23zero-bg)'/%3E%3Crect width='64' height='64' rx='15' fill='url(%23zero-sheen)'/%3E%3Crect x='.75' y='.75' width='62.5' height='62.5' rx='14.25' fill='none' stroke='%23fff' stroke-opacity='.22' stroke-width='1.5'/%3E%3Cg fill='none' stroke='url(%23zero-glyph)' stroke-linecap='round'%3E%3Cellipse cx='32' cy='32' rx='12.5' ry='16.5' stroke-width='5.5'/%3E%3Cpath d='M35.6 25.6 28.4 38.4' stroke-width='4.6'/%3E%3C/g%3E%3C/svg%3E">
+  <script src="theme.js"></script>
   <link rel="stylesheet" href="fonts.css">
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <div class="shell">
-    <!-- One sidebar toggle for open and closed, fixed in place: it never moves while the sidebar slides. -->
-    <button class="icon-btn side-toggle" id="side-toggle" type="button" aria-controls="side" aria-label="Hide sidebar" title="Hide sidebar">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M6 2.5v11"/></svg>
-    </button>
-    <aside class="side" id="side" aria-label="Projects and threads">
-      <div class="side-top">
-        <span aria-hidden="true"></span>
-        <a class="brand" href="#/" aria-label="zero home"><span class="brand-name">zero</span></a>
-        <span aria-hidden="true"></span>
+  <div class="app no-anim" id="app">
+    <!-- One toggle per sidebar, fixed in place: it never moves while its sidebar slides. The details card's sits left of Changes'. -->
+    <button class="ib tgl tgl-left" id="side-toggle" type="button" aria-controls="side" aria-label="Hide sidebar" data-kbd="Ctrl B"></button>
+    <button class="ib tgl tgl-info" id="info-toggle" type="button" aria-controls="info" aria-label="Show details" data-kbd="Ctrl I" hidden></button>
+    <button class="ib tgl tgl-right" id="panel-toggle" type="button" aria-controls="panel" aria-label="Show changes" data-kbd="Ctrl Alt B" hidden></button>
+
+    <aside class="side" id="side" aria-label="Threads">
+      <!-- The top row drags the window; the spot under the fixed toggle stays clickable (a no-drag box must be inside the drag box). -->
+      <div class="side-top drag"><span class="nodrag-left" aria-hidden="true"></span>
+        <a class="brand" href="#/" id="brand" aria-label="zero: new thread">zero</a>
+        <button class="ib" id="new-btn" type="button" aria-label="New thread" data-tip="New thread" data-kbd="Alt N"></button>
       </div>
-      <!-- Finding and adding: search (Ctrl K goes anywhere), then a project. A new thread is Alt+N, or a project's +. -->
-      <div class="side-actions">
-        <label class="side-act search" title="Search threads">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
-          <input id="search" type="search" placeholder="Search threads" aria-label="Search threads" autocomplete="off" spellcheck="false">
-          <button class="side-kbd go-kbd" id="open-palette" type="button" title="Go to any thread, project or place (Ctrl+K)">Ctrl K</button>
-        </label>
-        <button class="side-act side-act-icon" id="add-project" type="button" title="Add a project: a folder on this machine" aria-label="Add project">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/><path d="M8 7.25v3.5M6.25 9h3.5"/></svg>
-        </button>
-      </div>
-      <nav class="tree" id="tree"></nav>
+      <div class="list-head" id="list-head" hidden></div>
+      <div class="list" id="list" role="list"></div>
+      <nav class="side-nav" aria-label="Other threads">
+        <button class="nav-row" id="nav-working" type="button" aria-pressed="false"><span class="nav-label">Working</span><span class="nav-end"><i class="pulse" aria-hidden="true"></i><span class="n"></span></span></button>
+        <button class="nav-row" id="nav-settled" type="button" aria-pressed="false"><span class="nav-label">Settled</span><span class="nav-end"><span class="n"></span></span></button>
+      </nav>
       <div class="side-foot">
-        <a class="foot-link" href="#/evolution" data-route="evolution">Evolution</a>
-        <div class="foot-icons">
-          <button class="icon-btn foot-icon" id="open-settings" type="button" title="Settings" aria-label="Settings">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.1"/><path d="M6.9 1.75h2.2l.35 1.6a5 5 0 0 1 1.2.7l1.55-.5 1.1 1.9-1.2 1.1a5 5 0 0 1 0 1.4l1.2 1.1-1.1 1.9-1.55-.5a5 5 0 0 1-1.2.7l-.35 1.6H6.9l-.35-1.6a5 5 0 0 1-1.2-.7l-1.55.5-1.1-1.9 1.2-1.1a5 5 0 0 1 0-1.4l-1.2-1.1 1.1-1.9 1.55.5a5 5 0 0 1 1.2-.7z"/></svg>
-          </button>
-          <button class="icon-btn foot-icon" id="open-keys" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="3.75" width="12.5" height="8.5" rx="1.75"/><path d="M4.5 6.5h.01M7 6.5h.01M9.5 6.5h.01M12 6.5h-.5M5 9.5h6"/></svg>
-          </button>
-        </div>
+        <a class="nav-row foot-link" href="#/evolution" id="nav-evo"><span class="nav-label">Evolution</span></a>
+        <button class="ib" id="open-settings" type="button" aria-label="Settings" data-tip="Settings" data-kbd="Ctrl ,"></button>
+        <button class="ib" id="open-keys" type="button" aria-label="Keyboard shortcuts" data-tip="Keyboard shortcuts" data-kbd="?"></button>
       </div>
-      <div class="side-resize" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize · double-click to reset"></div>
+      <div class="resize resize-left" id="side-resize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" data-tip="Drag to resize · double-click to reset"></div>
     </aside>
+
+    <main class="main" id="main" tabindex="-1"></main>
+
+    <aside class="panel" id="panel" aria-label="Changes">
+      <div class="panel-head drag" id="panel-head"><span class="nodrag-right" aria-hidden="true"></span><b>Changes</b><span class="n" id="panel-count"></span></div>
+      <div class="panel-body" id="panel-body"></div>
+      <div class="resize resize-right" id="panel-resize" role="separator" aria-orientation="vertical" aria-label="Resize changes" tabindex="0" data-tip="Drag to resize · double-click to reset"></div>
+    </aside>
+
     <div class="scrim" id="scrim" hidden></div>
-    <main class="main" id="main" tabindex="-1"></main>  </div>
+    <!-- ?wco=1 in a headless check: stand-ins for the desktop window's minimize, maximize and close. -->
+    <div class="wco-bar" aria-hidden="true"><span>&#x2013;</span><span>&#x25A1;</span><span class="x">&#x2715;</span></div>
+  </div>
 
   <div class="toasts" id="toasts" aria-live="polite" popover="manual"></div>
 
   <dialog class="settings-dialog" id="settings" aria-labelledby="settings-title"></dialog>
 
-  <dialog class="palette" id="palette" aria-label="Go to"></dialog>
-  <dialog id="dialog">
+  <dialog class="dlg palette" id="palette" aria-label="Go to"></dialog>
+  <dialog class="dlg" id="dialog">
     <form method="dialog" id="dialog-form">
-      <h3 id="dialog-title"></h3>
-      <p id="dialog-text"></p>
-      <div id="dialog-body"></div>
-      <div class="dialog-actions">
-        <button class="btn btn-quiet" value="cancel" type="submit" formnovalidate>Cancel</button>
-        <button class="btn btn-primary" value="ok" id="dialog-ok" type="submit"></button>
+      <div class="dlg-h"><h2 id="dialog-title"></h2></div>
+      <div class="dlg-b">
+        <p id="dialog-text"></p>
+        <div id="dialog-body"></div>
+      </div>
+      <div class="dlg-f">
+        <button class="btn quiet" value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button class="btn ink" value="ok" id="dialog-ok" type="submit"></button>
       </div>
     </form>
   </dialog>

@@ -19,6 +19,7 @@ const el = (tag, attrs = {}, ...kids) => {
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c])
 const usd = (x) => (x < 0.01 && x > 0 ? `$${x.toFixed(4)}` : `$${x.toFixed(2)}`)
 const pct = (x) => (x * 100).toFixed(1)
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`
 const ago = (iso) => {
   const s = Math.max(0, (Date.now() - new Date(iso)) / 1000)
   if (s < 60) return "now"
@@ -34,12 +35,67 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
 const touchFirst = matchMedia("(hover: none) and (pointer: coarse)")
 /** This page came over remote access (ui/web.js), not in zero's own window (zero://). */
 const remote = location.protocol !== "zero:"
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform)
+/** A key chord as this machine names it: "Ctrl K" here, "⌘K" on a Mac. */
+const chord = (k) => MAC ? k.replace(/Ctrl ?/g, "⌘").replace(/Alt ?/g, "⌥").replace(/Shift ?/g, "⇧") : k
 /** What last pressed: "mouse", "pen" or "touch". */
 let lastPointer = "mouse"
 addEventListener("pointerdown", (e) => { lastPointer = e.pointerType || "mouse" }, true)
 
+// ---------- icons: 16px, 1.5 stroke, round ends ----------
+const P = (d, extra = "") => `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"${extra}>${d}</svg>`
+const I = {
+  sideL: P('<rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M6.25 2.5v11"/>'),
+  sideR: P('<rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M9.75 2.5v11"/>'),
+  compose: P('<path d="M13.5 8.75v3.5a1.75 1.75 0 0 1-1.75 1.75h-8A1.75 1.75 0 0 1 2 12.25v-8A1.75 1.75 0 0 1 3.75 2.5h3.5"/><path d="M11.4 2.35a1.45 1.45 0 0 1 2.05 2.05L8.6 9.25l-2.75.65.65-2.75z"/>'),
+  gear: P('<circle cx="8" cy="8" r="2.1"/><path d="M6.9 1.75h2.2l.35 1.6a5 5 0 0 1 1.2.7l1.55-.5 1.1 1.9-1.2 1.1a5 5 0 0 1 0 1.4l1.2 1.1-1.1 1.9-1.55-.5a5 5 0 0 1-1.2.7l-.35 1.6H6.9l-.35-1.6a5 5 0 0 1-1.2-.7l-1.55.5-1.1-1.9 1.2-1.1a5 5 0 0 1 0-1.4l-1.2-1.1 1.1-1.9 1.55.5a5 5 0 0 1 1.2-.7z"/>'),
+  keys: P('<rect x="1.75" y="3.75" width="12.5" height="8.5" rx="1.75"/><path d="M4.5 6.5h.01M7 6.5h.01M9.5 6.5h.01M12 6.5h-.5M5 9.5h6"/>'),
+  settle: P('<circle cx="8" cy="8" r="5.75"/><path d="m5.6 8.15 1.65 1.65 3.2-3.5"/>'),
+  unsettle: P('<path d="M5.75 4.25 3 7l2.75 2.75"/><path d="M3 7h6.75a3.25 3.25 0 0 1 0 6.5H8"/>'),
+  stop: P('<rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1.5" fill="currentColor" stroke="none"/>'),
+  up: P('<path d="M8 13V3.5M4 7.25 8 3.25l4 4"/>', ' stroke-width="1.75"'),
+  down: P('<path d="M8 3v9.5M4 8.75l4 4 4-4"/>'),
+  clip: P('<path d="M13.25 7.4 8.1 12.55a3.35 3.35 0 0 1-4.75-4.75l5.6-5.6a2.25 2.25 0 0 1 3.2 3.2l-5.6 5.6a1.15 1.15 0 0 1-1.6-1.6l5.1-5.1"/>'),
+  branch: P('<circle cx="4.5" cy="3.75" r="1.5"/><circle cx="4.5" cy="12.25" r="1.5"/><circle cx="11.5" cy="4.75" r="1.5"/><path d="M4.5 5.25v5.5M11.5 6.25v.25a2.75 2.75 0 0 1-2.75 2.75h-1.5A2.75 2.75 0 0 0 4.5 12"/>'),
+  chevD: P('<path d="m4.5 6.25 3.5 3.5 3.5-3.5"/>'),
+  chevR: P('<path d="m6.25 4.5 3.5 3.5-3.5 3.5"/>'),
+  back: P('<path d="M12.5 8h-9M7.25 4.25 3.5 8l3.75 3.75"/>'),
+  check: P('<path d="m3.5 8.5 3 3 6-7"/>'),
+  ask: P('<path d="M8 1.75 13 3.6v3.9c0 3.15-2.1 5.55-5 6.75-2.9-1.2-5-3.6-5-6.75V3.6z"/><path d="M8 5.5v3M8 10.75h.01"/>'),
+  alert: P('<path d="M7.13 2.75a1 1 0 0 1 1.74 0l5.4 9.5a1 1 0 0 1-.87 1.5H2.6a1 1 0 0 1-.87-1.5z"/><path d="M8 6.5v2.75M8 11.25h.01"/>'),
+  pencil: P('<path d="M10.6 2.9a1.5 1.5 0 0 1 2.12 0l.38.38a1.5 1.5 0 0 1 0 2.12L6 12.5l-3.25.75L3.5 10z"/>'),
+  spin: P('<path d="M8 2.25a5.75 5.75 0 1 0 5.75 5.75"/>'),
+  search: P('<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/>'),
+  x: P('<path d="M4.25 4.25l7.5 7.5M11.75 4.25l-7.5 7.5"/>'),
+  plus: P('<path d="M8 3.5v9M3.5 8h9"/>'),
+  folder: P('<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/>'),
+  folderPlus: P('<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/><path d="M8 7.25v3.5M6.25 9h3.5"/>'),
+  file: P('<path d="M4 1.75h5l3 3v9.5H4z"/><path d="M9 1.75v3h3"/>'),
+  term: P('<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="m4.75 6.25 2 1.75-2 1.75M8.5 10h3"/>'),
+  diff: P('<path d="M4 1.75h5l3 3v9.5H4z"/><path d="M8 6.25v3M6.5 7.75h3M6.5 11.25h3"/>'),
+  pr: P('<circle cx="4.5" cy="3.75" r="1.5"/><circle cx="4.5" cy="12.25" r="1.5"/><circle cx="11.5" cy="12.25" r="1.5"/><path d="M4.5 5.25v5.5M11.5 10.75V6.5a2 2 0 0 0-2-2H7.5M9 3 7.5 4.5 9 6"/>'),
+  trash: P('<path d="M2.75 4.5h10.5M6.25 4.5V3h3.5v1.5M4.25 4.5l.6 8.6a1 1 0 0 0 1 .9h4.3a1 1 0 0 0 1-.9l.6-8.6"/>'),
+  copy: P('<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.75a1.25 1.25 0 0 0-1.25-1.25h-5.5A1.25 1.25 0 0 0 2.5 3.75v5.5a1.25 1.25 0 0 0 1.25 1.25H5.5"/>'),
+  inbox: P('<path d="M1.75 8.5 3.5 3.25h9l1.75 5.25v3.75a1.5 1.5 0 0 1-1.5 1.5h-9.5a1.5 1.5 0 0 1-1.5-1.5z"/><path d="M1.75 8.5h3.5l1 1.75h3.5l1-1.75h3.5"/>'),
+  evo: P('<path d="M2 12.5 6 8l3 3 5-6.5"/><path d="M10.5 4.5H14V8"/>'),
+  open: P('<path d="M9.5 2.5h4v4M13.5 2.5 8 8M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3"/>'),
+  code: P('<path d="m5.5 4.5-3.5 3.5 3.5 3.5M10.5 4.5l3.5 3.5-3.5 3.5M9 2.5 7 13.5"/>'),
+  card: P('<rect x="1.75" y="3" width="12.5" height="10" rx="2"/><path d="M4.75 6.5h3.5M4.75 9.5h6.5"/>'),
+  desktop: P('<rect x="1.75" y="2.5" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 13.75h5M8 11v2.75"/>'),
+  phone: P('<rect x="4.25" y="1.75" width="7.5" height="12.5" rx="1.75"/><path d="M7.25 11.75h1.5"/>'),
+  link: P('<path d="M6.5 9.5 9.5 6.5M7 4.5l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7L10.7 8.2M9 11.5l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7L5.3 7.8"/>'),
+  pin: P('<path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/>'),
+  zap: P('<path d="M8.75 1.75 3.5 9h4l-.75 5.25L12 7H8z"/>'),
+  more: '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.5" cy="8" r="1.25"/></svg>'
+}
+const svgEl = (html, cls = "") => el("span", { class: `ico ${cls}`.trim(), "aria-hidden": "true", html })
+
 // ---------- state ----------
 const S = {
+  /** The sidebar's list: "inbox", "working" or "settled". It changes only when the person picks another. */
+  view: "inbox",
+  /** The thread's title is being renamed in the header. */
+  renaming: false,
   /** Threads where the person turned Compact off; it's on by default whenever it shows. */
   compactOff: new Set(),
   settings: null,
@@ -50,17 +106,13 @@ const S = {
   zeroRoot: "",
   open: null, // the thread on screen, with its items
   asking: new Set(), // threads waiting on an approval
-  collapsed: new Set(load("collapsed", [])),
   expanded: new Set(), // tool items showing output
-  query: "", // the sidebar's search
   route: { name: "home" },
   evo: null,
   /** The plan's usage windows as Claude last reported them ({ kind, status, used, resetsAt }). */
   limits: [],
   /** Each thread's session's slash commands (thread id → [{ name, description, hint }]), as its provider last said. */
   commands: new Map(),
-  /** What the sidebar's search found in threads' messages (zero.db's index): for the words `q`. */
-  hits: { q: "", list: [] },
   /** An item to bring into view once its thread is open (a search hit's). */
   jump: null
 }
@@ -89,10 +141,12 @@ function toast(text, error = false, { action = null, thread = null } = {}) {
     el("span", { class: "toast-text", text }))
   const close = () => { t.remove(); if (!box.children.length && box.matches(":popover-open")) box.hidePopover() }
   if (action) t.append(el("button", { class: "toast-cta", type: "button", onclick: () => { close(); action.run() } }, action.label))
+  while (box.children.length >= 3) box.firstElementChild.remove()
   box.append(t)
   // Shown afresh so it lands above anything in the top layer (an open modal); put away when empty.
   if (box.matches(":popover-open")) box.hidePopover()
   box.showPopover()
+  placeToasts()
   const ms = action ? 9000 : error ? 7000 : 3000
   let timer = setTimeout(close, ms)
   if (action) {
@@ -100,6 +154,25 @@ function toast(text, error = false, { action = null, thread = null } = {}) {
     t.addEventListener("pointerleave", () => { timer = setTimeout(close, 3000) })
   }
 }
+/**
+ * Toasts sit in the bottom right corner, 8px in. Where the widest would cover the composer, they wait above it
+ * instead; elsewhere they stay in the corner.
+ */
+function placeToasts() {
+  const box = $("toasts")
+  const col = document.querySelector(".dock > .col")
+  let bottom = 8
+  const w = box.offsetWidth
+  if (col && w && col.offsetParent) {
+    const c = col.getBoundingClientRect()
+    if (c.right - 1 > innerWidth - 8 - w - 8) bottom = Math.round(innerHeight - c.top + 8)
+  }
+  document.documentElement.style.setProperty("--toast-bottom", `${bottom}px`)
+}
+addEventListener("resize", () => placeToasts())
+/** The composer grows, an approval appears above it: toasts keep clear of it. */
+const dockWatch = new ResizeObserver(() => placeToasts())
+const watchDock = (node) => { dockWatch.disconnect(); dockWatch.observe(node); return node }
 /** A toast about a thread, with a button that opens it. */
 const threadToast = (threadId, text, error = false) =>
   toast(text, error, { thread: threadId, action: { label: "Open thread", run: () => go(`#/t/${threadId}`) } })
@@ -223,7 +296,7 @@ function actionSheet(title, actions) {
   const close = () => d.close()
   d.append(el("div", { class: "sheet-box" },
     el("div", { class: "sheet-title", text: title }),
-    actions.map((a) => el("button", { class: `sheet-item${a.danger ? " danger" : ""}`, type: "button", onclick: () => { close(); a.run() } }, a.label))),
+    actions.filter((a) => !a.disabled).map((a) => el("button", { class: `sheet-item${a.danger ? " danger" : ""}`, type: "button", onclick: () => { close(); a.run() } }, a.label))),
     el("button", { class: "sheet-item sheet-cancel", type: "button", onclick: close }, "Cancel"))
   d.addEventListener("click", (e) => { if (e.target === d) close() })
   d.addEventListener("close", () => d.remove())
@@ -237,13 +310,14 @@ function actionSheet(title, actions) {
  */
 let ctxMenu = null
 /** `anchor`: the button that opened it, if one did; the menu then opens left of `x` (the button's right edge). */
-function contextMenu(x, y, title, actions, anchor = null) {
+function contextMenu(x, y, title, actions, anchor = null, align = "end") {
   ctxMenu?.close()
   const back = document.activeElement
   const m = el("div", { class: "ctx-menu", role: "menu", "aria-label": title, popover: "auto" },
-    actions.map((a) => el("button", { class: `ctx-item${a.danger ? " danger" : ""}`, type: "button", role: "menuitem", tabindex: -1,
+    actions.map((a) => el("button", { class: `ctx-item${a.danger ? " danger" : ""}`, type: "button", role: "menuitem", tabindex: -1, disabled: a.disabled,
       // An icon column only when some item has an icon.
-      onclick: () => { close(); a.run() } }, a.icon ? icon(a.icon) : actions.some((b) => b.icon) ? el("span", { class: "ico" }) : null, el("span", { text: a.label }))))
+      onclick: () => { close(); a.run() } }, a.icon ? icon(a.icon) : actions.some((b) => b.icon) ? el("span", { class: "ico" }) : null, el("span", { class: "ctx-label", text: a.label }),
+      a.kbd && !touchFirst.matches ? el("span", { class: "k", text: chord(a.kbd) }) : null)))
   /** Put away: by a pick, a key, or the browser's light dismiss (a click elsewhere). Safe to run twice. */
   const close = () => {
     if (!m.isConnected) return
@@ -260,7 +334,7 @@ function contextMenu(x, y, title, actions, anchor = null) {
   m.addEventListener("toggle", (e) => { if (e.newState === "closed") close() })
   m.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return }
-    const items = [...m.querySelectorAll(".ctx-item")]
+    const items = [...m.querySelectorAll(".ctx-item:not(:disabled)")]
     const i = items.indexOf(document.activeElement)
     const to = e.key === "ArrowDown" ? (i + 1) % items.length : e.key === "ArrowUp" ? (i - 1 + items.length) % items.length
       : e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : -1
@@ -272,7 +346,7 @@ function contextMenu(x, y, title, actions, anchor = null) {
   m.showPopover()
   // Opens down and right of the pointer, flipped where that would leave the window.
   const w = m.offsetWidth, h = m.offsetHeight
-  m.style.left = `${Math.max(6, anchor || x + w > innerWidth - 6 ? x - w : x)}px`
+  m.style.left = `${Math.max(6, anchor ? (align === "start" ? Math.min(x, innerWidth - w - 6) : x - w) : x + w > innerWidth - 6 ? x - w : x)}px`
   // Under a button: flipped above it (not over it) where below would leave the window.
   const above = anchor ? anchor.getBoundingClientRect().top - 4 - h : y - h
   m.style.top = `${Math.max(6, y + h > innerHeight - 6 ? above : y)}px`
@@ -280,7 +354,7 @@ function contextMenu(x, y, title, actions, anchor = null) {
   addEventListener("blur", close)
   addEventListener("resize", close)
   addEventListener("scroll", close, true)
-  m.querySelector(".ctx-item")?.focus({ preventScroll: true })
+  m.querySelector(".ctx-item:not(:disabled)")?.focus({ preventScroll: true })
   ctxMenu = { node: m, close, anchor }
 }
 /**
@@ -340,6 +414,7 @@ addEventListener("focus", () => { markSeen(); renderSide() })
 
 async function route() {
   S.route = parseRoute()
+  S.renaming = false
   // Settings is a modal, not a page: an old #/settings link opens it over the home screen.
   if (S.route.name === "settings") {
     history.replaceState(null, "", "#/")
@@ -364,73 +439,264 @@ async function route() {
   renderMain()
 }
 
-// ---------- sidebar ----------
-function renderSide() {
-  const tree = $("tree")
-  // Searching shows only the threads whose title matches (or every thread of a project whose name does), all expanded.
-  const q = S.query.trim().toLowerCase()
-  const byProject = new Map(S.projects.map((p) => [p.id, []]))
-  // A thread that needs the person, or is working, moves up to those sections; one with unsent
-  // words in its reply box moves up to Drafts. Either way it isn't listed twice.
-  const inbox = inboxSections(q)
-  const drafted = draftedThreadIds(inbox.ids)
-  for (const t of S.threads) if (!drafted.has(t.id) && !inbox.ids.has(t.id)) byProject.get(t.projectId)?.push(t)
-  shownDrafted = [...drafted].sort().join(" ")
-  shownInbox = inbox.key
-  // The window's title counts what needs you, so the taskbar says so while you're elsewhere.
-  const waiting = S.threads.filter((t) => { const st = inboxState(t); return st && st !== "working" }).length
-  document.title = waiting ? `(${waiting}) zero` : "zero"
-  const hasThreads = new Set(S.threads.map((t) => t.projectId))
-  // Pinned threads first, each group newest first as S.threads is; a thread another started sits under it.
-  for (const [id, list] of byProject) byProject.set(id, nested(list.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))))
-  const shown = S.projects.flatMap((p) => {
-    const all = byProject.get(p.id) ?? []
-    if (!q || p.name.toLowerCase().includes(q)) return [[p, all]]
-    const hits = all.filter((t) => t.title.toLowerCase().includes(q))
-    return hits.length ? [[p, hits]] : []
-  })
-  const draftsSec = draftsSection(inbox.ids)
-  // Threads whose messages match (not their titles: those are listed above it already).
-  const listed = new Set([...inbox.ids, ...shown.flatMap(([, ts]) => ts.map((t) => t.id))])
-  const found = hitsSection(q, listed)
-  if (q && shown.length === 0 && !draftsSec && !inbox.nodes.length && !found) {
-    const looking = q.length >= 2 && S.hits.q !== q
-    return tree.replaceChildren(el("p", { class: "tree-empty", text: looking ? "Searching messages…" : `No threads match “${S.query.trim()}”.` }))
+/// ---------- sidebar: what needs you, what's working, what's settled ----------
+/**
+ * Whether the person is done with a thread for now (src/app/Model.ts, isSettled): said so, or a thread from
+ * before settling whose ended turn they've seen.
+ */
+const isSettled = (t) => t.settled ?? !t.unseen
+/**
+ * Where a thread stands: "ask" (waiting for an approval), "working", "failed" or "done" (its last turn ended
+ * so), "new" (nothing has run yet), or "settled". A running thread is never settled.
+ */
+const stateOf = (t) => {
+  if (t.status === "running") return S.asking.has(t.id) ? "ask" : "working"
+  if (isSettled(t)) return "settled"
+  if (t.unseen === "failed" || t.ended === "failed") return "failed"
+  if (t.unseen || t.ended) return "done"
+  return "new"
+}
+/** A turn ended that the person hasn't looked at: the thread on screen is seen as it ends. */
+const unread = (t) => !!t.unseen && S.open?.id !== t.id
+/** The order of the inbox: approvals, then errors, then finished turns, then new threads and drafts. */
+const INBOX_RANK = { ask: 0, failed: 1, done: 2, new: 3, settled: 3 }
+const projectName = (id) => S.projects.find((p) => p.id === id)?.name ?? ""
+const hasDraft = (t) => drafts.has(`t:${t.id}`)
+
+/**
+ * The three lists, as rows: { key, t?, draft?, href, rank, at }. The inbox holds what needs you and every
+ * thread with unsent words (a settled one too); Working, what's running; Settled, the rest.
+ */
+function lists() {
+  const inbox = [], working = [], settled = []
+  for (const t of S.threads) {
+    const st = stateOf(t)
+    const at = t.updatedAt
+    if (st === "working") working.push({ key: t.id, t, href: `#/t/${t.id}`, rank: 0, at })
+    else if (st === "ask" || st !== "settled" || hasDraft(t)) inbox.push({ key: t.id, t, href: `#/t/${t.id}`, rank: hasDraft(t) && st === "settled" ? 3 : INBOX_RANK[st], at: hasDraft(t) && st === "settled" ? drafts.get(`t:${t.id}`).at : at })
+    else settled.push({ key: t.id, t, href: `#/t/${t.id}`, rank: 0, at })
   }
-  tree.replaceChildren(...inbox.nodes, ...(draftsSec ? [draftsSec] : []), ...(found ? [found] : []), ...shown.map(([p, threads]) => {
-    const closed = !q && S.collapsed.has(p.id)
-    return el("section", { class: `proj${closed ? " closed" : ""}`, "data-id": p.id },
-      held(el("div", { class: "proj-head" },
-        el("button", { class: "proj-toggle", type: "button", "aria-expanded": String(!closed), title: p.path, onclick: () => toggleProject(p.id) },
-          el("span", { class: "proj-name", text: p.name })),
-        el("span", { class: "proj-actions" },
-          el("button", { class: "icon-btn", type: "button", title: `New thread in ${p.name}`, "aria-label": `New thread in ${p.name}`, onclick: () => go(`#/new/${p.id}`) }, "+"),
-          el("button", { class: "icon-btn proj-remove", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, onclick: () => removeProject(p) }, "×"))),
-        () => ({ title: p.name, actions: [
-          { label: "New thread", icon: PLUS_PATHS, run: () => go(`#/new/${p.id}`) },
-          { label: "Copy folder path", icon: COPY_PATHS, run: () => copyText(p.path, "Folder path copied.") },
-          { label: "Remove from zero", icon: TRASH_PATHS, danger: true, run: () => removeProject(p) }
-        ] })),
-      el("ul", { class: "threads", inert: closed },
-        threads.length === 0
-          // Every thread of it is up in Drafts: it still has threads, just none to list here.
-          ? (hasThreads.has(p.id) ? [] : el("li", { class: "none", text: "No threads yet" }))
-          : threads.map((t) => threadRow(t))))
-  }))
-  for (const a of document.querySelectorAll(".foot-link")) a.classList.toggle("active", a.dataset.route === S.route.name)
+  // A new thread's unsent words: a row of its own, back to its project's start page.
+  for (const [key, d] of drafts) {
+    if (!key.startsWith("new:")) continue
+    const pid = key.slice(4)
+    if (!S.projects.some((p) => p.id === pid)) { drafts.delete(key); continue }
+    inbox.push({ key, draft: { key, pid, ...d }, href: `#/new/${pid}`, rank: 3, at: d.at })
+  }
+  const order = (a, b) => a.rank - b.rank || Number(Boolean(b.t?.pinned)) - Number(Boolean(a.t?.pinned)) || b.at.localeCompare(a.at)
+  return { inbox: inbox.sort(order), working: working.sort(order), settled: settled.sort(order) }
 }
-/** The sidebar's "In messages": threads whose messages match the search, each with the words around the match. */
-function hitsSection(q, listed) {
-  if (!q || S.hits.q !== q) return null
-  const rows = S.hits.list.filter((h) => h.itemId && !listed.has(h.threadId)).map((h) => ({ h, t: threadMeta(h.threadId) })).filter((x) => x.t)
-  if (!rows.length) return null
-  return el("section", { class: "proj inbox hits", "aria-label": "In messages" },
-    el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: "In messages" }), el("span", { class: "inbox-count", text: String(rows.length) })),
-    el("ul", { class: "threads" }, rows.map(({ h, t }) => el("li", { class: "thread-row hit-row" },
-      el("a", { class: `thread-link hit-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, onclick: () => { S.jump = h.itemId } },
-        el("span", { class: "t", text: t.title }),
-        el("span", { class: "hit-snippet" }, ...marked(h.snippet)))))))
+
+/** The mark at the end of a row: what the thread needs, or that it's working. */
+function markFor(row) {
+  const mk = (cls, tip, html = "") => el("span", { class: `mark ${cls}`, title: tip, html })
+  if (row.draft) return mk("draft", "Unsent message", I.pencil)
+  const t = row.t, st = stateOf(t)
+  if (st === "ask") return mk("ask", "Waiting for your approval", I.ask)
+  if (st === "working") return mk("run", "Working", I.spin)
+  if (st === "failed" && t.unseen) return mk("failed", "Stopped on an error", I.alert)
+  if (st === "failed") return mk("failed", "Its last turn stopped on an error", I.alert)
+  if (unread(t)) return mk("unread", "Finished: not read yet")
+  if (hasDraft(t)) return mk("draft", "Unsent message", I.pencil)
+  return el("span", { class: "mark" })
 }
+/** The one action a row offers on hover, in its age's place: stop, bring back, discard a draft, or settle. */
+function rowAction(row) {
+  if (row.draft) return { icon: I.x, tip: "Discard draft", run: () => discardDraft(row.draft.key) }
+  const t = row.t, st = stateOf(t)
+  if (st === "working" || st === "ask") return { icon: I.stop, tip: "Stop", run: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail) }
+  if (st === "settled" && hasDraft(t)) return { icon: I.x, tip: "Discard draft", run: () => discardDraft(`t:${t.id}`) }
+  if (st === "settled") return { icon: I.unsettle, tip: "Back to the inbox", run: () => unsettle(t) }
+  return { icon: I.settle, tip: "Settle", kbd: "Alt S", run: (item) => settle(t, item) }
+}
+/** Settle a thread: it goes to Settled until a new message brings it back. Undo is a toast away. */
+function settle(t, item = null) {
+  if (t.status === "running") return
+  const doIt = () => {
+    patchMeta(t.id, { settled: true, unseen: undefined })
+    renderSide()
+    api("PATCH", `threads/${t.id}`, { settled: true }).then(
+      () => toast(`Settled “${t.title}”`, false, { action: { label: "Undo", run: () => unsettle(t, false) } }),
+      (e) => { patchMeta(t.id, { settled: false }); renderSide(); fail(e) })
+  }
+  if (item && !reduced) { item.classList.add("leaving"); setTimeout(doIt, 160) } else doIt()
+}
+function unsettle(t, say = true) {
+  patchMeta(t.id, { settled: false })
+  renderSide()
+  api("PATCH", `threads/${t.id}`, { settled: false }).then(() => { if (say) toast(`“${t.title}” is back in the inbox`) }, fail)
+}
+/** Change a thread's meta here at once (the server's thread event confirms it). `undefined` removes a field. */
+function patchMeta(id, patch) {
+  for (const m of [S.threads.find((x) => x.id === id), S.open?.id === id ? S.open : null]) {
+    if (!m) continue
+    for (const [k, v] of Object.entries(patch)) if (v === undefined) delete m[k]; else m[k] = v
+  }
+}
+
+/** A row's first line: its project, the thread that started it, its pull request, and a pin if it's pinned. */
+function rowWhere(row) {
+  if (row.draft) return [projectName(row.draft.pid), " · new thread"]
+  const t = row.t
+  const parent = t.parentId ? threadMeta(t.parentId) : null
+  return [
+    t.pinned ? el("span", { class: "pin", html: I.pin, title: "Pinned" }) : null,
+    projectName(t.projectId) || "removed project",
+    parent ? ` · ↳ ${parent.title}` : "",
+    t.pr ? ` · #${t.pr.number}` : ""
+  ]
+}
+function rowNode(row) {
+  const t = row.t
+  const active = t ? S.open?.id === t.id : location.hash === row.href
+  const working = t && t.status === "running" && !S.asking.has(t.id)
+  const item = el("div", { class: "item", role: "listitem", "data-key": row.key })
+  const tip = t ? [`${projectName(t.projectId)} / ${t.title}`, t.parentId ? `Started by “${threadMeta(t.parentId)?.title ?? "another thread"}”` : "", t.pr ? `PR #${t.pr.number} · ${PR_STATE_LABEL[String(t.pr.state).toLowerCase()] ?? t.pr.state}` : ""].filter(Boolean).join("\n")
+    : `New thread in ${projectName(row.draft.pid)}: ${row.draft.title}`
+  const link = el("a", { class: `row${active ? " active" : ""}${t && unread(t) ? " unread" : ""}`, href: row.href, "aria-current": active ? "page" : null, title: tip },
+    el("span", { class: "p" }, ...rowWhere(row).filter(Boolean)),
+    working ? el("span", { class: "age", "data-since": t.updatedAt, text: elapsed(t.updatedAt) }) : el("span", { class: "age", text: ago(row.at) }),
+    el("span", { class: "t", text: t ? t.title : row.draft.title }),
+    markFor(row))
+  item.append(link)
+  const act = rowAction(row)
+  if (act) {
+    const b = el("button", { class: "ib row-act", type: "button", "aria-label": `${act.tip}: ${t ? t.title : row.draft.title}`, "data-tip": act.tip, "data-kbd": act.kbd ?? null, html: act.icon })
+    b.addEventListener("click", (e) => { e.preventDefault(); act.run(item) })
+    item.append(b)
+  }
+  return held(item, () => t ? threadMenu(t) : { title: row.draft.title, actions: [{ label: "Discard draft", icon: I.trash, danger: true, run: () => discardDraft(row.draft.key) }] })
+}
+const EMPTY = {
+  inbox: () => S.projects.length
+    ? [I.inbox, "Nothing needs you", "Threads show here when they finish, ask before running something, or stop on an error."]
+    : [I.folder, "No projects yet", "Your threads show here once you've added a folder for zero to work in."],
+  working: () => [I.spin, "Nothing running", "Threads show here while zero works on them."],
+  settled: () => [I.settle, "Nothing settled yet", "Settle a thread when you're done with it. A new message brings it back."]
+}
+/** What the list last drew: an event that changes nothing in it doesn't redraw it. */
+let listSig = ""
+function renderSide() {
+  const all = lists()
+  const rows = all[S.view]
+  // The window's title counts what needs you, so the taskbar says so while you're elsewhere.
+  const waiting = S.threads.filter((t) => { const st = stateOf(t); return st === "ask" || (t.unseen && S.open?.id !== t.id) }).length
+  document.title = waiting ? `(${waiting}) zero` : "zero"
+  renderNav(all)
+  const list = $("list")
+  const sig = [S.view, S.open?.id ?? location.hash, ...rows.map((r) => {
+    const t = r.t
+    return t ? `${t.id}:${stateOf(t)}:${unread(t) ? 1 : 0}:${t.title}:${hasDraft(t) ? 1 : 0}:${t.pinned ? 1 : 0}:${t.pr?.number ?? ""}:${t.parentId ? threadMeta(t.parentId)?.title : ""}:${projectName(t.projectId)}:${ago(r.at)}`
+      : `${r.key}:${r.draft.title}:${ago(r.at)}`
+  })].join("|")
+  if (sig === listSig) return tickSide()
+  listSig = sig
+  const focusKey = document.activeElement?.closest?.(".item")?.dataset.key
+  const focusAct = document.activeElement?.classList.contains("row-act")
+  const top = list.scrollTop
+  if (!rows.length) {
+    const [glyph, head, words] = EMPTY[S.view]()
+    list.replaceChildren(el("div", { class: "list-empty" }, svgEl(glyph), el("b", { text: head }), el("span", { text: words }),
+      !S.projects.length && S.view === "inbox" ? el("button", { class: "btn sm", type: "button", onclick: addProject, html: `${I.folderPlus}Add project` }) : null))
+  } else list.replaceChildren(...rows.map(rowNode))
+  list.scrollTop = top
+  if (focusKey) {
+    const n = [...list.querySelectorAll(".item")].find((x) => x.dataset.key === focusKey)
+    ;(focusAct ? n?.querySelector(".row-act") : n?.querySelector(".row"))?.focus({ preventScroll: true })
+  }
+  const head = $("list-head")
+  head.hidden = S.view === "inbox"
+  if (S.view !== "inbox") {
+    head.replaceChildren(
+      el("button", { class: "ib", type: "button", "aria-label": "Back to the inbox", "data-tip": "Back to the inbox", "data-kbd": "Alt 1", html: I.back, onclick: () => setView("inbox") }),
+      el("b", { text: S.view === "working" ? "Working" : "Settled" }),
+      el("span", { class: "n", text: String(rows.length) }))
+  }
+  scrollEdges()
+}
+/** The working rows' clocks, each second. */
+function tickSide() {
+  for (const n of document.querySelectorAll("#list .age[data-since]")) n.textContent = elapsed(n.dataset.since)
+}
+setInterval(tickSide, 1000)
+let sideTimer = 0
+/** One repaint for a burst of keystrokes (a draft's words change the list). */
+const renderSideSoon = () => { if (!sideTimer) sideTimer = setTimeout(() => { sideTimer = 0; renderSide() }, 30) }
+const paintDraftsSoon = renderSideSoon
+const paintDrafts = renderSide
+/** Hairlines above and below the list show only while there's more that way. */
+function scrollEdges() {
+  const list = $("list"), side = $("side")
+  side.classList.toggle("more-above", list.scrollTop > 1)
+  side.classList.toggle("more-below", list.scrollTop + list.clientHeight < list.scrollHeight - 1)
+}
+$("list").addEventListener("scroll", scrollEdges, { passive: true })
+new ResizeObserver(scrollEdges).observe($("list"))
+function renderNav(all = lists()) {
+  const w = all.working.length, s = all.settled.length
+  const nw = $("nav-working"), ns = $("nav-settled")
+  nw.querySelector(".n").textContent = w ? String(w) : ""
+  ns.querySelector(".n").textContent = s ? String(s) : ""
+  nw.classList.toggle("live", w > 0)
+  nw.setAttribute("aria-pressed", String(S.view === "working"))
+  ns.setAttribute("aria-pressed", String(S.view === "settled"))
+  nw.dataset.tip = S.view === "working" ? "Back to the inbox" : `${plural(w, "thread")} running`
+  ns.dataset.tip = S.view === "settled" ? "Back to the inbox" : "Threads you're done with"
+  nw.dataset.kbd = S.view === "working" ? "Alt 1" : "Alt 2"
+  ns.dataset.kbd = S.view === "settled" ? "Alt 1" : "Alt 3"
+  const evo = $("nav-evo")
+  evo.classList.toggle("active", S.route.name === "evolution")
+  if (S.route.name === "evolution") evo.setAttribute("aria-current", "page"); else evo.removeAttribute("aria-current")
+}
+/** Show one of the lists. Picking the one that's showing (other than the inbox) goes back to the inbox. */
+function setView(v) {
+  S.view = S.view === v && v !== "inbox" ? "inbox" : v
+  listSig = ""
+  renderSide()
+  $("list").scrollTop = 0
+  scrollEdges()
+}
+$("nav-working").addEventListener("click", () => setView("working"))
+$("nav-settled").addEventListener("click", () => setView("settled"))
+/** The thread before or after `id` in the list on show (by `d`), or null. */
+function neighbour(id, d) {
+  const ids = lists()[S.view].filter((r) => r.t).map((r) => r.t.id)
+  const i = ids.indexOf(id)
+  if (i < 0) return ids[d > 0 ? 0 : ids.length - 1] ?? null
+  return ids[i + d] ?? null
+}
+
+/** `node`, with `open` on a long press or right-click. */
+const held = (node, open) => { onHold(node, open); return node }
+const pinThread = (t) => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail)
+/** What a right-click or long press on a thread offers (and the header's title menu). */
+const threadMenu = (t) => {
+  const st = stateOf(t)
+  const project = S.projects.find((p) => p.id === t.projectId)
+  const dir = threadDir(t, project)
+  return { title: t.title, actions: [
+    { label: "Rename", icon: I.pencil, kbd: "F2", run: () => { if (S.open?.id !== t.id) { S.renameNext = t.id; go(`#/t/${t.id}`) } else startRename() } },
+    st === "settled" ? { label: "Back to the inbox", icon: I.unsettle, run: () => unsettle(t) }
+      : { label: "Settle", icon: I.settle, kbd: "Alt S", disabled: t.status === "running", run: () => settle(t) },
+    t.status === "running" ? { label: "Stop", icon: I.stop, run: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail) } : null,
+    { label: t.pinned ? "Unpin" : "Pin to the top", icon: I.pin, run: () => pinThread(t) },
+    hasDraft(t) ? { label: "Discard draft", icon: I.x, run: () => discardDraft(`t:${t.id}`) } : null,
+    t.branch ? { label: "Copy branch name", icon: I.branch, run: () => copyText(t.branch, "Branch name copied.") } : null,
+    { label: "Copy thread ID", icon: I.copy, run: () => copyText(t.id, "Thread ID copied.") },
+    DESKTOP && dir ? { label: "Open in VS Code", icon: I.code, run: () => openOut(vscodeUrl(dir)) } : null,
+    DESKTOP && dir ? { label: "Show folder", icon: I.folder, run: () => openOut(folderUrl(dir)) } : null,
+    { label: "Delete thread…", icon: I.trash, danger: true, run: () => deleteThread(t) }
+  ].filter(Boolean) }
+}
+/** Put `text` on the clipboard, and say so. */
+async function copyText(text, said = "Copied.") {
+  try {
+    await navigator.clipboard.writeText(text)
+    toast(said)
+  } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
+}
+/** The thread's pull request's state, in words. */
+const PR_STATE_LABEL = { open: "Open", draft: "Draft", merged: "Merged", closed: "Closed" }
 /** A search snippet as text, its matched words (between \u0002 and \u0003) in <mark>: built as nodes, never as HTML. */
 function marked(snippet) {
   return snippet.split("\u0002").flatMap((part, i) => {
@@ -439,225 +705,12 @@ function marked(snippet) {
     return [el("mark", { text: hit }), rest]
   })
 }
-/** Search the messages of every thread, a moment after the typing stops; the sidebar lists what's found. */
-let searching = 0
-function searchSoon() {
-  clearTimeout(searching)
-  const q = S.query.trim().toLowerCase()
-  if (q.length < 2) return
-  searching = setTimeout(async () => {
-    const list = await api("GET", `search/${encodeURIComponent(q)}`).catch(() => [])
-    if (S.query.trim().toLowerCase() !== q) return
-    S.hits = { q, list }
-    renderSide()
-  }, 140)
-}
-/** A thread's row in the sidebar: its marks, title and age; pin and delete on hover. `where` names its project (in Needs you and Working). */
-function threadRow(t, where = "") {
-  const started = t.parentId ? `Started by “${threadMeta(t.parentId)?.title ?? "another thread"}”` : ""
-  return held(el("li", { class: `thread-row${t.pinned ? " pinned" : ""}${t.depth ? " child" : ""}${where !== "" ? " inbox-row" : ""}`, style: t.depth ? `--depth: ${t.depth}` : null },
-    el("a", { class: `thread-link${S.open?.id === t.id ? " active" : ""}`, href: `#/t/${t.id}`, "aria-current": S.open?.id === t.id ? "page" : null,
-      title: [where ? `In ${where}` : "", started].filter(Boolean).join("\n") || null },
-      t.depth ? el("span", { class: "child-mark", "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${CHILD_PATHS}</svg>` }) : null,
-      ...threadMarks(t),
-      el("span", { class: "t", text: t.title }),
-      prMark(t.pr),
-      where ? el("span", { class: "t-where", text: where }) : null,
-      el("span", { class: "age", text: ago(t.updatedAt) })),
-    // Pinning and deleting live here, on the row's hover, rather than in the thread's header (a long press, by touch).
-    el("button", { class: "icon-btn thread-pin", type: "button", title: t.pinned ? "Unpin thread" : "Pin to the top", "aria-label": `${t.pinned ? "Unpin" : "Pin"} ${t.title}`, "aria-pressed": String(Boolean(t.pinned)), html: PIN_ICON, onclick: () => pinThread(t) }),
-    el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${t.title}`, html: TRASH_ICON, onclick: () => deleteThread(t) })),
-  () => threadMenu(t))
-}
-/**
- * Where a thread stands for the person: "ask" (waiting for their approval), "failed" or "done" (a turn
- * ended that they haven't looked at), "working", or "" (nothing for them: it's listed under its project).
- * The thread on screen is seen as it ends.
- */
-const inboxState = (t) =>
-  t.status === "running" ? (S.asking.has(t.id) ? "ask" : "working") : t.unseen && S.open?.id !== t.id ? t.unseen : ""
-const NEEDS_ORDER = { ask: 0, failed: 1, done: 2 }
-/** The state each inbox section's rows were last drawn in: a thread changing section redraws the sidebar. */
-let shownInbox = ""
-/**
- * Needs you (waiting for an approval, or a turn ended unseen) and Working, above Drafts and the projects,
- * as an inbox: what to look at next is at the top. Each section shows only when it has threads.
- */
-function inboxSections(q) {
-  const projectName = (t) => S.projects.find((p) => p.id === t.projectId)?.name ?? ""
-  const many = S.projects.length > 1
-  const needs = [], working = []
-  for (const t of S.threads) {
-    const state = inboxState(t)
-    if (!state) continue
-    if (q && !`${t.title} ${projectName(t)}`.toLowerCase().includes(q)) continue
-    ;(state === "working" ? working : needs).push({ t, state })
-  }
-  needs.sort((a, b) => NEEDS_ORDER[a.state] - NEEDS_ORDER[b.state] || b.t.updatedAt.localeCompare(a.t.updatedAt))
-  const section = (cls, label, rows) => rows.length
-    ? [el("section", { class: `proj inbox ${cls}`, "aria-label": label },
-      el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: label }), el("span", { class: "inbox-count", text: String(rows.length) })),
-      el("ul", { class: "threads" }, rows.map(({ t }) => threadRow(t, many ? projectName(t) : ""))))]
-    : []
-  const ids = new Set([...needs, ...working].map(({ t }) => t.id))
-  return {
-    ids,
-    key: [...needs, ...working].map(({ t, state }) => `${t.id}:${state}`).join(" "),
-    nodes: [...section("needs", "Needs you", needs), ...section("working-sec", "Working", working)]
-  }
-}
-/**
- * A project's threads in sidebar order, each thread another started right under it (newest first),
- * marked with how deep it sits: `{ ...meta, depth }`. A thread whose starter isn't in the list stands alone.
- */
-function nested(list) {
-  const here = new Set(list.map((t) => t.id))
-  const kids = new Map()
-  for (const t of list) if (t.parentId && here.has(t.parentId)) kids.set(t.parentId, [...(kids.get(t.parentId) ?? []), t])
-  const out = []
-  const seen = new Set()
-  const add = (t, depth) => {
-    if (seen.has(t.id)) return
-    seen.add(t.id)
-    out.push(depth ? { ...t, depth } : t)
-    for (const k of kids.get(t.id) ?? []) add(k, depth + 1)
-  }
-  for (const t of list) if (!t.parentId || !here.has(t.parentId)) add(t, 0)
-  for (const t of list) add(t, 0) // a loop of starters, which shouldn't happen, still lists them
-  return out
-}
-const CHILD_PATHS = '<path d="M4 3v5.5A1.5 1.5 0 0 0 5.5 10H12M9.5 7.5 12 10l-2.5 2.5"/>'
-// The right-click menu's icons: the paths of the row's own icons below.
-const COPY_PATHS = '<rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/>'
-const PIN_PATHS = '<path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/>'
-const TRASH_PATHS = '<path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/>'
-const DISCARD_PATHS = '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>'
-/** `node`, with `open` on a long press or right-click. */
-const held = (node, open) => { onHold(node, open); return node }
-const pinThread = (t) => api("PATCH", `threads/${t.id}`, { pinned: !t.pinned }).catch(fail)
-/** What a right-click or long press on a thread offers: what its row's hover buttons do, and copying its id. */
-const threadMenu = (t, draftKey = "") => ({ title: t.title, actions: [
-  ...(draftKey ? [{ label: "Discard draft", icon: DISCARD_PATHS, run: () => discardDraft(draftKey) }] : []),
-  { label: t.pinned ? "Unpin" : "Pin to the top", icon: PIN_PATHS, run: () => pinThread(t) },
-  { label: "Copy thread ID", icon: COPY_PATHS, run: () => copyText(t.id, "Thread ID copied.") },
-  { label: "Delete thread", icon: TRASH_PATHS, danger: true, run: () => deleteThread(t) }
-] })
-/** Put `text` on the clipboard, and say so. */
-async function copyText(text, said = "Copied.") {
-  try {
-    await navigator.clipboard.writeText(text)
-    toast(said)
-  } catch { toast("Couldn't copy: the browser blocked the clipboard.", true) }
-}
-/** A thread's dot (working, waiting for an approval, or ended unseen) and its pin, ahead of its title. */
-const DOTS = {
-  working: ["run-dot", "Working"],
-  ask: ["ask-dot", "Waiting for your approval"],
-  done: ["done-dot", "Finished: your turn"],
-  failed: ["fail-dot", "Stopped on an error"]
-}
-/** The thread's pull request after its title, coloured by how it stands: open, draft, merged or closed. */
-const prMark = (pr) => pr
-  ? el("span", { class: "pr-mark", "data-state": String(pr.state).toLowerCase(), title: `PR #${pr.number} · ${PR_STATE_LABEL[String(pr.state).toLowerCase()] ?? pr.state} · ${pr.branch}`, text: `#${pr.number}` })
-  : null
-const threadMarks = (t) => {
-  const dot = DOTS[inboxState(t)]
-  return [
-    dot ? el("span", { class: dot[0], title: dot[1] }) : null,
-    t.pinned ? el("span", { class: "pin-mark", title: "Pinned", html: PIN_ICON }) : null
-  ]
-}
-/** The threads with words waiting in their reply box: listed under Drafts, not under their project (nor those in `inbox`). */
-function draftedThreadIds(inbox = new Set()) {
-  const ids = new Set()
-  for (const key of drafts.keys()) if (key.startsWith("t:") && !inbox.has(key.slice(2)) && S.threads.some((t) => t.id === key.slice(2))) ids.add(key.slice(2))
-  return ids
-}
-/** The drafted threads the sidebar last left out of their projects, to know when to redraw it whole. */
-let shownDrafted = ""
-/**
- * Drafts: every box with words not yet sent, newest first, above the projects. A new thread's
- * draft goes back to its project's start page, titled by its words. A reply's draft is its thread
- * itself, moved up out of its project (its title, its words on hover) until it's sent or emptied.
- */
-function draftsSection(inbox = new Set()) {
-  const q = S.query.trim().toLowerCase()
-  const rows = []
-  for (const [key, d] of drafts) {
-    const cut = key.indexOf(":")
-    const kind = key.slice(0, cut), id = key.slice(cut + 1)
-    const thread = kind === "t" ? S.threads.find((t) => t.id === id) : null
-    const project = S.projects.find((p) => p.id === (thread ? thread.projectId : id))
-    // A draft whose thread or project was removed goes with it.
-    if (!project || (kind === "t" && !thread)) { drafts.delete(key); continue }
-    // A thread that needs the person, or is working, is listed up there instead.
-    if (thread && inbox.has(thread.id)) continue
-    const where = thread ? `Reply in “${thread.title}”` : `New thread in ${project.name}`
-    if (q && !`${d.title} ${where} ${project.name}`.toLowerCase().includes(q)) continue
-    rows.push({ key, d, where, thread, href: thread ? `#/t/${thread.id}` : `#/new/${project.id}` })
-  }
-  if (!rows.length) return null
-  rows.sort((a, b) => b.d.at.localeCompare(a.d.at))
-  return el("section", { class: "proj drafts" },
-    el("div", { class: "proj-head" }, el("span", { class: "proj-name", text: "Drafts" })),
-    el("ul", { class: "threads" }, rows.map(({ key, d, where, thread, href }) => {
-      const active = thread ? S.open?.id === thread.id : location.hash === href
-      if (thread) return held(el("li", { class: `thread-row draft-row draft-thread${thread.pinned ? " pinned" : ""}` },
-        el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: `Unsent: ${d.title}`, "aria-current": active ? "page" : null },
-          el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
-          ...threadMarks(thread),
-          el("span", { class: "t", text: thread.title }),
-          el("span", { class: "age", text: ago(d.at) })),
-        el("button", { class: "icon-btn thread-pin", type: "button", title: "Discard draft", "aria-label": `Discard draft in ${thread.title}`, html: DISCARD_ICON, onclick: () => discardDraft(key) }),
-        el("button", { class: "icon-btn thread-del", type: "button", title: "Delete thread", "aria-label": `Delete ${thread.title}`, html: TRASH_ICON, onclick: () => deleteThread(thread) })),
-      () => threadMenu(thread, key))
-      return held(el("li", { class: "thread-row draft-row" },
-        el("a", { class: `thread-link draft-link${active ? " active" : ""}`, href, title: where, "aria-current": active ? "page" : null },
-          el("span", { class: "draft-mark", "aria-hidden": "true", html: DRAFT_ICON }),
-          el("span", { class: "t", text: d.title }),
-          el("span", { class: "age", text: ago(d.at) })),
-        el("button", { class: "icon-btn thread-del", type: "button", title: "Discard draft", "aria-label": `Discard draft: ${d.title}`, html: TRASH_ICON, onclick: () => discardDraft(key) })),
-      () => ({ title: d.title, actions: [{ label: "Discard draft", icon: TRASH_PATHS, danger: true, run: () => discardDraft(key) }] }))
-    })))
-}
-/** Repaint only the Drafts section: typing changes nothing else in the sidebar. */
-function paintDrafts() {
-  const tree = $("tree")
-  if (!tree) return
-  // A thread moving into or out of Drafts changes its project's list too.
-  const inbox = inboxSections("")
-  if (S.query.trim() || inbox.key !== shownInbox || [...draftedThreadIds(inbox.ids)].sort().join(" ") !== shownDrafted) return renderSide()
-  const old = tree.querySelector(":scope > .drafts")
-  const fresh = draftsSection(inbox.ids)
-  if (old && fresh) old.replaceWith(fresh)
-  else if (old) old.remove()
-  // Drafts go below Needs you and Working, above the projects.
-  else if (fresh) tree.insertBefore(fresh, tree.querySelector(":scope > .proj:not(.inbox)"))
-}
-let draftsTimer = 0
-/** One repaint for a burst of keystrokes. */
-const paintDraftsSoon = () => { if (!draftsTimer) draftsTimer = setTimeout(() => { draftsTimer = 0; paintDrafts() }, 30) }
-const DRAFT_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3z"/><path d="M9 4l3 3"/></svg>'
-const DISCARD_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>'
-const PIN_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2 14 6.5l-2 .5-2.5 2.5.5 3-1 1-3-3L3 13.5M5 9 2.5 6.5l1-1 3 .5L9 3.5z"/></svg>'
-const TRASH_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.6 6.5v4.5M9.4 6.5v4.5"/></svg>'
 async function deleteThread(t) {
   if (!(await dialog({ title: "Delete this thread?", text: "Its messages are deleted from zero. Changes it made to the project stay.", ok: "Delete thread" }))) return
   try {
     await api("DELETE", `threads/${t.id}`)
     if (S.open?.id === t.id) go("#/")
   } catch (e) { fail(e) }
-}
-function toggleProject(id) {
-  S.collapsed.has(id) ? S.collapsed.delete(id) : S.collapsed.add(id)
-  save("collapsed", [...S.collapsed])
-  // Fold the section in place (not a re-render) so its height can ease shut or open.
-  const section = [...$("tree").querySelectorAll(".proj")].find((s) => s.dataset.id === id)
-  if (!section || S.query.trim()) return renderSide()
-  const closed = S.collapsed.has(id)
-  section.classList.toggle("closed", closed)
-  section.querySelector(".proj-toggle").setAttribute("aria-expanded", String(!closed))
-  section.querySelector(".threads").inert = closed
 }
 async function addProject() {
   const body = el("div", {},
@@ -684,47 +737,160 @@ async function removeProject(p) {
 function renderMain() {
   const main = $("main")
   const r = S.route
+  hideTip()
+  ctxMenu?.close()
+  liveBox = null
   if (r.name === "thread" && S.open) {
     main.replaceChildren(...threadView(S.open))
     if (S.jump) { const id = S.jump; S.jump = null; requestAnimationFrame(() => jumpTo(id)) }
-    return
+    if (S.renameNext === S.open.id) { S.renameNext = null; startRename() }
+  } else {
+    // Off a thread, its Git panel goes (and stops looking).
+    feed?.io?.disconnect()
+    feed = null
+    emptyPanel()
+    if (r.name === "evolution") main.replaceChildren(headBar(el("span", { class: "seg title" }, el("span", { text: "Evolution" }))), evolutionView())
+    else main.replaceChildren(...startView(S.projects.find((p) => p.id === r.projectId) ?? S.projects[0]))
   }
-  // Off a thread, its Git panel goes (and stops looking).
-  if (gitPanel) { clearInterval(gitPanel.timer); gitPanel = null }
-  if (r.name === "evolution") return main.replaceChildren(evolutionView())
-  const project = S.projects.find((p) => p.id === r.projectId) ?? S.projects[0]
-  main.replaceChildren(startView(project))
+  applyShell()
 }
-
-const narrow = matchMedia("(max-width: 820px)")
-/** The one sidebar toggle says what it will do. */
-function paintToggle() {
-  const shown = narrow.matches ? $("side").classList.contains("open") : !document.querySelector(".shell").classList.contains("side-hidden")
-  const label = shown ? "Hide sidebar" : "Show sidebar"
-  $("side-toggle").setAttribute("aria-label", label)
-  $("side-toggle").setAttribute("aria-expanded", String(shown))
-  $("side-toggle").title = label
-}
-function openSide() { $("side").classList.add("open"); $("scrim").hidden = false; paintToggle() }
-function closeSide() { $("side").classList.remove("open"); $("scrim").hidden = true; paintToggle() }
-/** Narrow: slide the sidebar over or away. Wide: hide or show it, remembered. */
-function toggleSide() {
-  if (narrow.matches) return $("side").classList.contains("open") ? closeSide() : openSide()
-  const hidden = !document.querySelector(".shell").classList.contains("side-hidden")
-  document.querySelector(".shell").classList.toggle("side-hidden", hidden)
-  save("sideHidden", hidden)
-  paintToggle()
+// ---------- the shell: the sidebar, the thread, the Changes panel, and the thread's details card ----------
+/** Below 640px (a phone over remote access) the sidebar lies over the thread; below 1100px the Changes panel does. */
+const narrow = matchMedia("(max-width: 639px)")
+const mid = matchMedia("(max-width: 1099px)")
+const app = $("app")
+S.sideOpen = narrow.matches ? false : !load("sideHidden", false)
+S.panelOpen = mid.matches ? false : load("gitOpen", false)
+S.sideW = load("sideWidth", 264)
+S.panelW = load("gitWidth", 340)
+S.infoOpen = load("infoOpen", true)
+/** The card over a narrow thread: opened on purpose there, never kept. */
+S.infoOver = false
+/** The Changes panel shows anywhere but Evolution, once there's a project. */
+const panelAllowed = () => S.route.name !== "evolution" && S.projects.length > 0
+const gitOpenNow = () => S.panelOpen && panelAllowed()
+function setSide(open, persist = true) {
+  S.sideOpen = open
+  if (persist && !narrow.matches) save("sideHidden", !open)
+  if (open && narrow.matches) S.panelOpen = false
+  applyShell()
   sideResized()
 }
-document.querySelector(".shell").classList.toggle("side-hidden", load("sideHidden", false))
-$("scrim").addEventListener("click", closeSide)
+const toggleSide = () => setSide(!S.sideOpen)
+const openSide = () => setSide(true, false)
+/** On a phone, a pick in the sidebar puts it away. */
+function closeSide() { if (narrow.matches && S.sideOpen) setSide(false, false) }
+function setPanel(open, persist = true) {
+  S.panelOpen = open
+  if (persist && !mid.matches) save("gitOpen", open)
+  if (open && narrow.matches) S.sideOpen = false
+  applyShell()
+  // Look again once it has slid open: repainting its content mid-slide would stall the animation.
+  if (open && gitPanel && Date.now() - gitPanel.at > 10_000) setTimeout(loadGit, 260)
+}
+const setGitOpen = setPanel
+function applyShell() {
+  const allowed = panelAllowed()
+  const panel = S.panelOpen && allowed
+  app.classList.toggle("side-closed", !S.sideOpen)
+  app.classList.toggle("panel-open", panel)
+  const root = document.documentElement
+  root.style.setProperty("--side-w", `${S.sideW}px`)
+  root.style.setProperty("--panel-w", `${S.panelW}px`)
+  const l = $("side-toggle"), r = $("panel-toggle")
+  l.setAttribute("aria-expanded", String(S.sideOpen))
+  l.setAttribute("aria-label", S.sideOpen ? "Hide sidebar" : "Show sidebar")
+  l.dataset.tip = S.sideOpen ? "Hide sidebar" : "Show sidebar"
+  r.hidden = !allowed
+  r.setAttribute("aria-expanded", String(panel))
+  r.setAttribute("aria-label", panel ? "Hide changes" : "Show changes")
+  r.dataset.tip = panel ? "Hide changes" : "Show changes"
+  const over = (S.sideOpen && narrow.matches) || (panel && mid.matches)
+  $("scrim").hidden = !over
+  // What's off screen can't be tabbed into.
+  $("side").inert = !S.sideOpen
+  $("panel").inert = !panel
+  paintGitToggle()
+  layoutInfo()
+  requestAnimationFrame(placeToasts)
+}
+$("side-toggle").innerHTML = I.sideL
+$("panel-toggle").innerHTML = I.sideR
+$("info-toggle").innerHTML = I.card
 $("side-toggle").addEventListener("click", toggleSide)
-narrow.addEventListener("change", paintToggle)
-paintToggle()
-// Narrow: a tap on a thread puts the sidebar away, the one already open too (that tap changes no route).
-$("tree").addEventListener("click", (e) => { if (narrow.matches && !e.defaultPrevented && e.target.closest("a[href]")) closeSide() })
-$("search").addEventListener("input", (e) => { S.query = e.target.value; renderSide(); searchSoon() })
-$("search").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; S.query = ""; renderSide() } })
+$("panel-toggle").addEventListener("click", () => setPanel(!gitOpenNow()))
+$("info-toggle").addEventListener("click", () => toggleInfo())
+$("scrim").addEventListener("click", () => { if (narrow.matches) setSide(false, false); if (mid.matches) setPanel(false, false) })
+const onBreakpoint = () => {
+  S.sideOpen = narrow.matches ? false : !load("sideHidden", false)
+  S.panelOpen = mid.matches ? false : load("gitOpen", false)
+  clampWidths()
+  applyShell()
+}
+narrow.addEventListener("change", onBreakpoint)
+mid.addEventListener("change", onBreakpoint)
+// On a phone, a tap on a thread puts the sidebar away, the one already open too (that tap changes no route).
+$("list").addEventListener("click", (e) => { if (narrow.matches && !e.defaultPrevented && e.target.closest("a[href]")) closeSide() })
+$("new-btn").innerHTML = I.compose
+$("new-btn").addEventListener("click", () => newThread())
+$("brand").addEventListener("click", (e) => { e.preventDefault(); newThread() })
+$("open-settings").innerHTML = I.gear
+$("open-keys").innerHTML = I.keys
+
+// ---------- widths: both handles, by pointer or arrow keys; double-click resets. The thread keeps at least 420px. ----------
+const LIM = { side: [208, 420, 264], panel: [280, 560, 340] }
+function clampWidths() {
+  const room = innerWidth - 420
+  S.sideW = Math.round(Math.max(LIM.side[0], Math.min(S.sideW, LIM.side[1], room - (S.panelOpen && !mid.matches ? S.panelW : 0))))
+  S.panelW = Math.round(Math.max(LIM.panel[0], Math.min(S.panelW, LIM.panel[1], mid.matches ? innerWidth - 40 : room - (S.sideOpen ? S.sideW : 0))))
+}
+function sideResized() { if (S.route.name === "evolution" && S.evo) paintEvo() }
+function wireResize(handle, which) {
+  const set = (w, persist = true) => {
+    if (which === "side") S.sideW = w; else S.panelW = w
+    clampWidths()
+    applyShell()
+    handle.setAttribute("aria-valuenow", String(which === "side" ? S.sideW : S.panelW))
+    if (persist) save(which === "side" ? "sideWidth" : "gitWidth", which === "side" ? S.sideW : S.panelW)
+  }
+  handle.setAttribute("aria-valuemin", String(LIM[which][0]))
+  handle.setAttribute("aria-valuemax", String(LIM[which][1]))
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    handle.setPointerCapture(e.pointerId)
+    handle.classList.add("dragging")
+    document.body.classList.add("resizing")
+    const at = (ev) => which === "side" ? ev.clientX - $("side").getBoundingClientRect().left : innerWidth - ev.clientX
+    const move = (ev) => set(at(ev), false)
+    const up = (ev) => {
+      handle.removeEventListener("pointermove", move)
+      handle.removeEventListener("pointerup", up)
+      handle.removeEventListener("pointercancel", up)
+      handle.classList.remove("dragging")
+      document.body.classList.remove("resizing")
+      set(at(ev))
+      sideResized()
+    }
+    handle.addEventListener("pointermove", move)
+    handle.addEventListener("pointerup", up)
+    handle.addEventListener("pointercancel", up)
+  })
+  handle.addEventListener("dblclick", () => { set(LIM[which][2]); sideResized() })
+  handle.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 48 : 16
+    const now = which === "side" ? S.sideW : S.panelW
+    const grow = which === "side" ? 1 : -1
+    const next = { ArrowLeft: now - step * grow, ArrowRight: now + step * grow, Home: LIM[which][0], End: LIM[which][1] }[e.key]
+    if (next === undefined) return
+    e.preventDefault()
+    set(next)
+    sideResized()
+  })
+}
+wireResize($("side-resize"), "side")
+wireResize($("panel-resize"), "panel")
+addEventListener("resize", () => { clampWidths(); applyShell() })
 
 // ---------- touch: the app fits what's visible above the keyboard ----------
 // Chrome shrinks the page for the keyboard (index.html's viewport asks it to); Safari lays the keyboard
@@ -746,25 +912,24 @@ if (window.visualViewport) {
   fit()
 }
 
-// ---------- touch, narrow: the sidebar follows a finger, out from the left edge and back ----------
+// ---------- touch, on a phone: the sidebar follows a finger, out from the left edge and back ----------
 {
   const side = $("side")
   const scrim = $("scrim")
   let drag = null // { x, y, from: "edge" | "side", axis: "" | "x" | "y", dx }
   const width = () => side.getBoundingClientRect().width
-  const settle = (open) => {
+  const land = (open) => {
     side.classList.remove("dragging")
     side.style.transform = ""
     scrim.style.opacity = ""
-    open ? openSide() : closeSide()
+    setSide(open, false)
   }
   addEventListener("touchstart", (e) => {
     drag = null
     if (!narrow.matches || e.touches.length !== 1 || document.querySelector("dialog[open]")) return
     const t = e.touches[0]
-    const open = side.classList.contains("open")
-    if (!open && t.clientX <= 22) drag = { x: t.clientX, y: t.clientY, from: "edge", axis: "", dx: 0 }
-    else if (open && (side.contains(e.target) || e.target === scrim)) drag = { x: t.clientX, y: t.clientY, from: "side", axis: "", dx: 0 }
+    if (!S.sideOpen && t.clientX <= 22) drag = { x: t.clientX, y: t.clientY, from: "edge", axis: "", dx: 0 }
+    else if (S.sideOpen && (side.contains(e.target) || e.target === scrim)) drag = { x: t.clientX, y: t.clientY, from: "side", axis: "", dx: 0 }
   }, { passive: true })
   addEventListener("touchmove", (e) => {
     if (!drag) return
@@ -776,6 +941,7 @@ if (window.visualViewport) {
       // Up and down is the list scrolling; a swipe the wrong way is nothing.
       if (drag.axis === "y" || (drag.from === "side" ? dx > 0 : dx < 0)) { drag = null; return }
       side.classList.add("dragging")
+      side.inert = false
       scrim.hidden = false
     }
     e.preventDefault()
@@ -789,58 +955,102 @@ if (window.visualViewport) {
     if (!drag || drag.axis !== "x") { drag = null; return }
     const { from, dx } = drag
     drag = null
-    settle(from === "edge" ? dx > width() * 0.3 : dx > -width() * 0.3)
+    land(from === "edge" ? dx > width() * 0.3 : dx > -width() * 0.3)
   }
   addEventListener("touchend", end)
   addEventListener("touchcancel", end)
 }
 
-// ---------- sidebar width: drag the edge, arrow keys on it, double-click resets ----------
-const SIDE = { min: 200, max: 480, base: 272 }
-function setSideWidth(w, persist = true) {
-  const width = Math.round(Math.min(SIDE.max, Math.max(SIDE.min, w)))
-  document.querySelector(".shell").style.setProperty("--side-w", `${width}px`)
-  $("side-resize").setAttribute("aria-valuenow", String(width))
-  if (persist) save("sideWidth", width)
-  return width
+// ---------- the thread's details card ----------
+/*
+ * A card at the top right of a thread: where it works, where it was started from, and what it runs with.
+ * Its toggle sits left of the Changes toggle. Opening Changes hides it (they share the right side); its toggle
+ * then brings the card back and closes Changes. Where the thread is wide enough the column moves over to make
+ * room; where it isn't, the card lies over the thread and starts closed.
+ */
+const INFO_ROOM = 832
+const INFO_W = 264
+const infoDocked = () => $("main").clientWidth >= INFO_ROOM
+const infoWanted = () => infoDocked() ? S.infoOpen : S.infoOver
+function layoutInfo() {
+  const t = S.route.name === "thread" ? S.open : null
+  const shown = !!t && infoWanted() && !gitOpenNow()
+  const card = $("info"), btn = $("info-toggle")
+  app.classList.toggle("has-info", !!t)
+  btn.hidden = !t
+  btn.setAttribute("aria-expanded", String(shown))
+  btn.setAttribute("aria-label", shown ? "Hide details" : "Show details")
+  btn.dataset.tip = shown ? "Hide details" : "Show details"
+  // The column's room: just enough that its right edge clears the card, never more than the card takes.
+  const W = $("main").clientWidth, take = INFO_W + 16
+  const pad = shown && infoDocked() ? Math.max(0, Math.min(take, 720 + 32 + 2 * take - W)) : 0
+  document.documentElement.style.setProperty("--info-pad", `${pad}px`)
+  if (!card) return
+  const was = !card.hidden
+  card.hidden = !shown
+  card.classList.toggle("over", !infoDocked())
+  if (shown && !was) renderInfo()
 }
-function sideResized() { if (S.route.name === "evolution" && S.evo) paintEvo() }
-{
-  const handle = $("side-resize")
-  handle.setAttribute("aria-valuemin", String(SIDE.min))
-  handle.setAttribute("aria-valuemax", String(SIDE.max))
-  setSideWidth(load("sideWidth", SIDE.base), false)
-  handle.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return
-    e.preventDefault()
-    handle.setPointerCapture(e.pointerId)
-    const left = $("side").getBoundingClientRect().left
-    document.body.classList.add("resizing")
-    const move = (ev) => setSideWidth(ev.clientX - left, false)
-    const up = (ev) => {
-      handle.removeEventListener("pointermove", move)
-      handle.removeEventListener("pointerup", up)
-      handle.removeEventListener("pointercancel", up)
-      document.body.classList.remove("resizing")
-      setSideWidth(ev.clientX - left)
-      sideResized()
-    }
-    handle.addEventListener("pointermove", move)
-    handle.addEventListener("pointerup", up)
-    handle.addEventListener("pointercancel", up)
-  })
-  handle.addEventListener("dblclick", () => { setSideWidth(SIDE.base); sideResized() })
-  handle.addEventListener("keydown", (e) => {
-    const step = e.shiftKey ? 48 : 16
-    const now = Number(handle.getAttribute("aria-valuenow"))
-    const next = { ArrowLeft: now - step, ArrowRight: now + step, Home: SIDE.min, End: SIDE.max }[e.key]
-    if (next === undefined) return
-    e.preventDefault()
-    setSideWidth(next)
-    sideResized()
-  })
+function toggleInfo() {
+  if (S.route.name !== "thread") return
+  if (gitOpenNow()) { setPanel(false); if (infoDocked()) S.infoOpen = true; else S.infoOver = true }
+  else if (infoDocked()) S.infoOpen = !S.infoOpen
+  else S.infoOver = !S.infoOver
+  save("infoOpen", S.infoOpen)
+  layoutInfo()
 }
-
+new ResizeObserver(() => layoutInfo()).observe($("main"))
+const stamp = (iso) => new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+/** A folder's path, its last part apart from the rest: the end shows when a long one is cut. */
+const splitPath = (path) => { const p = String(path).replace(/\\/g, "/"); const i = p.lastIndexOf("/"); return i < 0 ? ["", p] : [p.slice(0, i + 1), p.slice(i + 1)] }
+/** What this thread has cost: its session's running total, as its provider reports it; else the sum of its turns. */
+function costSoFar(t) {
+  if (typeof t.sessionCostUsd === "number") return { usd: t.sessionCostUsd, sub: "this session" }
+  const turns = (t.items ?? []).filter((i) => i.kind === "turn" && typeof i.costUsd === "number")
+  return turns.length ? { usd: turns.reduce((s, i) => s + i.costUsd, 0), sub: "so far" } : null
+}
+/** Where the thread was started: this machine, a paired device, another thread, or (before zero kept it) not known. */
+function originOf(t) {
+  const o = t.origin
+  if (o?.kind === "thread" || (!o && t.parentId)) return { glyph: I.link, name: t.parentId ? threadMeta(t.parentId)?.title ?? o?.device ?? "another thread" : o.device, sub: "its agent", href: t.parentId ? `#/t/${t.parentId}` : null }
+  if (o?.kind === "remote") return { glyph: /iPhone|Android|iPad/.test(o.device) ? I.phone : I.desktop, name: o.device, sub: "remote access" }
+  if (o?.kind === "local") return { glyph: I.desktop, name: o.device, sub: remote ? "" : "this computer" }
+  return { glyph: I.desktop, name: "Not recorded", sub: "", none: true }
+}
+function renderInfo() {
+  const card = $("info"), t = S.route.name === "thread" ? S.open : null
+  if (!card || !t || card.hidden) return
+  const project = S.projects.find((p) => p.id === t.projectId)
+  const g = gitPanel?.threadId === t.id ? gitPanel.data : null
+  const notGit = g && !g.repo
+  const folder = threadDir(t, project)
+  const [dir, leaf] = splitPath(folder)
+  const from = originOf(t)
+  const cost = costSoFar(t)
+  const effort = effortsFor(t.provider, t.model).length ? effortLabel(t.provider, t.effort ?? defaultEffort(t.provider)) : ""
+  const kids = S.threads.filter((x) => x.parentId === t.id)
+  const pr = t.pr
+  const sig = JSON.stringify([t.id, t.branch, notGit, folder, t.pr, t.origin, t.parentId, t.model, effort, t.access, cost?.usd, ago(t.createdAt), kids.map((k) => k.id + k.title), from.name])
+  if (card.dataset.sig === sig) return
+  card.dataset.sig = sig
+  const row = (label, ...dd) => [el("dt", { text: label }), el("dd", {}, ...dd)]
+  const v = (text, cls = "", title = text) => el("span", { class: `v ${cls}`.trim(), text, title })
+  const sub = (text) => text ? el("span", { class: "sub", text }) : null
+  card.replaceChildren(
+    el("dl", {},
+      ...row("Branch", svgEl(I.branch), notGit ? v("Not a git repository") : v(t.branch || g?.branch || "—", "mono")),
+      ...row("Folder", svgEl(I.folder), el("span", { class: "v mono path", title: folder }, el("bdi", {}, el("span", { class: "dir", text: dir }), leaf || "—"))),
+      ...(pr ? row("PR", svgEl(I.pr), v(`#${pr.number}`), sub(PR_STATE_LABEL[String(pr.state).toLowerCase()] ?? pr.state)) : [])),
+    el("hr"),
+    el("dl", {},
+      ...row("From", svgEl(from.glyph), from.href ? el("a", { class: "v", href: from.href, text: from.name, title: `Open “${from.name}”` }) : v(from.name, from.none ? "none" : ""), sub(from.sub ? `· ${from.sub}` : "")),
+      ...(kids.length ? row("Threads", svgEl(I.link), el("button", { class: "v linkish", type: "button", text: plural(kids.length, "thread"), title: kids.map((k) => k.title).join("\n"),
+        onclick: () => actionSheet(`Started from “${t.title}”`, kids.map((k) => ({ label: `${k.status === "running" ? "● " : ""}${k.title}`, run: () => go(`#/t/${k.id}`) }))) })) : []),
+      ...row("Started", v(stamp(t.createdAt), "", new Date(t.createdAt).toLocaleString()), sub(`· ${agoText(t.createdAt)}`)),
+      ...row("Model", v(`${modelName(t.model)}${effort ? ` · ${effort}` : ""}`, "", `${providerLabel(t.provider)} · ${t.model}`)),
+      ...row("Access", v(accessLabel(t.access), "", ACCESS.find(([a]) => a === t.access)?.[2] ?? "")),
+      ...row("Cost", cost ? v(usd(cost.usd), "mono") : v("—"), cost ? sub(cost.sub) : null)))
+}
 const PROVIDERS = [["claude", "Claude"], ["codex", "Codex"], ["ollama", "Ollama"]]
 const providerLabel = (p) => PROVIDERS.find(([x]) => x === p)?.[1] ?? p
 const status = (p) => S.providers[p]
@@ -900,7 +1110,7 @@ const effortsFor = (provider, model) => {
  */
 function popover({ name, panelClass }) {
   const label = el("span", { class: "pop-label" })
-  const trigger = el("button", { class: "select chip pop-trigger", type: "button", "aria-haspopup": "dialog", "aria-expanded": "false" }, label)
+  const trigger = el("button", { class: "mb pop-trigger", type: "button", "aria-haspopup": "dialog", "aria-expanded": "false" }, label)
   const panel = el("div", { class: `pop-panel ${panelClass}`, role: "dialog", "aria-label": name, hidden: true })
   const wrap = el("div", { class: "pop" }, trigger, panel)
   const pop = { wrap, trigger, label, panel, paint: () => {} }
@@ -966,12 +1176,13 @@ const popItem = ({ key, on, text, help, mark, disabled, onPick }) =>
 function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
   const state = { provider, model, effort: effort ?? defaultEffort(provider), access, busy: false }
   const pop = popover({ name: "Model, effort and permissions", panelClass: "mp-panel" })
-  const mark = el("span", { class: "ap-mark", "aria-hidden": "true" })
-  pop.trigger.prepend(mark)
+  pop.trigger.id = "model"
+  pop.trigger.append(svgEl(I.chevD, "chev"))
+  // The model, then its effort: four bars filled to the level, and the level's name.
   const paintLabel = () => {
     const e = effortsFor(state.provider, state.model).length ? effortLabel(state.provider, state.effort) : ""
-    mark.dataset.level = state.access
-    pop.label.textContent = e ? `${modelName(state.model)} · ${e}` : modelName(state.model)
+    pop.label.replaceChildren(el("span", { class: "mname", text: modelName(state.model) }), ...(e ? [effortGlyph(state.provider, state.effort), el("span", { class: "eff", text: e })] : []))
+    pop.trigger.setAttribute("aria-label", `Model: ${providerLabel(state.provider)} ${modelName(state.model)}${e ? `, ${e} effort` : ""}, ${accessLabel(state.access)}`)
     pop.trigger.title = `${providerLabel(state.provider)} · ${state.model}${e ? ` · ${e} effort` : ""}\n${accessLabel(state.access)}: ${ACCESS.find(([v]) => v === state.access)?.[2] ?? ""}`
   }
   const save = (patch) => {
@@ -1012,21 +1223,23 @@ function modelPicker({ provider, model, effort, access, onChange, onAccess }) {
       return []
     })
     const levels = effortsFor(state.provider, state.model)
+    const SHORT = { xhigh: "X-High", "": "Default" }
     pop.panel.replaceChildren(...[
       el("div", { class: "pop-col mp-models" },
         state.busy ? el("div", { class: "pop-note", text: "Models switch once this turn ends." }) : null,
         el("div", { class: "pop-scroll", role: "menu", "aria-label": "Model" }, groups)),
-      levels.length ? el("div", { class: "pop-col mp-effort", role: "menu", "aria-label": "Effort" },
+      // Effort: one control, the levels side by side.
+      levels.length ? el("div", { class: "pop-col mp-effort" },
         el("div", { class: "pop-head", text: "Effort" }),
-        levels.map(([v, l]) => popItem({ key: `effort/${v}`, on: v === state.effort, text: l, onPick: () => save({ effort: v }) })),
+        el("div", { class: "seg-ctl", role: "group", "aria-label": "Effort" },
+          levels.map(([v, l]) => el("button", { type: "button", "data-key": `effort/${v}`, "aria-pressed": String(v === state.effort), title: `${l} effort`, text: SHORT[v] ?? l, onclick: () => { if (v !== state.effort) save({ effort: v }) } }))),
         state.busy ? el("div", { class: "pop-note", text: "Applies from the next turn." }) : null) : null,
-      // Permissions apply at once, even mid-turn. Each level's meaning is its tooltip.
+      // Permissions apply at once, even mid-turn.
       el("div", { class: "pop-col mp-access", role: "menu", "aria-label": "Permissions" },
         el("div", { class: "pop-head", text: "Permissions" }),
         ACCESS.map(([v, l, help]) => {
           const item = popItem({
-            key: `access/${v}`, on: v === state.access, text: l,
-            mark: el("span", { class: "ap-mark", "data-level": v, "aria-hidden": "true" }),
+            key: `access/${v}`, on: v === state.access, text: l, help,
             onPick: () => {
               state.access = v
               paintLabel()
@@ -1335,22 +1548,28 @@ const IDEAS = [
     "Upgrade a dependency that's behind and fix what breaks"]]
 ]
 let ideaKind = load("ideaKind", "Explore")
-const icon = (paths, cls = "") => el("span", { class: `ico ${cls}`, "aria-hidden": "true", html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>` })
+/** An icon: its paths (drawn in zero's 16px frame), or a whole svg (one of I). */
+const icon = (paths, cls = "") => el("span", { class: `ico ${cls}`.trim(), "aria-hidden": "true", html: paths.startsWith("<svg") ? paths : P(paths) })
 
-/**
- * In a header row that drags the window, the spot under the fixed sidebar toggle stays clickable. It has to be
- * inside the row: Electron takes a no-drag box only from within a drag box, never from a box laid over it.
- */
-const toggleSpot = () => el("span", { class: "toggle-spot", "aria-hidden": "true" })
+/** The project picker for a new thread: the projects, and Add project. In the header and on the page. */
+function projectMenu(anchor, current) {
+  if (ctxMenu?.anchor === anchor) return ctxMenu.close()
+  const r = anchor.getBoundingClientRect()
+  const actions = [
+    ...S.projects.map((p) => ({ label: p.name, icon: p.id === current?.id ? I.check : "", run: () => go(`#/new/${p.id}`) })),
+    { label: "Add project…", icon: I.folderPlus, run: addProject }
+  ]
+  if (touchFirst.matches) return actionSheet("Project", actions)
+  contextMenu(r.left, r.bottom + 6, "Project", actions, anchor, "start")
+}
 
 function startView(project) {
   if (!project) {
-    return el("div", { class: "main-col" },
-      el("div", { class: "bar" }, toggleSpot()),
-      el("div", { class: "start" }, el("div", { class: "start-inner" },
+    return [headBar(el("span", { class: "seg title" }, el("span", { text: "New thread" }))),
+      el("div", { class: "view" }, el("div", { class: "blank" }, el("div", { class: "blank-in" },
         el("h1", { text: "Add a project to start" }),
-        el("p", { class: "lede", text: "A project is a folder on this machine. Threads in it can read, edit and run things there." }),
-        el("button", { class: "btn btn-primary", type: "button", onclick: addProject }, "Add project"))))
+        el("p", { text: "A project is a folder on this machine. Threads in it can read, edit and run things there, and zero gets better at it every time it does." }),
+        el("button", { class: "btn ink", type: "button", onclick: addProject, html: `${I.folderPlus}Add project` }))))]
   }
   const first = S.settings.defaultProvider
   const models = modelPicker({
@@ -1388,6 +1607,7 @@ function startView(project) {
       go(`#/t/${t.id}`)
     }
   })
+  liveBox = box
   const readyFor = (p) => {
     box.setReady(status(p)?.available === true,
       status(p)?.available ? `Ask ${providerLabel(p)} to do something in ${project.name}. Type @ to point at a file.` : `${providerLabel(p)} is turned off in Settings`)
@@ -1396,28 +1616,36 @@ function startView(project) {
   readyFor(first)
   const ready = status(first)?.available
   const list = el("div", { class: "suggest", role: "list" })
-  const kinds = el("div", { class: "kinds", role: "tablist", "aria-label": "Kinds of things to ask" })
+  const kinds = el("div", { class: "seg-ctl kinds", role: "tablist", "aria-label": "Kinds of things to ask" })
   const paintIdeas = () => {
     const kind = IDEAS.find(([k]) => k === ideaKind) ?? IDEAS[0]
     ideaKind = kind[0]
-    const ideas = kind[2]
     kinds.replaceChildren(...IDEAS.map(([k, paths]) => el("button", {
-      class: "kind", type: "button", role: "tab", "aria-selected": String(k === ideaKind),
+      class: "kind", type: "button", role: "tab", "aria-selected": String(k === ideaKind), "aria-pressed": String(k === ideaKind),
       onclick: () => { ideaKind = k; save("ideaKind", k); paintIdeas() }
     }, icon(paths), k)))
-    list.replaceChildren(...ideas.map((idea) => el("button", { class: "suggest-item", type: "button", role: "listitem", onclick: () => box.fill(idea) }, idea)))
+    list.replaceChildren(...kind[2].map((idea) => el("button", { class: "suggest-item", type: "button", role: "listitem", onclick: () => box.fill(idea) }, idea)))
   }
   paintIdeas()
-  return el("div", { class: "main-col" },
-    el("div", { class: "bar bar-quiet" }, toggleSpot(), el("div", { class: "title-wrap" })),
-    el("div", { class: "start" }, el("div", { class: "start-inner" },
-      el("h1", {}, "What should we do in ", el("em", { text: project.name }), "?"),
+  const pick = (cls) => {
+    const b = el("button", { class: cls, type: "button", "aria-haspopup": "menu", title: `${project.path}\nPick the project for the new thread` }, el("span", { text: project.name }), svgEl(I.chevD))
+    b.addEventListener("click", () => projectMenu(b, project))
+    return b
+  }
+  return [
+    headBar(pick("seg proj"), el("span", { class: "sep", "aria-hidden": "true", text: "/" }), el("span", { class: "seg title" }, el("span", { text: "New thread" }))),
+    el("div", { class: "view" }, el("div", { class: "blank" }, el("div", { class: "blank-in" },
+      el("h1", { text: "What should zero work on?" }),
+      el("p", { class: "where" }, "in", pick("pick")),
+      el("p", { class: "mono", text: project.path }),
       el("p", { class: "lede", text: ready
-        ? `${providerLabel(first)} works in ${project.path}. It ${accessText(S.settings.defaultAccess)}${S.settings.memory.recall ? ", and singularity hands it the most similar past change here." : "."}`
+        ? `${providerLabel(first)} ${accessText(S.settings.defaultAccess)}${S.settings.memory.recall ? ", and singularity hands it the most similar past change here." : "."}`
         : `${providerLabel(first)} is turned off. Turn it on in Settings to start a thread.` }),
       kinds,
-      list)),
-    el("div", { class: "composer-wrap" }, box.node))
+      list))),
+    watchDock(el("div", { class: "dock" }, el("div", { class: "col" }, el("div", { class: "above" }), box.node, box.meta))),
+    dropZone()
+  ]
 }
 const accessText = (a) => ({ "ask": "asks before edits and commands", "auto-edit": "edits freely and asks before commands", "full-access": "edits and runs commands without asking", "read-only": "only reads" })[a]
 
@@ -1705,6 +1933,9 @@ function serialize(root) {
 }
 
 // ---------- composer ----------
+/** Settings › Send messages with: "enter", or "ctrl" (Ctrl+Enter sends, Enter makes a new line). Kept on this device. */
+S.sendWith = load("sendWith", "enter")
+const sendKey = () => (S.sendWith === "ctrl" ? chord("Ctrl Enter") : "Enter")
 /**
  * Unsent words per box ("new:<project>", "t:<thread>"), kept while zero is open: the box's own
  * nodes (so file chips come back too), the words as one line for the sidebar, and when they changed.
@@ -1897,13 +2128,13 @@ function mentionMenu(input, { files, commands = [] }) {
   return { pop, update, key, close }
 }
 
-function composer({ onSend, onStop, controls = [], tools = [], running = false, disabled = false, draftKey = "", files = null, commands = [] }) {
+function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], running = false, disabled = false, draftKey = "", files = null, commands = [] }) {
   const input = el("div", { class: "input empty", contenteditable: disabled ? "false" : "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message", "data-placeholder": "" })
   // What was written here before going elsewhere comes back, chips and all.
   const kept = draftKey && drafts.get(draftKey)?.nodes
   if (kept) input.append(...kept)
   const picker = el("input", { type: "file", multiple: true, hidden: true, tabindex: "-1" })
-  const attach = el("button", { class: "pill-btn", type: "button", title: "Attach files. You can paste or drop them too." }, icon(CLIP_PATHS), el("span", { text: "Attach" }))
+  const attach = el("button", { class: "mb mb-ic", type: "button", title: "Attach files. You can paste or drop them too.", "aria-label": "Attach files", html: I.clip })
   const send = el("button", { class: "send", type: "button" })
   let busy = running
   let canAttach = true
@@ -1913,18 +2144,19 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   const empty = () => !input.querySelector(".att") && serialize(input).trim() === ""
   /** Working with nothing typed: the button stops the turn. With a message typed it sends it, to wait for the turn's end. */
   const stops = () => busy && empty()
-  const STOP_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>'
-  const SEND_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>'
+  const STOP_SVG = I.stop
+  const SEND_SVG = I.up
   let painted = ""
   /** The button as things stand; it's touched only when that changed (each key typed comes through here). */
   const paint = (isEmpty = empty()) => {
     const stop = busy && isEmpty
     const up = uploading()
-    const state = `${stop}|${busy}|${up}|${disabled}|${isEmpty}|${canAttach}`
+    const state = `${stop}|${busy}|${up}|${disabled}|${isEmpty}|${canAttach}|${sendKey()}`
     if (state === painted) return
     painted = state
     send.className = `send${stop ? " stop" : ""}`
-    send.title = stop ? "Stop (Esc)" : up ? "Waiting for files to upload" : busy ? "Queue: runs when this turn ends (Enter)" : "Send (Enter)"
+    const key = sendKey()
+    send.title = stop ? "Stop (Esc)" : up ? "Waiting for files to upload" : busy ? `Queue: runs when this turn ends (${key})` : `Send (${key})`
     send.setAttribute("aria-label", stop ? "Stop" : busy ? "Queue" : "Send")
     send.innerHTML = stop ? STOP_SVG : SEND_SVG
     send.disabled = !stop && (disabled || isEmpty || up)
@@ -2064,7 +2296,15 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
     if (menu.key(e)) return
     // Shift+Enter is left to the browser: it breaks the line. So is Enter on a phone's keyboard,
     // where a message often runs to more than a line and Send is a thumb away.
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst.matches) { e.preventDefault(); enter(); return }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst.matches) {
+      const ctrl = e.ctrlKey || e.metaKey
+      // Ctrl+Enter in an empty box answers a waiting approval: Allow.
+      if (ctrl && empty() && onAllow?.()) { e.preventDefault(); return }
+      // Settings › Send messages with: Enter (Ctrl+Enter makes a new line), or Ctrl+Enter (Enter does).
+      if (ctrl === (S.sendWith === "ctrl")) { e.preventDefault(); enter(); return }
+      if (ctrl) { e.preventDefault(); document.execCommand("insertLineBreak") }
+      return
+    }
     const plain = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.isComposing
     if (plain && (e.key === "ArrowUp" || e.key === "ArrowDown") && (recalled >= 0 || empty())) {
       if (recall(e.key === "ArrowUp" ? 1 : -1)) e.preventDefault()
@@ -2105,7 +2345,9 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   send.addEventListener("mousedown", (e) => e.preventDefault())
   send.addEventListener("click", submit)
   // Attach on the left; the model picker sits on the right, beside Send.
-  node.append(menu.pop, input, el("div", { class: "composer-foot" }, el("div", { class: "composer-controls" }, attach, tools), el("div", { class: "composer-end" }, controls, send)), picker)
+  node.append(menu.pop, el("div", { class: "input-row" }, input, send), picker)
+  // The row under the box: Attach and the branch on the left; the model, Compact and the context on the right.
+  const meta = el("div", { class: "meta" }, el("div", { class: "meta-l" }, attach, tools), el("div", { class: "meta-r" }, controls))
   sync()
   // Focus once the view is on screen, without scrolling: focusing while it's still being built laid the whole
   // thread out an extra time (a long thread opened ~140ms slower for it).
@@ -2118,6 +2360,9 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   })
   return {
     node,
+    meta,
+    addFiles,
+    focus: () => { if (!disabled) input.focus() },
     setBusy: (b) => { busy = b; paint() },
     /** Whether the thread's provider can take a message now, and what the empty box says. */
     setReady: (ready, text) => {
@@ -2182,13 +2427,92 @@ function composer({ onSend, onStop, controls = [], tools = [], running = false, 
   }
 }
 
-// ---------- thread ----------
-let feed = null // { node, scroll, nodes: Map, working, composer, stick }
+/// ---------- thread ----------
+let feed = null // { list, scroll, cache, working, composer, stick, models, branch, meter, compact, ask, queued, … }
+/** The composer on screen (a thread's, or a new thread's): what a file dropped anywhere on the thread goes into. */
+let liveBox = null
+/**
+ * The top row of the main pane: where you are. It drags the window; the spots under the fixed toggles that lie
+ * over it stay clickable (Electron cuts a no-drag hole only from inside a drag box).
+ */
+const headBar = (...crumb) => el("header", { class: "head drag" },
+  el("span", { class: "nodrag-left", "aria-hidden": "true" }), el("span", { class: "nodrag-right", "aria-hidden": "true" }),
+  el("div", { class: "crumb" }, ...crumb))
+/** A small status pill for the header: from the thread's real state. */
+function statePill(t) {
+  const st = stateOf(t)
+  if (st === "working") {
+    const compacting = t.items?.some((i) => i.kind === "compact" && i.state === "running")
+    const since = t.items?.findLast((i) => i.kind === "user")?.at ?? t.updatedAt
+    return el("span", { class: "pill run state" }, svgEl(I.spin), el("span", { text: compacting ? "Compacting" : "Working" }), el("span", { class: "clock", "data-since": since, text: elapsed(since) }))
+  }
+  if (st === "ask") return el("span", { class: "pill ask state" }, svgEl(I.ask), "Needs approval")
+  if (st === "failed") return el("span", { class: "pill failed state" }, svgEl(I.alert), "Error")
+  if (st === "settled") return el("span", { class: "pill state" }, svgEl(I.settle), "Settled")
+  return null
+}
+/** The header of a thread: its project (a new thread there), its title (a menu; F2 or a double-click renames), its state, its links. */
+function paintHead() {
+  const t = S.open
+  const crumb = feed?.head?.querySelector(".crumb")
+  if (!t || !crumb) return
+  const project = S.projects.find((p) => p.id === t.projectId)
+  // Each event of the thread comes through here: the row is rebuilt only when what it says changed.
+  const sig = JSON.stringify([t.id, t.title, stateOf(t), project?.name, project?.path, S.renaming, t.status === "running" && t.items.some((i) => i.kind === "compact" && i.state === "running")])
+  if (crumb.dataset.sig === sig) return feed.links.paint()
+  crumb.dataset.sig = sig
+  const proj = project
+    ? el("button", { class: "seg proj", type: "button", title: `New thread in ${project.name}\n${project.path}`, onclick: () => go(`#/new/${project.id}`) }, el("span", { text: project.name }))
+    : el("span", { class: "seg proj gone" }, el("span", { text: "removed project" }))
+  let title
+  if (S.renaming) {
+    title = el("input", { class: "rename", id: "rename", "aria-label": "Thread title", maxlength: 120, value: t.title })
+    let done = false
+    const finish = (keep) => {
+      if (done) return
+      done = true
+      const v = title.value.trim()
+      S.renaming = false
+      if (keep && v && v !== t.title) { patchMeta(t.id, { title: v }); api("PATCH", `threads/${t.id}`, { title: v }).catch(fail); renderSide() }
+      paintHead()
+      crumb.querySelector(".seg.title")?.focus({ preventScroll: true })
+    }
+    title.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true) }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false) }
+    })
+    title.addEventListener("blur", () => finish(true))
+    requestAnimationFrame(() => { title.focus(); title.select() })
+  } else {
+    title = el("button", { class: "seg title", type: "button", "aria-haspopup": "menu", title: t.title }, el("span", { text: t.title }), svgEl(I.chevD))
+    title.addEventListener("click", () => {
+      if (ctxMenu?.anchor === title) return ctxMenu.close()
+      const r = title.getBoundingClientRect()
+      const { title: name, actions } = threadMenu(S.open)
+      if (touchFirst.matches) return actionSheet(name, actions)
+      contextMenu(r.left, r.bottom + 6, name, actions, title, "start")
+    })
+    title.addEventListener("dblclick", () => { ctxMenu?.close(); startRename() })
+  }
+  crumb.replaceChildren(proj, el("span", { class: "sep", "aria-hidden": "true", text: "/" }), title, statePill(t) ?? "", feed.links)
+  feed.links.paint()
+}
+function startRename() {
+  if (S.route.name !== "thread" || !S.open) return
+  S.renaming = true
+  paintHead()
+}
+
+/** The effort's glyph: four rising bars, filled to the level. */
+function effortGlyph(provider, effort) {
+  const levels = (EFFORTS[provider] ?? []).filter(([v]) => v !== "")
+  const i = levels.findIndex(([v]) => v === effort)
+  const n = i < 0 ? 0 : Math.max(1, Math.ceil(((i + 1) / levels.length) * 4))
+  return el("span", { class: "effort", "aria-hidden": "true", html: `<svg viewBox="0 0 14 14">${[4, 6.5, 9, 11.5].map((h, k) => `<rect x="${1.5 + k * 3}" y="${12.5 - h}" width="2" height="${h}" rx=".75"${k < n ? ' class="on"' : ""}/>`).join("")}</svg>` })
+}
+
 function threadView(t) {
   const project = S.projects.find((p) => p.id === t.projectId)
-  const title = el("input", { class: "title", value: t.title, "aria-label": "Thread title", maxlength: 120 })
-  title.addEventListener("keydown", (e) => { if (e.key === "Enter") title.blur(); if (e.key === "Escape") { title.value = t.title; title.blur() } })
-  title.addEventListener("change", () => api("PATCH", `threads/${t.id}`, { title: title.value }).catch(fail))
   // Picks save quietly; the server's answer (the thread event) is the record. A refused pick goes back.
   const current = () => ({ provider: t.provider, model: t.model, effort: t.effort ?? defaultEffort(t.provider) })
   const models = modelPicker({
@@ -2199,19 +2523,21 @@ function threadView(t) {
   })
   const list = el("div", { class: "feed", role: "log", "aria-live": "polite" })
   const working = el("div", { class: "working", hidden: true, role: "status", "aria-label": "Working" },
-    el("span", { class: "wk", "aria-hidden": "true", html: WORKING_GLYPH }), workingLabel(), el("span", { class: "working-time" }))
-  const scroll = el("div", { class: "scroll" }, list)
-  // Compact: shown when the context is filling. On, the next message waits while the session compacts first.
-  const compact = el("button", { class: "pill-btn compact-toggle", type: "button", role: "switch", onclick: () => {
+    svgEl(I.spin), el("span", { class: "step", text: "Working" }), el("span", { class: "clock working-time" }))
+  const scroll = el("div", { class: "view" }, el("div", { class: "col" }, list))
+  // Compact: shown when the context is filling, or after an hour idle. On, the next message waits while the session compacts first.
+  const compact = el("button", { class: "mb compact-tgl", type: "button", role: "switch", onclick: () => {
     S.compactOff.has(t.id) ? S.compactOff.delete(t.id) : S.compactOff.add(t.id)
     paintCompact(S.open)
-  } }, el("span", { class: "compact-knob", "aria-hidden": "true" }), el("span", { text: "Compact" }))
+    showTip(compact, true)
+  } }, el("span", { class: "knob", "aria-hidden": "true" }), el("span", { text: "Compact" }))
   // The thread's branch: switch it, or move the thread to a new worktree from a base you pick.
   const branched = (meta, words) => {
     Object.assign(S.open ?? {}, meta)
     for (const k of ["cwd", "workTree", "pr", "queued", "waiting"]) if (!(k in meta) && S.open) delete S.open[k]
     toast(words)
     if (gitPanel?.threadId === t.id) loadGit()
+    renderInfo()
   }
   const branch = branchPicker({
     load: () => api("GET", `threads/${t.id}/branches`),
@@ -2227,42 +2553,45 @@ function threadView(t) {
     },
     onLeave: async () => branched(await api("POST", `threads/${t.id}/worktree`, { leave: true }), "This thread works in the project folder again.")
   })
-  // How full the context is, and Claude's usage limits when one is getting close: a ring, words on hover.
-  const meter = el("span", { class: "meter", role: "img", tabindex: "0", hidden: true },
-    el("span", { class: "meter-ring", "aria-hidden": "true" }), el("span", { class: "meter-text" }))
+  // How full the context is, and the plan's usage limits: a ring and a %, the detail and Compact now in its popover.
+  const meter = contextMeter(t)
   const box = composer({
     running: t.status === "running",
-    controls: [meter, compact, models.node],
+    controls: [models.node, compact, meter.node],
     tools: [branch.node],
     draftKey: `t:${t.id}`,
     files: () => api("GET", `threads/${t.id}/files`),
+    onAllow: () => { const ask = pendingAsk(); if (!ask) return false; answerAsk(ask, true); return true },
     // What / offers: zero's own actions, the provider's /compact when its session takes it, then the
     // session's own commands (the person's, the project's, skills, a few of Claude Code's) once a turn has told them.
     commands: () => [
       { name: "compact", args: "what to keep", desc: "Summarize the thread so far to free up context", when: () => status(S.open?.provider)?.compaction === "manual" && !!S.open?.resume },
-      { name: "git", desc: "Show or hide the Git panel", run: () => setGitOpen(!gitOpenNow()) },
-      { name: "rename", desc: "Rename this thread", run: () => { feed?.title.focus(); feed?.title.select() } },
+      { name: "git", desc: "Show or hide the Changes panel", run: () => setGitOpen(!gitOpenNow()) },
+      { name: "rename", desc: "Rename this thread", run: () => startRename() },
       ...(project ? [{ name: "new", desc: `Start a new thread in ${project.name}`, run: () => go(`#/new/${project.id}`) }] : []),
       ...(S.commands.get(t.id) ?? []).map((c) => ({ name: c.name, args: c.hint, desc: c.description, from: providerLabel(t.provider) }))
     ],
     onSend: (text) => api("POST", `threads/${t.id}/messages`, { text, compact: compactOn(S.open) }),
     onStop: () => api("POST", `threads/${t.id}/stop`, {}).catch(fail)
   })
-  // What waits to be sent: a tray on the composer's top edge.
-  const queued = el("div", { class: "queue-tray", hidden: true, role: "list", "aria-label": "Queued messages" })
+  liveBox = box
+  // Above the composer: an approval waiting, then what waits to be sent.
+  const ask = el("div", { class: "ask-card", hidden: true, role: "group", "aria-label": "Approval" })
+  const queued = el("div", { class: "queue", hidden: true, role: "list", "aria-label": "Queued messages" })
   const links = linksNode(t)
   // The turns above the ones drawn: a button for them, which also loads them as it scrolls into view.
   const earlier = el("button", { class: "feed-earlier", type: "button", onclick: () => showEarlier() }, el("span"))
+  // Scrolled up, a pill brings you back to the latest; it says so when something new came in meanwhile.
+  const jump = el("button", { class: "jump", type: "button", hidden: true, title: "Jump to the latest", "aria-label": "Jump to the latest" }, svgEl(I.down), el("span", { text: "Latest" }))
+  const above = el("div", { class: "above" }, ask, queued, jump)
+  const head = headBar()
   feed?.io?.disconnect()
-  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), folds: new Map(), working, queued, composer: box, stick: true, models, title, compact, meter, branch, links, shown: TURNS_SHOWN, hidden: 0, earlier }
+  feed = { list, scroll, cache: new Map(), groups: new Map(), turns: new Map(), folds: new Map(), working, queued, ask, composer: box, stick: true, models, compact, meter, branch, links, head, shown: TURNS_SHOWN, hidden: 0, earlier, jump }
   feed.io = new IntersectionObserver((seen) => { if (seen.some((e) => e.isIntersecting) && feed?.earlier === earlier) showEarlier() }, { root: scroll, rootMargin: "600px 0px 0px 0px" })
+  jump.addEventListener("click", () => { feed.stick = true; scroll.scrollTo({ top: scroll.scrollHeight, behavior: reduced ? "auto" : "smooth" }) })
 
   paintReady(t)
-  // Scrolled up, a button brings you back to the latest; it says so when something new came in meanwhile.
-  const jump = el("button", { class: "jump-latest", type: "button", hidden: true, title: "Jump to the latest", "aria-label": "Jump to the latest",
-    html: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg><span>New</span>',
-    onclick: () => { feed.stick = true; scroll.scrollTo({ top: scroll.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }) } })
-  feed.jump = jump
+  paintHead()
   // A scroll is yours only right after a wheel, touch, key or press in the thread: one that follows a resize
   // or a reflow (the window narrowed, an image loaded) keeps a thread that was following at its end.
   let touched = 0
@@ -2282,33 +2611,111 @@ function threadView(t) {
     scroll.scrollTop = scroll.scrollHeight
     requestAnimationFrame(() => { if (feed?.earlier === earlier) feed.io.observe(earlier) })
   })
-  const git = makeGitPanel(t)
+  makeGitPanel(t)
   // The session's slash commands, for / (empty until a turn of it has started).
   if (!S.commands.has(t.id)) api("GET", `threads/${t.id}/commands`).then((list) => { if (list.length) S.commands.set(t.id, list) }, () => {})
   return [
-    el("div", { class: "thread-cols" },
-      el("div", { class: "main-col" },
-        el("div", { class: "bar" },
-          toggleSpot(),
-          gitSpot(),
-          // One line: the project (click it for a new thread there), a middle dot, the thread's title (editable in place).
-          el("div", { class: "title-wrap title-line" },
-            project
-              ? el("button", { class: "title-project", type: "button", title: `New thread in ${project.name}\n${project.path}`, onclick: () => go(`#/new/${project.id}`) }, project.name)
-              : el("span", { class: "title-project gone", text: "removed project" }),
-            el("span", { class: "title-sep", "aria-hidden": "true", text: "·" }),
-            title,
-            links),
-          DESKTOP ? el("div", { class: "bar-tools" },
-            el("button", { class: "icon-btn bar-tool", type: "button", title: "Open this thread's folder in VS Code", "aria-label": "Open in VS Code", html: CODE_ICON, onclick: () => openOut(vscodeUrl(threadDir(t, project))) }),
-            el("button", { class: "icon-btn bar-tool", type: "button", title: "Show this thread's folder", "aria-label": "Show folder", html: FOLDER_ICON, onclick: () => openOut(folderUrl(threadDir(t, project))) })) : null),
-        scroll,
-        el("div", { class: "composer-wrap" }, jump, queued, box.node)),
-      git.node,
-      git.toggle)
+    head,
+    el("aside", { class: "info", id: "info", "aria-label": "Thread details", hidden: true }),
+    scroll,
+    watchDock(el("div", { class: "dock" }, el("div", { class: "col" }, above, box.node, box.meta))),
+    dropZone()
   ]
 }
+/** The overlay a file dragged over the thread shows: let go anywhere on it and the file goes into the composer. */
+const dropZone = () => el("div", { class: "drop", id: "drop", hidden: true }, el("div", {}, el("b", { text: "Drop to attach" }), el("span", { text: `Images, text and code, up to ${MAX_FILE / 1048576} MB each` })))
+{
+  let depth = 0
+  const main = $("main")
+  const files = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files")
+  const zone = () => $("drop")
+  main.addEventListener("dragenter", (e) => {
+    if (!files(e) || !zone() || !liveBox) return
+    e.preventDefault()
+    depth++
+    zone().hidden = false
+  })
+  main.addEventListener("dragover", (e) => { if (zone() && !zone().hidden) e.preventDefault() })
+  main.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; if (zone()) zone().hidden = true } })
+  main.addEventListener("drop", (e) => {
+    depth = 0
+    if (!zone() || zone().hidden) return
+    zone().hidden = true
+    // One the composer took itself (dropped where its caret goes) is done already.
+    if (e.defaultPrevented) return
+    e.preventDefault()
+    const list = [...(e.dataTransfer?.files ?? [])]
+    if (list.length) liveBox?.addFiles(list)
+  })
+}
 
+/**
+ * The context meter under the composer: a ring and how full the context is (a usage limit's words beside it when
+ * one is close). Its popover has the detail: tokens, the plan's limits, and Compact now.
+ */
+function contextMeter(t) {
+  const pop = popover({ name: "Context", panelClass: "ctx-panel" })
+  pop.trigger.classList.add("meter")
+  pop.wrap.hidden = true
+  const R = 5.5, C = 2 * Math.PI * R
+  const ring = el("span", { class: "ring", "aria-hidden": "true", html: `<svg viewBox="0 0 14 14"><circle class="bg" cx="7" cy="7" r="${R}"/><circle class="fg" cx="7" cy="7" r="${R}" stroke-dasharray="0 ${C.toFixed(2)}"/></svg>` })
+  pop.trigger.prepend(ring)
+  pop.wrap.classList.add("up-end")
+  pop.paint = () => {
+    const t = S.open
+    if (!t) return
+    const ctx = t.context && t.context.limit > 0 ? t.context : null
+    const share = ctx ? Math.min(1, ctx.used / ctx.limit) : 0
+    const limits = t.provider === "claude" ? (S.limits ?? []).filter((l) => l.used !== null || l.status !== "allowed") : []
+    const compacting = t.items.some((i) => i.kind === "compact" && i.state === "running")
+    const can = status(t.provider)?.compaction === "manual" && !!t.resume
+    const busy = t.status === "running"
+    const say = compacting ? `${providerLabel(t.provider)} is compacting the session: what came before becomes a summary it goes on from.`
+      : status(t.provider)?.compaction === "manual" ? `${providerLabel(t.provider)} compacts on its own when it's full. From 70%, Compact shows beside this: your next message waits while it compacts first.`
+      : status(t.provider)?.compaction === "auto" ? `${providerLabel(t.provider)} compacts its context on its own when it fills.` : ""
+    pop.panel.replaceChildren(
+      ctx ? el("div", { class: `ctx${share >= COMPACT_SOON && !compacting ? " high" : ""}` },
+        el("div", { class: "ctx-big" }, el("b", { text: `${Math.round(share * 100)}%` }), el("span", { text: "of the context used" })),
+        el("div", { class: "ctx-bar" }, el("i", { style: `width:${(share * 100).toFixed(1)}%` })),
+        el("p", { text: `${tokensK(ctx.used)} of ${tokensK(ctx.limit)} tokens. ${say}` })) : el("div", { class: "pop-note", text: "No context measured yet: it shows after the first turn." }),
+      ...(limits.length ? [el("hr"), el("div", { class: "pop-head", text: "Usage limits" }), ...limits.map((l) => el("div", { class: `ctx-limit${limitPressing(l) ? " high" : ""}` },
+        el("span", { class: "lb", text: LIMIT_NAMES[l.kind] ?? l.kind }),
+        el("span", { class: "n", text: l.status === "rejected" ? "reached" : l.used !== null ? `${Math.round(l.used * 100)}%` : l.status === "allowed_warning" ? "getting close" : "fine" }),
+        l.resetsAt ? el("span", { class: "sub", text: resetWords(l.resetsAt) }) : null))] : []),
+      el("hr"),
+      el("button", { class: "pop-item ctx-compact", type: "button", disabled: !can || busy || !t.items.length, "data-key": "compact",
+        onclick: () => { pop.close(); api("POST", `threads/${t.id}/messages`, { text: "/compact" }).catch(fail) } },
+        icon(I.zap), el("span", { class: "pop-text" }, el("span", { text: "Compact now" }),
+          el("span", { class: "pop-help", text: !can ? (status(t.provider)?.compaction === "manual" ? "Nothing to compact yet" : `${providerLabel(t.provider)} takes no /compact`) : busy ? "After this turn ends" : "Same as /compact" }))))
+  }
+  const paint = () => {
+    const t = S.open
+    if (!t) return
+    const ctx = t.context && t.context.limit > 0 ? t.context : null
+    const share = ctx ? Math.min(1, ctx.used / ctx.limit) : 0
+    const limits = t.provider === "claude" ? (S.limits ?? []).filter((l) => l.used !== null || l.status !== "allowed") : []
+    const pressing = limits.filter(limitPressing).sort((a, b) => (b.used ?? 1) - (a.used ?? 1))[0]
+    pop.wrap.hidden = !ctx && !pressing
+    if (pop.wrap.hidden) return
+    const pct = Math.round(share * 100)
+    ring.querySelector(".fg").setAttribute("stroke-dasharray", `${(C * share).toFixed(2)} ${C.toFixed(2)}`)
+    pop.trigger.classList.toggle("high", share >= COMPACT_SOON || !!pressing)
+    const limitShort = pressing ? (pressing.status === "rejected" ? `${LIMIT_NAMES[pressing.kind] ?? "Limit"} reached` : `${LIMIT_NAMES[pressing.kind] ?? "Limit"} ${Math.round((pressing.used ?? 0) * 100)}%`) : ""
+    pop.label.replaceChildren(...[ctx ? el("span", { class: "pct", text: `${pct}%` }) : null, limitShort ? el("span", { class: "lim", text: `${ctx ? "· " : ""}${limitShort}` }) : null].filter(Boolean))
+    const lines = [
+      ctx ? `Context: ${tokensK(ctx.used)} of ${tokensK(ctx.limit)} tokens (${pct}%)` : "",
+      ...limits.map((l) => {
+        const name = LIMIT_NAMES[l.kind] ?? l.kind
+        const used = l.status === "rejected" ? "reached" : l.used !== null ? `${Math.round(l.used * 100)}% used` : l.status === "allowed_warning" ? "getting close" : "fine"
+        return [`${name}: ${used}`, resetWords(l.resetsAt)].filter(Boolean).join(", ")
+      })
+    ].filter(Boolean)
+    pop.trigger.title = lines.join("\n")
+    pop.trigger.setAttribute("aria-label", lines.join(". "))
+    pop.repaint()
+  }
+  return { node: pop.wrap, paint }
+}
 /** The composer takes messages only when the thread's provider is available; switching provider can change that. */
 function paintReady(t) {
   const ready = status(t.provider)?.available === true
@@ -2342,38 +2749,14 @@ const resetWords = (iso) => {
   return `resets ${today ? "" : d.toLocaleDateString([], { weekday: "short" }) + " "}${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
 }
 /** The composer's meter: the context's fill as a ring (and %), and the most pressing usage limit as words, for this thread. */
-function paintMeter() {
-  const m = feed?.meter
-  const t = S.open
-  if (!m || !t) return
-  const ctx = t.context && t.context.limit > 0 ? t.context : null
-  const share = ctx ? Math.min(1, ctx.used / ctx.limit) : 0
-  const limits = t.provider === "claude" ? (S.limits ?? []).filter((l) => l.used !== null || l.status !== "allowed") : []
-  const pressing = limits.filter(limitPressing).sort((a, b) => (b.used ?? 1) - (a.used ?? 1))[0]
-  m.hidden = !ctx && !pressing
-  if (m.hidden) return
-  const pct = Math.round(share * 100)
-  m.querySelector(".meter-ring").style.setProperty("--fill", `${share * 360}deg`)
-  m.classList.toggle("warm", share >= COMPACT_SOON)
-  m.classList.toggle("limited", !!pressing)
-  const limitShort = pressing ? (pressing.status === "rejected" ? `${LIMIT_NAMES[pressing.kind] ?? "Limit"} reached` : `${LIMIT_NAMES[pressing.kind] ?? "Limit"} ${Math.round((pressing.used ?? 0) * 100)}%`) : ""
-  m.querySelector(".meter-text").textContent = [ctx ? `${pct}%` : "", limitShort].filter(Boolean).join(" · ")
-  const lines = [
-    ctx ? `Context: ${tokensK(ctx.used)} of ${tokensK(ctx.limit)} tokens (${pct}%)` : "",
-    ...limits.map((l) => {
-      const name = LIMIT_NAMES[l.kind] ?? l.kind
-      const used = l.status === "rejected" ? "reached" : l.used !== null ? `${Math.round(l.used * 100)}% used` : l.status === "allowed_warning" ? "getting close" : "fine"
-      return [`${name}: ${used}`, resetWords(l.resetsAt)].filter(Boolean).join(", ")
-    })
-  ].filter(Boolean)
-  m.title = lines.join("\n")
-  m.setAttribute("aria-label", lines.join(". "))
-}
+function paintMeter() { feed?.meter?.paint() }
 
 function paintCompact(t) {
   paintMeter()
   if (!feed?.compact || !t) return
-  const shown = compactShown(t)
+  // Not while it compacts: there is nothing left to decide until it ends.
+  const compacting = t.items.some((i) => i.kind === "compact" && i.state === "running")
+  const shown = compactShown(t) && !compacting
   feed.compact.hidden = !shown
   if (!shown) return
   const on = !S.compactOff.has(t.id)
@@ -2392,27 +2775,62 @@ function paintWorking() {
   if (!feed || !S.open) return
   const running = S.open.status === "running"
   const asking = S.open.items.some((i) => i.kind === "permission" && i.state === "pending")
-  feed.working.hidden = !running || asking
-  // While a compaction runs, the working line says so (its card in the feed shows the detail).
+  // The working line stands on its own only when nothing else shows the work: no call running (the call is
+  // its group's last row, with its own clock) and no compaction (its card is the loader).
   const compacting = running && S.open.items.some((i) => i.kind === "compact" && i.state === "running")
-  const words = compacting ? "Compacting context" : "Working"
-  for (const n of feed.working.querySelectorAll(".wk-text")) if (n.textContent !== words) n.textContent = words
-  feed.working.setAttribute("aria-label", compacting ? "Compacting context" : "Working")
-  // How long this turn has run, from your message (the call it's on shows just above).
+  const calling = running && S.open.items.some((i) => i.kind === "tool" && i.status === "running" && !i.name.startsWith(THREAD_TOOL))
+  feed.working.hidden = !running || asking || compacting || calling
+  // How long this turn has run, from your message.
   const since = S.open.items.findLast((i) => i.kind === "user")?.at
   feed.working.dataset.since = running && since ? since : ""
   tickWorking()
   paintQueue()
+  paintAsk()
   // Moved only when out of place: moving it restarts its animation (each tool call came through here).
   if (feed.list.lastElementChild !== feed.working) feed.list.append(feed.working)
   feed.composer.setBusy(running)
   feed.models.setBusy(running)
   feed.branch?.setBusy(running)
   paintCompact(S.open)
+  paintHead()
+}
+/** The approval the open thread waits on, if any. */
+const pendingAsk = () => S.open?.items.find((i) => i.kind === "permission" && i.state === "pending") ?? null
+/** Answer it: Allow (`always`: for the rest of the thread) or Deny. */
+function answerAsk(item, allow, always = false) {
+  if (!S.open) return
+  api("POST", `threads/${S.open.id}/permissions/${item.id}`, { allow, ...(always ? { always: true } : {}) }).catch(fail)
 }
 /**
- * The tray on the composer: a message waiting for the session to compact first, and the ones sent while the
- * turn runs. One sent while it runs can be taken back: out of the queue, into the composer, to edit.
+ * An approval waiting, above the composer: what the agent wants to do and the three answers. Y and Ctrl+Enter
+ * allow, N denies. A message typed meanwhile waits in the queue for the turn (zero's queue), it doesn't answer.
+ */
+function paintAsk() {
+  const card = feed?.ask
+  const item = pendingAsk()
+  if (!card) return
+  card.hidden = !item
+  if (!item) { delete card.dataset.id; return }
+  if (card.dataset.id === item.id) return
+  card.dataset.id = item.id
+  const btn = (label, cls, run, kbd, title) => {
+    const b = el("button", { class: `btn ${cls}`, type: "button", title }, label, kbd && !touchFirst.matches ? el("kbd", { text: kbd }) : null)
+    b.addEventListener("click", () => { card.querySelectorAll("button").forEach((x) => { x.disabled = true }); run() })
+    return b
+  }
+  card.replaceChildren(
+    el("div", { class: "ask-top" }, svgEl(I.ask), el("span", { text: `${providerLabel(S.open.provider)} wants to ${verb(item.tool)}` }), el("span", { class: "tool", text: item.tool.replace(/^mcp__[^_]+__/, "") })),
+    el("pre", { class: "ask-cmd", text: rel(item.detail), title: item.detail }),
+    el("div", { class: "ask-acts" },
+      btn("Deny", "quiet", () => answerAsk(item, false), "N"),
+      el("span", { class: "grow" }),
+      el("span", { class: "hint", text: "What needs asking: the model menu below." }),
+      btn("Always allow", "quiet", () => answerAsk(item, true, true), "", "Allow this exact call for the rest of the thread, without asking again"),
+      btn("Allow", "ink", () => answerAsk(item, true), chord("Ctrl ⏎"), "Allow (Y, or Ctrl+Enter in an empty box)")))
+}
+/**
+ * Above the composer: a message waiting for the session to compact first, and the ones sent while the turn runs,
+ * numbered in the order they'll go. One sent while it runs can be taken back into the composer, or removed.
  */
 function paintQueue() {
   const tray = feed.queued
@@ -2422,22 +2840,27 @@ function paintQueue() {
   if (tray.dataset.key === key) return
   tray.dataset.key = key
   const id = S.open.id
-  const row = (label, text, action) => el("div", { class: "queue-item", role: "listitem" },
-    el("span", { class: "queue-label", text: label }), el("span", { class: "queue-text", text }), action)
-  const takeBack = (m) => el("button", { class: "queue-edit", type: "button", title: "Edit: back to the composer, out of the queue",
-    "aria-label": "Edit this message: back to the composer", html: PENCIL_SVG, onclick: async (e) => {
-      const b = e.currentTarget
-      b.disabled = true
-      try {
-        const back = await api("DELETE", `threads/${id}/queue/${m.id}`)
-        if (feed?.queued === tray) feed.composer.restore(back.text, back.attachments)
-      } catch (err) { b.disabled = false; fail(err) }
-    } })
-  tray.replaceChildren(
-    S.open.queued ? row("After compaction", S.open.queued, null) : null,
-    ...waiting.map((m) => row("Queued", m.text, takeBack(m))))
+  const out = (m, restore) => async (e) => {
+    const b = e.currentTarget
+    b.disabled = true
+    try {
+      const back = await api("DELETE", `threads/${id}/queue/${m.id}`)
+      if (restore && feed?.queued === tray) feed.composer.restore(back.text, back.attachments)
+    } catch (err) { b.disabled = false; fail(err) }
+  }
+  const parts = []
+  if (S.open.queued) parts.push(el("div", { class: "queue-h", text: "After compaction" }), el("ol", {}, el("li", { role: "listitem" }, el("span", { class: "q", text: S.open.queued, title: S.open.queued }))))
+  if (waiting.length) {
+    parts.push(el("div", { class: "queue-h", text: waiting.length === 1 ? "Sends when this turn ends" : "Send together when this turn ends" }),
+      el("ol", {}, waiting.map((m, i) => el("li", { role: "listitem" },
+        el("span", { class: "n", text: String(i + 1) }),
+        el("span", { class: "q", text: m.text, title: m.text }),
+        el("button", { class: "ib", type: "button", title: "Edit: back to the composer, out of the queue", "aria-label": "Edit this message: back to the composer", html: I.pencil, onclick: out(m, true) }),
+        el("button", { class: "ib", type: "button", title: "Remove from the queue", "aria-label": "Remove this message", html: I.x, onclick: out(m, false) })))))
+  }
+  tray.replaceChildren(...parts)
 }
-const PENCIL_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 3.5l2 2L6 12H4v-2z"/><path d="M9.5 4.5l2 2"/></svg>'
+const PENCIL_SVG = I.pencil
 /** The working line's clock: m:ss since the turn began, each second while it shows. */
 function tickWorking() {
   const w = feed?.working
@@ -2592,24 +3015,27 @@ function paintTurnFiles(node, edited) {
   let box = node.querySelector(".turn-files")
   if ((box?.dataset.sig ?? "[]") === sig) return
   if (!files.length) return void box?.remove()
-  if (!box) { box = el("div", { class: "turn-files" }); node.querySelector(".msg-actions").before(box) }
+  if (!box) { box = el("div", { class: "card turn-files" }); node.querySelector(".msg-actions").before(box) }
   box.dataset.sig = sig
   const total = files.reduce((s, [, c]) => ({ add: s.add + c.add, del: s.del + c.del }), { add: 0, del: 0 })
   const SHOWN = 6
   // In the desktop app a file opens in VS Code, at the thread's folder for a path given relative to it.
   const dir = S.open ? threadDir(S.open, S.projects.find((p) => p.id === S.open.projectId)) : ""
+  const pathNodes = (p) => { const [d, leaf] = splitPath(rel(p)); return el("bdi", {}, el("span", { class: "dir", text: d }), leaf) }
   const row = ([path, c]) => el("li", { class: "turn-file" },
     DESKTOP
-      ? el("button", { class: "turn-file-path", type: "button", text: rel(path), title: `Open ${path} in VS Code`, onclick: () => openOut(vscodeUrl(absPath(path, dir))) })
-      : el("span", { class: "turn-file-path", text: rel(path), title: path }),
+      ? el("button", { class: "path turn-file-path", type: "button", title: `Open ${path} in VS Code`, onclick: () => openOut(vscodeUrl(absPath(path, dir))) }, pathNodes(path))
+      : el("span", { class: "path turn-file-path", title: path }, pathNodes(path)),
     diffStat(c))
   const rest = files.length - SHOWN
   box.replaceChildren(
-    el("div", { class: "turn-files-head" },
-      el("span", { class: "turn-files-title", text: `Changed ${files.length} file${files.length === 1 ? "" : "s"}` }),
+    el("div", { class: "card-head" },
+      svgEl(I.diff),
+      el("span", { text: `${plural(files.length, "file")} changed` }),
       diffStat(total),
-      el("button", { class: "btn btn-quiet btn-xs turn-files-review", type: "button", title: "See the diffs and commit, in the Git panel's Code tab (Alt+G)", onclick: () => { if (!gitPanel) return; setGitTab("code"); if (!gitOpenNow()) setGitOpen(true) } }, "Review in Git")),
-    el("ul", { class: "turn-file-list" }, ...files.slice(0, SHOWN).map(row),
+      el("span", { class: "grow" }),
+      el("button", { class: "btn quiet sm turn-files-review", type: "button", title: "See the diffs and commit, in the Changes panel's Code tab (Ctrl+Alt+B)", onclick: () => { if (!gitPanel) return; setGitTab("code"); if (!gitOpenNow()) setGitOpen(true) } }, "Review")),
+    el("ul", { class: "files-list turn-file-list" }, ...files.slice(0, SHOWN).map(row),
       rest > 0 ? el("li", { class: "turn-file more" }, el("details", {}, el("summary", { text: `${rest} more` }), el("ul", { class: "turn-file-list" }, ...files.slice(SHOWN).map(row)))) : null))
 }
 /** How long a turn worked, as "38s", "4m 12s" or "1h 5m" (the fold's row and the answer's details both say it so). */
@@ -2628,7 +3054,7 @@ function workedFold(key, nodes, turn, live) {
   const id = `worked:${key}`
   let f = feed.folds.get(key)
   if (!f) {
-    const head = el("button", { class: "worked-head", type: "button" })
+    const head = el("button", { class: "tools-sum worked-head", type: "button" })
     const body = el("div", { class: "worked-body" })
     f = { head, body, node: el("div", { class: "worked" }, head, body) }
     head.addEventListener("click", () => {
@@ -2654,8 +3080,7 @@ function paintFold(f, id) {
   f.head.setAttribute("aria-expanded", String(open))
   if (f.head.dataset.label !== f.label) {
     f.head.dataset.label = f.label
-    f.head.replaceChildren(el("span", { class: "worked-label", text: f.label }),
-      el("span", { class: "worked-chev", "aria-hidden": "true", html: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 4 4 4-4 4"/></svg>' }))
+    f.head.replaceChildren(el("span", { class: "worked-label", text: f.label }), svgEl(I.chevR, "chev"))
   }
 }
 /** Bring an item of the open thread into view, drawing earlier entries until it's there, and mark it a moment. */
@@ -2691,10 +3116,10 @@ function retryButton(item) {
   if (!t || t.items.at(-1)?.id !== item.id) return null
   const last = t.items.findLast((i) => i.kind === "user")
   if (!last) return null
-  return el("button", { class: "btn btn-quiet btn-xs turn-retry", type: "button", title: "Send your last message again", onclick: (e) => {
+  return el("button", { class: "btn sm turn-retry", type: "button", title: "Send your last message again", onclick: (e) => {
     e.currentTarget.disabled = true
     api("POST", `threads/${t.id}/messages`, { text: last.text }).catch((err) => { e.currentTarget.disabled = false; fail(err) })
-  } }, "Try again")
+  } }, "Retry")
 }
 /** A turn's details: Stopped (if it was), the model, how long it took, what it cost, its tokens. */
 function turnMeta(item) {
@@ -2704,9 +3129,10 @@ function turnMeta(item) {
 function toolGroup(run, groups) {
   let g = feed.groups.get(run.key)
   if (!g) {
-    const head = el("button", { class: "tool-row tool-group-head", type: "button" })
-    const body = el("div", { class: "tool-group-body" })
-    g = { head, body, node: el("div", { class: "tool-group" }, head, body) }
+    const head = el("button", { class: "tools-sum", type: "button" })
+    const body = el("div", { class: "tools-list" })
+    const live = el("div", { class: "working live", hidden: true })
+    g = { head, body, live, node: el("div", { class: "tools" }, head, body, live) }
     head.addEventListener("click", () => {
       const open = !S.expanded.has(`group:${run.key}`)
       open ? S.expanded.add(`group:${run.key}`) : S.expanded.delete(`group:${run.key}`)
@@ -2718,60 +3144,80 @@ function toolGroup(run, groups) {
   const same = g.items && g.items.length === run.items.length && g.items.every((x, i) => x === run.items[i])
   g.items = run.items
   if (same) return g.node
-  reconcile(g.body, run.items.map(nodeFor))
   paintGroup(g, run.key)
   return g.node
 }
+/** What a running call is doing, as a verb: "Reading", "Running". */
+const LIVE_VERB = { Read: "Reading", Edit: "Editing", MultiEdit: "Editing", Write: "Writing", NotebookEdit: "Editing", Bash: "Running", PowerShell: "Running", Shell: "Running", Grep: "Searching", Glob: "Finding", WebFetch: "Fetching", WebSearch: "Searching the web", Task: "Delegating", Agent: "Delegating", TodoWrite: "Planning" }
+/** "Allowed" on a call the person let run (or "Always allowed"), told on the call itself. */
+const allowedTag = (always) => el("span", { class: "tag", title: always ? "You allowed this for the rest of the thread" : "You allowed this" }, svgEl(I.check), always ? "Always allowed" : "Allowed")
+/**
+ * A run of tool calls: one line saying what the finished ones did ("Read 3 files and ran 1 command"), open on
+ * demand to each call (each opens to its output or diff). The call that's running is the run's last row, outside
+ * the fold: a spinner, what it's doing, where, and its own clock. An approval the person gave rides on the call it
+ * let run as a tag; one they denied keeps a line of its own.
+ */
 function paintGroup(g, key) {
-  const tools = g.items.filter((i) => i.kind === "tool")
-  const last = tools.at(-1) ?? g.items.at(-1)
-  const open = S.expanded.has(`group:${key}`)
-  const state = last.kind === "tool" ? last.status : last.state === "allowed" ? "done" : "failed"
-  const failed = tools.filter((i) => i.status === "failed").length
-  // Closed is a class (not `hidden`) so the body can ease shut; inert keeps it out of reach meanwhile.
-  g.node.className = `tool-group ${state}${open ? " open" : ""}`
-  g.body.inert = !open
-  g.head.setAttribute("aria-expanded", String(open))
-  const line = (item) => el("span", { class: "reel-line" },
-    el("span", { class: "tool-name", text: item.kind === "tool" ? item.name : item.tool }),
-    el("span", { class: "tool-detail", text: rel(item.detail) }))
-  // The reel stays put across repaints, so a call finishing mid-roll doesn't cut the roll short.
-  if (!g.reel) g.win = el("span", { class: "reel-window" }, (g.reel = el("span", { class: "reel" })))
-  // A run that's over says what it did ("Read 7 files, edited 2"); one still going shows its latest call.
-  const summary = state !== "running" && tools.length > 1 ? toolSummary(tools) : ""
-  const counted = summary ? (failed ? `${failed} failed` : "") : `${tools.length} tool${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`
-  const sum = tools.reduce((s, i) => { if (!i.diff) return s; const c = countsOf(i); return { add: s.add + c.add, del: s.del + c.del, any: true } }, { add: 0, del: 0, any: false })
-  g.head.replaceChildren(...[
-    el("span", { class: "tool-state", "aria-label": state }),
-    g.win,
-    sum.any ? diffStat(sum) : null,
-    el("span", { class: "tool-count", text: counted })].filter(Boolean))
-  if (summary) {
-    g.spinning?.cancel()
-    g.spinning = null
-    g.shown = `summary:${last.id}`
-    g.reel.replaceChildren(el("span", { class: "reel-line" }, el("span", { class: "tool-summary", text: summary })))
-    return
+  const items = g.items
+  const tools = items.filter((i) => i.kind === "tool")
+  const live = tools.findLast((i) => i.status === "running" && S.open?.status === "running")
+  const tags = new Map()
+  const given = []
+  for (const i of items) {
+    if (i.kind === "permission" && i.state === "allowed") given.push(i)
+    else if (i.kind === "tool") {
+      const k = given.findIndex((p) => p.tool === i.name)
+      if (k >= 0) tags.set(i.id, given.splice(k, 1)[0].always === true)
+    }
   }
-  // A new call rolls up into the row, pushing what it showed (the call before, or the run's summary so far) out the
-  // top; the same call just repaints.
-  const roll = g.shown !== undefined && g.shown !== last.id && g.reel.firstElementChild && !matchMedia("(prefers-reduced-motion: reduce)").matches
-  g.shown = last.id
-  if (roll) rollReel(g, g.spinning ? g.landing : g.reel.firstElementChild, line(last))
-  else if (!g.spinning) g.reel.replaceChildren(line(last))
-  else g.landing = line(last) // the roll ends on the latest text
+  const done = tools.filter((i) => i !== live)
+  const shown = items.filter((i) => (i.kind === "tool" && i !== live) || (i.kind === "permission" && i.state !== "allowed"))
+  const open = S.expanded.has(`group:${key}`)
+  const failed = done.filter((i) => i.status === "failed").length
+  const state = live ? "running" : failed && tools.at(-1)?.status === "failed" ? "failed" : "done"
+  g.node.className = `tools ${state}${open ? " open" : ""}`
+  g.body.inert = !open
+  g.head.hidden = shown.length === 0
+  g.head.setAttribute("aria-expanded", String(open))
+  const denied = items.filter((i) => i.kind === "permission" && i.state === "denied").length
+  const words = toolSummary(done) || (denied ? `Denied ${plural(denied, "call")}` : plural(done.length, "call"))
+  const sum = done.reduce((s, i) => { if (!i.diff) return s; const c = countsOf(i); return { add: s.add + c.add, del: s.del + c.del, any: true } }, { add: 0, del: 0, any: false })
+  const headSig = JSON.stringify([words, sum, failed, denied])
+  if (g.head.dataset.sig !== headSig) {
+    g.head.dataset.sig = headSig
+    g.head.replaceChildren(...[svgEl(I.term), el("span", { class: "sum-text", text: words }), sum.any ? diffStat(sum) : null,
+      failed ? el("span", { class: "tool-count", text: `${failed} failed` }) : null, svgEl(I.chevR, "chev")].filter(Boolean))
+  }
+  reconcile(g.body, shown.map(nodeFor))
+  for (const i of shown) {
+    if (i.kind !== "tool") continue
+    const slot = nodeFor(i).querySelector(".tool-tag")
+    const want = tags.has(i.id) ? (tags.get(i.id) ? "always" : "once") : ""
+    if (slot && slot.dataset.v !== want) { slot.dataset.v = want; slot.replaceChildren(...(want ? [allowedTag(want === "always")] : [])) }
+  }
+  g.live.hidden = !live
+  if (live) {
+    const sig = `${live.id}|${live.detail}|${tags.get(live.id) ?? ""}`
+    if (g.live.dataset.sig !== sig) {
+      g.live.dataset.sig = sig
+      g.live.replaceChildren(...[svgEl(I.spin),
+        el("span", { class: "step" }, el("span", { class: "v", text: LIVE_VERB[live.name] ?? live.name.replace(/^mcp__[^_]+__/, "").replace(/_/g, " ") }), el("code", { text: rel(live.detail), title: live.detail })),
+        tags.has(live.id) ? allowedTag(tags.get(live.id)) : null,
+        el("span", { class: "clock", "data-since": live.at, text: elapsed(live.at) })].filter(Boolean))
+    }
+  } else delete g.live.dataset.sig
 }
 /**
- * What a run of tool calls did, in words: "Read 7 files, edited 2, ran 3 commands". Files are counted once
+ * What a run of tool calls did, in words: "Read 7 files, edited 2 and ran 3 commands". Files are counted once
  * however often they were read; tools it has no words for are named.
  */
 function toolSummary(tools) {
   const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`
   const files = (names) => new Set(tools.filter((t) => names.includes(t.name)).map((t) => t.detail)).size
   const count = (names) => tools.filter((t) => names.includes(t.name)).length
-  const known = ["Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "PowerShell", "Grep", "Glob", "WebFetch", "WebSearch", "Task", "Agent", "TodoWrite", "BashOutput", "KillShell"]
+  const known = ["Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "PowerShell", "Shell", "Grep", "Glob", "WebFetch", "WebSearch", "Task", "Agent", "TodoWrite", "BashOutput", "KillShell"]
   const read = files(["Read"]), edited = files(["Edit", "MultiEdit", "NotebookEdit"]), wrote = files(["Write"])
-  const ran = count(["Bash", "PowerShell"]), searched = count(["Grep", "Glob"]), web = count(["WebFetch", "WebSearch"]), agents = count(["Task", "Agent"])
+  const ran = count(["Bash", "PowerShell", "Shell"]), searched = count(["Grep", "Glob"]), web = count(["WebFetch", "WebSearch"]), agents = count(["Task", "Agent"])
   const others = [...new Set(tools.filter((t) => !known.includes(t.name)).map((t) => t.name.replace(/^mcp__[^_]+__/, "").replace(/_/g, " ")))]
   const parts = [
     read ? `read ${n(read, "file")}` : "",
@@ -2784,27 +3230,8 @@ function toolSummary(tools) {
     count(["TodoWrite"]) ? "updated the plan" : "",
     others.length ? `used ${others.slice(0, 2).join(", ")}${others.length > 2 ? ` and ${others.length - 2} more` : ""}` : ""
   ].filter(Boolean)
-  const text = parts.join(", ")
+  const text = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0] ?? ""
   return text ? text[0].toUpperCase() + text.slice(1) : ""
-}
-/**
- * Roll the row up one line, from `from` to `to`: the old line rises and fades out the top while the new one
- * rises in from below and settles, eased. A call that comes mid-roll rolls on from where the last one was going.
- */
-function rollReel(g, from, to) {
-  g.spinning?.cancel()
-  g.landing = to
-  g.reel.replaceChildren(from, to)
-  const timing = { duration: 420, easing: "cubic-bezier(.22,.8,.24,1)" }
-  const run = g.reel.animate([{ transform: "translateY(0)" }, { transform: "translateY(-50%)" }], timing)
-  from.animate([{ opacity: 1 }, { opacity: 0 }], { ...timing, duration: 300 })
-  to.animate([{ opacity: 0 }, { opacity: 1 }], timing)
-  g.spinning = run
-  run.onfinish = () => {
-    if (g.spinning !== run) return
-    g.spinning = null
-    g.reel.replaceChildren(g.landing)
-  }
 }
 function upsertItem(item) {
   const t = S.open
@@ -2870,23 +3297,16 @@ function renderItem(item) {
         out.inert = !now
         row.setAttribute("aria-expanded", String(now))
         now ? S.expanded.add(item.id) : S.expanded.delete(item.id)
-      } }, el("span", { class: "tool-state", "aria-label": item.status }), el("span", { class: "tool-name", text: item.name }), el("span", { class: "tool-detail", text: rel(item.detail) }),
-        counts ? diffStat(counts) : null)
+      } }, el("span", { class: "tool-state", "aria-label": item.status }), el("span", { class: "tool-name", text: item.name.replace(/^mcp__[^_]+__/, "") }), el("code", { class: "tool-detail", text: rel(item.detail), title: item.detail }),
+        counts ? diffStat(counts) : null, el("span", { class: "tool-tag" }))
       node.append(row, out)
       return node
     }
     case "permission": {
-      if (item.state !== "pending") {
-        return el("div", { class: `asked ${item.state}` }, el("b", { text: item.state === "allowed" ? "Allowed" : "Denied" }), el("span", { text: item.tool }), el("code", { text: rel(item.detail) }))
-      }
-      const answer = (allow) => api("POST", `threads/${S.open.id}/permissions/${item.id}`, { allow }).catch(fail)
-      return el("div", { class: "ask", role: "group", "aria-label": "Approval needed" },
-        el("div", { class: "ask-q", text: `Claude wants to ${verb(item.tool)}` }),
-        el("div", { class: "ask-what", text: rel(item.detail), title: item.detail }),
-        el("div", { class: "ask-actions" },
-          el("button", { class: "btn btn-primary", type: "button", onclick: () => answer(true) }, "Allow", el("kbd", { text: "Y" })),
-          el("button", { class: "btn btn-quiet", type: "button", onclick: () => answer(false) }, "Deny", el("kbd", { text: "N" })),
-          el("span", { class: "hint", text: "Change what needs asking with the model menu below." })))
+      // Waiting: the card above the composer asks (paintAsk). Allowed: the call it let run carries the tag.
+      if (item.state === "pending") return el("div", { class: "ask-slot", hidden: true })
+      return el("div", { class: `answered ${item.state}` }, svgEl(item.state === "denied" ? I.x : I.check),
+        el("span", { text: item.state === "denied" ? "Denied" : item.always ? "Always allowed" : "Allowed" }), el("span", { class: "who", text: item.tool.replace(/^mcp__[^_]+__/, "") }), el("code", { text: rel(item.detail), title: item.detail }))
     }
     case "memory": {
       const label = { recalled: "Recalled from memory", checked: "Memory checked", stored: "Stored in memory", none: "Committed" }[item.action]
@@ -2905,7 +3325,11 @@ function renderItem(item) {
         el("span", { class: "mem-label", text: "zero sent it on" }),
         el("span", { class: "mem-title", text: `${providerLabel(S.open?.provider)} stopped after a failed call (${item.reason}) without saying where things stand` })))
     case "turn": {
-      if (item.outcome === "failed") return el("div", { class: "turn-error" }, el("b", { text: "The turn stopped with an error. " }), item.error, retryButton(item))
+      if (item.outcome === "failed") {
+        return el("div", { class: "card err", role: "alert" },
+          el("div", { class: "card-head" }, svgEl(I.alert), el("span", { text: "Stopped on an error" }), el("span", { class: "grow" }), retryButton(item)),
+          item.error ? el("pre", { text: item.error }) : null)
+      }
       return el("div", { class: "turn-meta" }, turnMeta(item))
     }
   }
@@ -2917,27 +3341,28 @@ function renderItem(item) {
  */
 function compactCard(item) {
   const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k` : String(n))
-  const why = item.trigger === "auto" ? `${providerLabel(S.open?.provider)} compacted on its own as the context filled` : "Compacted as asked"
-  const head = (title, ...rest) => el("div", { class: "compact-head" }, el("span", { class: "compact-icon", "aria-hidden": "true" }), el("b", { text: title }), ...rest)
+  const who = providerLabel(S.open?.provider)
+  const why = item.trigger === "auto" ? `${who} compacted on its own as the context filled` : "Compacted as asked"
+  const head = (glyph, title, ...rest) => el("div", { class: "card-head" }, svgEl(glyph), el("span", { text: title }), el("span", { class: "grow" }), ...rest)
   if (item.state === "running") {
     const size = item.preTokens !== null ? `Summarizing about ${k(item.preTokens)} tokens of this thread` : "Summarizing this thread so far"
-    return el("div", { class: "compact-card running", role: "status", "aria-live": "polite" },
-      head("Compacting context", el("span", { class: "compact-time", "data-since": item.at, text: elapsed(item.at) })),
-      el("div", { class: "compact-bar", "aria-hidden": "true" }, el("i")),
-      el("div", { class: "compact-sub", text: `${size}. ${item.trigger === "auto" ? "Claude started this on its own; the turn goes on after." : "Your next step waits for it."}` }))
+    return el("div", { class: "card cmp running", role: "status", "aria-live": "polite" },
+      head(I.spin, "Compacting context", el("span", { class: "clock compact-time", "data-since": item.at, text: elapsed(item.at) })),
+      el("div", { class: "cmp-bar", "aria-hidden": "true" }, el("i")),
+      el("p", { class: "cmp-sub", text: `${size}. ${item.trigger === "auto" ? `${who} started this on its own; the turn goes on after.` : "Your next step waits for it."}` }))
   }
   if (item.state === "failed") {
-    return el("div", { class: "compact-card failed", role: "status" }, head("Compaction failed"), el("div", { class: "compact-sub", text: item.error || "The provider didn't finish compacting. The thread goes on as it was." }))
+    return el("div", { class: "card cmp failed", role: "status" }, head(I.alert, "Compaction failed"), el("p", { class: "cmp-sub", text: item.error || "The provider didn't finish compacting. The thread goes on as it was." }))
   }
   const facts = [
     item.preTokens !== null && item.postTokens !== null ? `${k(item.preTokens)} → ${k(item.postTokens)} tokens` : null,
     item.preTokens && item.postTokens !== null ? `${Math.max(0, Math.round((1 - item.postTokens / item.preTokens) * 100))}% smaller` : null,
     item.durationMs ? `${(item.durationMs / 1000).toFixed(1)}s` : null
   ].filter(Boolean)
-  return el("div", { class: "compact-card done", role: "status" },
-    head("Context compacted", el("span", { class: "compact-facts", text: facts.join(" · ") })),
-    el("div", { class: "compact-sub", text: `${why}. What came before is now this summary.` }),
-    item.summary ? el("details", { class: "compact-summary" }, el("summary", { text: "What Claude kept" }), el("div", { class: "prose" }, mdNodes(item.summary))) : null)
+  return el("div", { class: "card cmp done", role: "status" },
+    head(I.zap, "Context compacted", el("span", { class: "facts", text: facts.join(" · ") })),
+    el("p", { class: "cmp-sub", text: `${why}. What came before is now this summary.` }),
+    item.summary ? el("details", { class: "cmp-kept" }, el("summary", { class: "tools-sum" }, el("span", { text: `What ${who} kept` }), svgEl(I.chevR, "chev")), el("div", { class: "cmp-summary prose" }, mdNodes(item.summary))) : null)
 }
 /** m:ss since an ISO time. */
 const elapsed = (iso) => { const s = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` }
@@ -3032,12 +3457,10 @@ const PLUS_PATHS = '<path d="M8 3.5v9M3.5 8h9"/>'
 const FOLDER_PATHS = '<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/>'
 const PR_PATHS = '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7M8.5 3 7 4.5 8.5 6"/>'
 const OUT_PATHS = '<path d="M9.5 2.5h4v4M13.5 2.5 8 8M6.5 3.5h-3v9h9v-3"/>'
-const GIT = { min: 300, max: 680, base: 380 }
 /** The one panel on screen (the open thread's), or null. */
 let gitPanel = null
 
 const prState = (pr) => (pr.state === "OPEN" && pr.isDraft ? "draft" : pr.state.toLowerCase())
-const PR_STATE_LABEL = { open: "Open", draft: "Draft", merged: "Merged", closed: "Closed" }
 const CHECK_MARK = { passed: "✓", failed: "×", running: "", pending: "", skipped: "–", cancelled: "⊘", neutral: "–" }
 const REVIEW_LABEL = { APPROVED: "Approved", CHANGES_REQUESTED: "Changes requested", REVIEW_REQUIRED: "Review required" }
 const MERGE_STATE = {
@@ -3075,21 +3498,13 @@ const prose = (body) => mdNodes(githubMd(body))
  * conversation, newest first), and the code (what's uncommitted, and what the pull request changes).
  */
 const GIT_TABS = [["summary", "Summary"], ["timeline", "Timeline"], ["code", "Code"]]
-/** In a row that drags the window, the spot under the fixed Git toggle stays clickable (see toggleSpot). */
-const gitSpot = () => el("span", { class: "git-spot", "aria-hidden": "true" })
 const MORE_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.5" cy="8" r="1.25"/></svg>'
 
 function makeGitPanel(t) {
   if (gitPanel) clearInterval(gitPanel.timer)
-  // One toggle for open and closed, fixed at the window's top right like the left sidebar's: it never moves.
-  // Labelled, not just an icon: "Git", and how many files have changed once it's looked.
-  const badge = el("span", { class: "git-badge", hidden: true })
-  const count = el("span", { class: "git-count-chip", hidden: true })
-  const toggle = el("button", { class: "icon-btn git-toggle", type: "button", "aria-controls": "git-panel", onclick: () => setGitOpen(!gitOpenNow()),
-    html: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BRANCH_PATHS}</svg><span class="git-word">Git</span>` }, count, badge)
   const body = el("div", { class: "git-body", role: "tabpanel" }, el("p", { class: "git-empty", text: "Loading…" }))
   const sub = el("div", { class: "git-sub" })
-  const tabs = el("div", { class: "git-tabs", role: "tablist", "aria-label": "Git" },
+  const tabs = el("div", { class: "seg-ctl git-tabs", role: "tablist", "aria-label": "Changes" },
     GIT_TABS.map(([key, label]) => el("button", { class: "git-tab", type: "button", role: "tab", "data-tab": key, onclick: () => setGitTab(key) },
       el("span", { text: label }), el("span", { class: "git-tab-n" }))))
   // The arrows move between tabs, as in any tab list.
@@ -3102,23 +3517,13 @@ function makeGitPanel(t) {
     setGitTab(next)
     tabs.querySelector(`[data-tab="${next}"]`)?.focus()
   })
-  const resize = el("div", { class: "git-resize", role: "separator", "aria-orientation": "vertical", "aria-label": "Resize Git panel", tabindex: "0", title: "Drag to resize · double-click to reset" })
-  // Closed, it stays in the page (inert) so it can slide and fade both ways; see setGitOpen.
-  const node = el("aside", { class: "git-panel", id: "git-panel", "aria-label": "Git" },
-    resize,
-    // The header row holds only the toggle (and the window's buttons, in the desktop app); the tabs get a row of their own under it.
-    el("div", { class: "git-head" }, gitSpot()),
-    el("div", { class: "git-tabrow" }, tabs),
-    sub,
-    body)
-  showGit(node, load("gitOpen", false))
+  const node = el("div", { class: "git" }, el("div", { class: "git-tabrow" }, tabs), sub, body)
+  $("panel-body").replaceChildren(node)
   const saved = load("gitTab", "summary")
   gitPanel = {
-    node, body, sub, tabs, toggle, badge, count, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "",
+    node, body, sub, tabs, threadId: t.id, data: null, loading: false, at: 0, timer: 0, draft: "",
     tab: GIT_TABS.some(([k]) => k === saved) ? saved : "summary", tops: {}
   }
-  setGitWidth(load("gitWidth", GIT.base), false)
-  wireGitResize(resize)
   paintGitToggle()
   loadGit()
   // Keeping it current is zero's job, not a button's: while it's open it looks again on its own (often while
@@ -3130,7 +3535,15 @@ function makeGitPanel(t) {
     const waiting = g.data?.pr?.checks.some((c) => c.state === "running" || c.state === "pending")
     if (Date.now() - g.at > (waiting ? 15_000 : 45_000)) loadGit()
   }, 5_000)
-  return { node, toggle }
+}
+/** Off a thread, the panel says what it would show: what a thread changes, once one is open. */
+function emptyPanel() {
+  if (gitPanel) { clearInterval(gitPanel.timer); gitPanel = null }
+  const home = S.route.name === "home" || S.route.name === "new"
+  $("panel-body").replaceChildren(el("div", { class: "panel-empty" }, svgEl(I.diff),
+    el("b", { text: home ? "No changes yet" : "No thread open" }),
+    el("span", { text: home ? "What zero changes in this thread shows here, to review and commit." : "Open a thread to see what it changed." })))
+  paintGitToggle()
 }
 function setGitTab(key) {
   const g = gitPanel
@@ -3147,81 +3560,25 @@ function gitCatchUp() {
 }
 addEventListener("focus", gitCatchUp)
 document.addEventListener("visibilitychange", gitCatchUp)
-const gitOpenNow = () => !!gitPanel && !gitPanel.node.classList.contains("closed")
-/** Open or close the panel's node: the CSS slides it and fades its content; closed, it can't be focused or clicked. */
-function showGit(node, open) {
-  node.classList.toggle("closed", !open)
-  node.inert = !open
-}
-function setGitOpen(open) {
-  if (!gitPanel) return
-  showGit(gitPanel.node, open)
-  save("gitOpen", open)
-  paintGitToggle()
-  // Look again once it has slid open: repainting its content mid-slide would stall the animation.
-  if (open && Date.now() - gitPanel.at > 10_000) setTimeout(loadGit, sideMoveMs())
-}
-/** How long a sidebar takes to slide (--side-move in app.css), in ms. */
-const sideMoveMs = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--side-move")) * 1000 || 0
-function setGitWidth(w, persist = true) {
-  const width = Math.round(Math.min(GIT.max, Math.max(GIT.min, w)))
-  document.querySelector(".shell").style.setProperty("--git-w", `${width}px`)
-  if (persist) save("gitWidth", width)
-}
-function wireGitResize(handle) {
-  handle.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return
-    e.preventDefault()
-    handle.setPointerCapture(e.pointerId)
-    const right = handle.parentElement.getBoundingClientRect().right
-    document.body.classList.add("resizing")
-    const move = (ev) => setGitWidth(right - ev.clientX, false)
-    const up = (ev) => {
-      handle.removeEventListener("pointermove", move)
-      handle.removeEventListener("pointerup", up)
-      handle.removeEventListener("pointercancel", up)
-      document.body.classList.remove("resizing")
-      setGitWidth(right - ev.clientX)
-    }
-    handle.addEventListener("pointermove", move)
-    handle.addEventListener("pointerup", up)
-    handle.addEventListener("pointercancel", up)
-  })
-  handle.addEventListener("dblclick", () => setGitWidth(GIT.base))
-  handle.addEventListener("keydown", (e) => {
-    const now = handle.parentElement.getBoundingClientRect().width
-    const step = e.shiftKey ? 48 : 16
-    const next = { ArrowLeft: now + step, ArrowRight: now - step }[e.key]
-    if (next === undefined) return
-    e.preventDefault()
-    setGitWidth(next)
-  })
-}
-
-/** The Git toggle says what it will do, and a dot on it gives the PR's state (and its checks') at a glance. */
+/**
+ * The Changes toggle says what it will do; closed, a dot on it says the thread has uncommitted changes. The panel's
+ * head counts them. Its tip names the branch, the changes and the pull request.
+ */
 function paintGitToggle() {
+  const r = $("panel-toggle")
+  if (!r) return
   const g = gitPanel
-  if (!g) return
-  const open = gitOpenNow()
-  g.toggle.classList.toggle("on", open)
-  g.toggle.setAttribute("aria-expanded", String(open))
-  const d = g.data
+  const d = g?.data
   const pr = d?.pr
-  g.badge.hidden = !pr
-  if (pr) {
-    const failing = pr.checks.some((c) => c.state === "failed")
-    const running = pr.checks.some((c) => c.state === "running" || c.state === "pending")
-    g.badge.dataset.state = prState(pr)
-    g.badge.dataset.checks = failing ? "failed" : running ? "running" : pr.checks.length ? "passed" : ""
-  }
-  const branch = d?.repo ? d.branch || "detached HEAD" : S.open?.branch || ""
   const changed = d?.repo ? d.changes.length : 0
-  g.count.hidden = !changed
-  g.count.textContent = changed > 99 ? "99+" : String(changed)
-  const files = changed ? `${changed} changed file${changed === 1 ? "" : "s"}` : ""
-  const label = `${open ? "Hide" : "Show"} Git`
-  g.toggle.setAttribute("aria-label", [label, files].filter(Boolean).join(", "))
-  g.toggle.title = [`${label} (Alt+G)`, branch, files, pr ? `PR #${pr.number} · ${PR_STATE_LABEL[prState(pr)]}` : ""].filter(Boolean).join("\n")
+  const open = gitOpenNow()
+  r.classList.toggle("dot", !open && changed > 0)
+  $("panel-count").textContent = changed ? (changed > 99 ? "99+" : String(changed)) : ""
+  const branch = d?.repo ? d.branch || "detached HEAD" : S.open?.branch || ""
+  const files = changed ? `${changed} uncommitted file${changed === 1 ? "" : "s"}` : ""
+  const label = `${open ? "Hide" : "Show"} changes`
+  r.setAttribute("aria-label", [label, files].filter(Boolean).join(", "))
+  r.dataset.tip = [label, branch, files, pr ? `PR #${pr.number} · ${PR_STATE_LABEL[prState(pr)]}` : ""].filter(Boolean).join(" · ")
 }
 
 /** How often auto-pull fetches for the open thread. */
@@ -3485,7 +3842,6 @@ const gitMore = (title, items) => {
   })
   return b
 }
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`
 
 /** Summary: the branch against its upstream, and its pull request (or how to open one), its checks and description. */
 function summaryTab(d, g) {
@@ -3924,14 +4280,33 @@ document.addEventListener("click", async (e) => {
 
 // ---------- settings: a modal, its settings grouped into sections down the left ----------
 const SETTINGS_SECTIONS = [
+  ["general", "General", '<rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M2 6h12"/>'],
   ["providers", "Providers", '<path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/>'],
   ["threads", "New threads", '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/>'],
+  ["projects", "Projects", '<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5.99a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/>'],
   ["memory", "Memory", '<path d="M8 2.5a5.5 5.5 0 1 0 5.5 5.5"/><path d="M8 5v3l2 1.5"/><path d="M11 1.8 13.8 2l.2 2.8"/>'],
   ["genome", "Genome", '<path d="M5 1.5c0 4 6 5 6 9.5M11 1.5c0 4-6 5-6 9.5M5 14.5v-3.5M11 14.5v-3.5M6 4h4M6.3 11h3.4"/>'],
   ["remote", "Remote access", '<rect x="4.5" y="1.5" width="7" height="13" rx="1.6"/><path d="M7.2 12.2h1.6"/>'],
   ["storage", "Storage", '<ellipse cx="8" cy="4" rx="5.5" ry="2"/><path d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2"/>']
 ]
-let settingsTab = load("settingsTab", "providers")
+let settingsTab = load("settingsTab", "general")
+/**
+ * Settings › Appearance: the system's light or dark, or one of them always. Kept on this device; in the desktop
+ * app it sets the window's own theme too, so its minimize, maximize and close buttons match.
+ */
+function setTheme(pick) {
+  save("theme", pick)
+  applyTheme()
+}
+function applyTheme() {
+  const pick = load("theme", "system")
+  const root = document.documentElement
+  root.dataset.pick = pick
+  root.dataset.theme = pick === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : pick
+  window.zero?.theme?.(pick)
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme)
+applyTheme()
 /** Claude Code's and Codex's versions as the backend last said, so a repaint shows them at once. */
 let providerVersions = null
 function openSettings() {
@@ -4109,7 +4484,32 @@ function paintSettings() {
           } })))
     ].filter(Boolean)
   }
+  /** A choice of a few, as one segmented control. */
+  const segs = (options, get, set, label) => {
+    const box = el("div", { class: "seg-ctl", role: "group", "aria-label": label })
+    const paint = () => { for (const b of box.children) b.setAttribute("aria-pressed", String(b.dataset.v === get())) }
+    box.append(...options.map(([v, l]) => el("button", { type: "button", "data-v": v, text: l, onclick: () => { set(v); paint() } })))
+    paint()
+    return box
+  }
   const sections = {
+    general: () => [
+      group(null, "These are kept on this device.",
+        row("Appearance", "Light, dark, or as the system has it.", segs([["system", "System"], ["light", "Light"], ["dark", "Dark"]], () => load("theme", "system"), setTheme, "Appearance")),
+        row("Send messages with", "The other key makes a new line, as Shift Enter always does.", segs([["enter", "Enter"], ["ctrl", chord("Ctrl Enter")]], () => S.sendWith, (v) => { S.sendWith = v; save("sendWith", v) }, "Send messages with")))
+    ],
+    projects: () => [
+      group(null, "A project is a folder on this machine. Threads in it read, edit and run things there.",
+        ...S.projects.map((p) => {
+          const n = S.threads.filter((t) => t.projectId === p.id).length
+          return row(p.name, `${p.path} · ${plural(n, "thread")}`,
+            el("span", { class: "row-end" },
+              el("button", { class: "btn quiet sm", type: "button", text: "New thread", onclick: () => { d.close(); go(`#/new/${p.id}`) } }),
+              el("button", { class: "ib", type: "button", title: "Copy the folder's path", "aria-label": `Copy ${p.name}'s path`, html: I.copy, onclick: () => copyText(p.path, "Folder path copied.") }),
+              el("button", { class: "ib", type: "button", title: `Remove ${p.name} from zero`, "aria-label": `Remove ${p.name}`, html: I.trash, onclick: async () => { await removeProject(p); paintSettings() } })))
+        }),
+        el("div", { class: "set-actions" }, el("button", { class: "btn sm", type: "button", html: `${I.folderPlus}Add project`, onclick: () => { d.close(); addProject() } })))
+    ],
     providers: () => [
       group(el("span", { class: "set-title-row" }, "Claude", pill(st?.available, "Ready", "Off")),
         "Through the Claude Agent SDK, signed in the way Claude Code is on this machine.",
@@ -4176,7 +4576,7 @@ function paintSettings() {
         row("zero itself", null, el("span", { class: "path", text: S.zeroRoot })))
     ]
   }
-  if (!sections[settingsTab]) settingsTab = "providers"
+  if (!sections[settingsTab]) settingsTab = "general"
   const [, title] = SETTINGS_SECTIONS.find(([k]) => k === settingsTab)
   const pick = (k) => { settingsTab = k; save("settingsTab", k); paintSettings(); d.querySelector(`.set-nav [data-tab="${k}"]`)?.focus() }
   const nav = el("nav", { class: "set-nav", "aria-label": "Settings sections" },
@@ -4191,7 +4591,7 @@ function paintSettings() {
         pick(SETTINGS_SECTIONS[(i + (e.key === "ArrowDown" ? 1 : -1) + SETTINGS_SECTIONS.length) % SETTINGS_SECTIONS.length][0])
       }
     }, icon(paths), el("span", { text: label }))))
-  const close = el("button", { class: "icon-btn set-close", type: "button", title: "Close (Esc)", "aria-label": "Close settings", text: "×", onclick: () => d.close() })
+  const close = el("button", { class: "ib set-close", type: "button", title: "Close (Esc)", "aria-label": "Close settings", html: I.x, onclick: () => d.close() })
   d.replaceChildren(nav, el("div", { class: "set-body" },
     el("header", { class: "set-head" }, el("h3", { text: title }), el("span", { class: "hint", text: "Saved as you change them." }), close),
     el("div", { class: "set-scroll" }, sections[settingsTab]())))
@@ -4825,15 +5225,15 @@ function connect() {
       // Ended: its answer gets its action row, and the work before it folds away (see renderFeed).
       if (ended && feed) renderFeed()
       if (!("effort" in meta)) delete S.open.effort // cleared: back to the provider's default
-      if (feed && document.activeElement !== feed.title) feed.title.value = meta.title
       if (feed) {
         feed.models.set({ provider: meta.provider, model: meta.model, effort: meta.effort ?? defaultEffort(meta.provider) })
         feed.models.setAccess(meta.access)
         paintReady(S.open)
       }
-      if (!("unseen" in meta)) delete S.open.unseen
+      for (const k of ["unseen", "pinned", "ended"]) if (!(k in meta)) delete S.open[k]
       markSeen()
       paintWorking()
+      renderInfo()
     }
     // A thread the open one linked to (started, messaged, waited for) changed: its cards show how it is now.
     repaintLinksTo(meta.id, meta.parentId)
@@ -4945,39 +5345,90 @@ function connect() {
 }
 
 // ---------- command palette ----------
-/** Ctrl+K (Cmd+K): every thread, project and place, filtered as you type; Enter goes, arrows choose. */
+/**
+ * Ctrl+K (Cmd+K): go to anything. Threads by title or project (the latest first), what threads' messages say
+ * (zero.db's search, a moment after the typing stops), new threads in each project, and zero's actions.
+ * Enter goes, arrows choose.
+ */
 function openPalette() {
   const d = $("palette")
   if (d.open) return
-  const entries = [
-    { label: "New thread", hint: chord("Alt N"), run: () => newThread() },
-    ...S.threads.map((t) => ({ label: t.title, hint: S.projects.find((p) => p.id === t.projectId)?.name ?? "", run: () => go(`#/t/${t.id}`) })),
-    ...S.projects.map((p) => ({ label: `New thread in ${p.name}`, hint: p.path, run: () => go(`#/new/${p.id}`) })),
-    { label: "Evolution", hint: "zero's lineage and runs", run: () => go("#/evolution") },
-    { label: "Settings", hint: "models, access, memory", run: () => openSettings() },
-    ...(gitPanel ? [{ label: gitOpenNow() ? "Hide the Git panel" : "Show the Git panel", hint: "Alt+G", run: () => setGitOpen(!gitOpenNow()) }] : []),
-    { label: "Add a project", hint: "a folder on this machine", run: () => addProject() },
-    { label: "Keyboard shortcuts", hint: "?", run: () => openKeys() }
+  const stateGlyph = (t) => ({ ask: I.ask, failed: I.alert, working: I.spin, settled: I.settle })[stateOf(t)] ?? I.inbox
+  const actions = () => [
+    { label: "New thread", kbd: "Alt N", glyph: I.compose, run: () => newThread() },
+    ...S.projects.map((p) => ({ label: `New thread in ${p.name}`, where: p.path, glyph: I.plus, run: () => go(`#/new/${p.id}`) })),
+    { label: "Add project…", glyph: I.folderPlus, run: () => addProject() },
+    { label: S.sideOpen ? "Hide sidebar" : "Show sidebar", kbd: "Ctrl B", glyph: I.sideL, run: () => toggleSide() },
+    ...(panelAllowed() ? [{ label: gitOpenNow() ? "Hide changes" : "Show changes", kbd: "Ctrl Alt B", glyph: I.sideR, run: () => setPanel(!gitOpenNow()) }] : []),
+    ...(S.route.name === "thread" ? [{ label: $("info")?.hidden === false ? "Hide details" : "Show details", kbd: "Ctrl I", glyph: I.card, run: () => toggleInfo() }] : []),
+    { label: "Inbox", kbd: "Alt 1", glyph: I.inbox, run: () => { setView("inbox"); if (!S.sideOpen) setSide(true) } },
+    { label: "Working", kbd: "Alt 2", glyph: I.spin, run: () => { setView("working"); if (!S.sideOpen) setSide(true) } },
+    { label: "Settled", kbd: "Alt 3", glyph: I.settle, run: () => { setView("settled"); if (!S.sideOpen) setSide(true) } },
+    { label: "Evolution", where: "zero's lineage and runs", glyph: I.evo, run: () => go("#/evolution") },
+    { label: "Settings", kbd: "Ctrl ,", glyph: I.gear, run: () => openSettings() },
+    { label: "Keyboard shortcuts", kbd: "?", glyph: I.keys, run: () => openKeys() }
   ]
-  const input = el("input", { type: "search", placeholder: "Go to a thread, project or place…", "aria-label": "Search", autocomplete: "off", spellcheck: "false" })
-  const list = el("ul", { class: "palette-list", role: "listbox" })
-  let shown = []
+  const input = el("input", { type: "search", placeholder: "Go to a thread, project or action", "aria-label": "Go to", autocomplete: "off", spellcheck: "false" })
+  const list = el("div", { class: "pal-list", role: "listbox" })
+  let rows = []
   let at = 0
+  let hits = { q: "", list: [] }
+  let asking = 0
+  const choose = (i) => { const r = rows[i]; d.close(); r?.run() }
   const paint = () => {
-    const words = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean)
-    shown = entries.filter((x) => words.every((w) => `${x.label} ${x.hint}`.toLowerCase().includes(w))).slice(0, 50)
-    at = Math.min(at, Math.max(0, shown.length - 1))
-    list.replaceChildren(...(shown.length ? shown.map((x, i) => el("li", { class: `palette-item${i === at ? " on" : ""}`, role: "option", "aria-selected": String(i === at), onmousedown: (e) => { e.preventDefault(); choose(i) } },
-      el("span", { class: "palette-label", text: x.label }), el("span", { class: "palette-hint", text: x.hint }))) : [el("li", { class: "palette-none", text: "Nothing matches." })]))
-    list.children[at]?.scrollIntoView({ block: "nearest" })
+    const q = input.value.trim().toLowerCase()
+    const words = q.split(/\s+/).filter(Boolean)
+    const match = (s) => words.every((w) => s.toLowerCase().includes(w))
+    const threads = [...S.threads].filter((t) => !q || match(`${t.title} ${projectName(t.projectId)}`)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, q ? 30 : 6)
+    const listed = new Set(threads.map((t) => t.id))
+    const found = q && hits.q === q ? hits.list.filter((h) => h.itemId && !listed.has(h.threadId) && threadMeta(h.threadId)).slice(0, 12) : []
+    const acts = actions().filter((a) => !q || match(`${a.label} ${a.where ?? ""}`))
+    rows = [
+      ...threads.map((t) => ({ head: q ? "Threads" : "Recent", glyph: stateGlyph(t), label: t.title, where: projectName(t.projectId), run: () => go(`#/t/${t.id}`) })),
+      ...found.map((h) => ({ head: "In messages", glyph: I.search, label: threadMeta(h.threadId).title, snippet: h.snippet, run: () => { S.jump = h.itemId; go(`#/t/${h.threadId}`) } })),
+      ...acts.map((a) => ({ head: "Actions", ...a }))
+    ]
+    at = Math.min(at, Math.max(0, rows.length - 1))
+    const nodes = []
+    rows.forEach((r, i) => {
+      if (i === 0 || rows[i - 1].head !== r.head) nodes.push(el("div", { class: "pop-h", text: r.head }))
+      const b = el("button", { class: `pi${i === at ? " hl" : ""}`, type: "button", role: "option", tabindex: "-1", "aria-selected": String(i === at) },
+        icon(r.glyph),
+        el("span", { class: "lb" }, r.label, r.snippet ? el("small", {}, ...marked(r.snippet)) : null),
+        r.where ? el("span", { class: "where", text: r.where }) : null,
+        r.kbd ? el("span", { class: "k", text: chord(r.kbd) }) : null)
+      b.addEventListener("mousedown", (e) => { e.preventDefault(); choose(i) })
+      b.addEventListener("mousemove", () => { if (at !== i) { at = i; for (const [j, n] of [...list.querySelectorAll(".pi")].entries()) n.classList.toggle("hl", j === at) } })
+      nodes.push(b)
+    })
+    if (!rows.length) nodes.push(el("div", { class: "pal-empty", text: q.length >= 2 && hits.q !== q ? "Searching messages…" : `Nothing matches “${input.value.trim()}”` }))
+    list.replaceChildren(...nodes)
+    list.querySelectorAll(".pi")[at]?.scrollIntoView({ block: "nearest" })
   }
-  const choose = (i) => { const x = shown[i]; d.close(); if (x) x.run() }
-  input.addEventListener("input", () => { at = 0; paint() })
+  /** Search the messages of every thread, a moment after the typing stops. */
+  const search = () => {
+    clearTimeout(asking)
+    const q = input.value.trim().toLowerCase()
+    if (q.length < 2) return
+    asking = setTimeout(async () => {
+      const found = await api("GET", `search/${encodeURIComponent(q)}`).catch(() => [])
+      if (input.value.trim().toLowerCase() !== q) return
+      hits = { q, list: found }
+      paint()
+    }, 140)
+  }
+  input.addEventListener("input", () => { at = 0; paint(); search() })
   input.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); at = (at + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % Math.max(1, shown.length); paint() }
-    else if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); choose(at) }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault()
+      if (!rows.length) return
+      at = (at + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length
+      const items = [...list.querySelectorAll(".pi")]
+      items.forEach((n, j) => n.classList.toggle("hl", j === at))
+      items[at]?.scrollIntoView({ block: "nearest" })
+    } else if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); choose(at) }
   })
-  d.replaceChildren(input, list)
+  d.replaceChildren(el("div", { class: "pal-in" }, svgEl(I.search), input), list)
   d.addEventListener("close", () => d.replaceChildren(), { once: true })
   d.addEventListener("click", (e) => { if (e.target === d) d.close() })
   paint()
@@ -4986,90 +5437,111 @@ function openPalette() {
 }
 
 // ---------- keys ----------
-document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "k" || e.key === "K")) {
-    e.preventDefault()
-    if ($("palette").open) $("palette").close()
-    else if (!$("dialog").open && !$("settings").open) openPalette()
-    return
-  }
-  if ($("dialog").open || $("palette").open) return
-  const typing = e.target.isContentEditable || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
-  if (e.altKey && (e.key === "n" || e.key === "N")) {
-    e.preventDefault()
-    newThread()
-    return
-  }
-  if (e.altKey && (e.key === "g" || e.key === "G") && gitPanel) {
-    e.preventDefault()
-    setGitOpen(!gitOpenNow())
-    return
-  }
-  // Escape with words selected (the Quote button up) puts the selection away; it doesn't stop the turn.
-  if (e.key === "Escape" && (quoteShown() || !(getSelection()?.isCollapsed ?? true)) && !typing) {
-    e.preventDefault()
-    hideQuote()
-    getSelection()?.removeAllRanges()
-    return
-  }
-  if (e.key === "Escape" && S.open?.status === "running") {
-    e.preventDefault()
-    api("POST", `threads/${S.open.id}/stop`, {}).catch(fail)
-    return
-  }
-  if (!typing && S.open && (e.key === "y" || e.key === "n")) {
-    const ask = S.open.items.find((i) => i.kind === "permission" && i.state === "pending")
-    if (ask) api("POST", `threads/${S.open.id}/permissions/${ask.id}`, { allow: e.key === "y" }).catch(fail)
-  }
-})
-$("add-project").addEventListener("click", addProject)
-
-// ---------- starting, finding, and the keys for both ----------
-const MAC = /Mac|iPhone|iPad/.test(navigator.platform)
-/** A key chord as this machine names it: "Ctrl K" here, "⌘K" on a Mac. */
-const chord = (k) => MAC ? k.replace(/Ctrl ?/g, "⌘").replace(/Alt ?/g, "⌥").replace(/Shift ?/g, "⇧") : k
-for (const k of document.querySelectorAll(".side-kbd")) k.textContent = chord(k.textContent)
-/** A new thread in the project you're in (the first one otherwise). */
-function newThread() {
-  const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
-  if (pid) go(`#/new/${pid}`)
-  else addProject()
-}
-$("open-palette").addEventListener("click", (e) => { e.preventDefault(); openPalette() })
-$("open-keys").addEventListener("click", () => openKeys())
 /** Every key zero answers to, grouped, in one sheet: opened with ?, from the palette, or the sidebar. */
 const KEYS = [
-  ["Anywhere", [["Ctrl K", "Go to any thread, project or place"], ["Alt N", "New thread"], ["Alt G", "Show or hide the Git panel"], ["?", "These shortcuts"]]],
-  ["Writing", [["Enter", "Send"], ["Shift Enter", "New line"], ["@", "Point at a file in the project"], ["/", "Commands: zero's, and your Claude Code commands and skills"], ["↑ ↓", "Your earlier messages, in an empty box"]]],
-  ["While Claude works", [["Esc", "Stop the turn"], ["Y / N", "Allow or deny what it asks"]]]
+  ["Threads", [["Ctrl K", "Go to anything"], ["Alt N", "New thread"], ["Alt ↓ / Alt ↑", "Next or previous thread"], ["Alt S", "Settle, and go to the next"], ["F2", "Rename the thread"], ["Alt 1 / 2 / 3", "Inbox, Working, Settled"]]],
+  ["Writing", [["Enter", "Send (or Ctrl Enter: Settings)"], ["Shift Enter", "New line"], ["@", "Point at a file in the project"], ["/", "Commands: zero's, and your Claude Code commands and skills"], ["↑ ↓", "Your earlier messages, in an empty box"]]],
+  ["While Claude works", [["Esc", "Stop the turn"], ["Y / Ctrl Enter", "Allow what it asks"], ["N", "Deny it"]]],
+  ["Window", [["Ctrl B", "Sidebar"], ["Ctrl Alt B / Alt G", "Changes"], ["Ctrl I", "Thread details"], ["Ctrl ,", "Settings"], ["?", "These shortcuts"], ["/", "Focus the composer"], ["Esc", "Close a menu or panel"]]]
 ]
 function openKeys() {
   if ($("dialog").open || $("palette").open || document.querySelector(".keys-sheet")) return
-  const d = el("dialog", { class: "keys-sheet", "aria-label": "Keyboard shortcuts" })
-  d.append(el("div", { class: "keys-head" }, el("h3", { text: "Keyboard shortcuts" }), el("button", { class: "icon-btn", type: "button", "aria-label": "Close", text: "×", onclick: () => d.close() })),
-    ...KEYS.map(([group, rows]) => el("section", { class: "keys-group" }, el("h4", { text: group }),
-      el("dl", {}, ...rows.flatMap(([k, what]) => [el("dt", {}, ...chord(k).split(" ").map((part) => el("kbd", { text: part }))), el("dd", { text: what })])))))
+  const keys = (s) => s.split(" / ").flatMap((part, i) => [i ? el("span", { class: "or", text: "/" }) : null, ...chord(part).split(" ").map((k) => el("kbd", { class: "key", text: k }))]).filter(Boolean)
+  const d = el("dialog", { class: "dlg keys-sheet", "aria-label": "Keyboard shortcuts" })
+  d.append(el("div", { class: "dlg-h" }, el("h2", { text: "Keyboard shortcuts" }), el("button", { class: "ib", type: "button", "aria-label": "Close", html: I.x, onclick: () => d.close() })),
+    el("div", { class: "dlg-b" }, el("dl", { class: "keys" }, ...KEYS.flatMap(([group, rows]) => [el("h3", { text: group }), ...rows.flatMap(([k, what]) => [el("dt", { text: what }), el("dd", {}, ...keys(k))])]))))
   d.addEventListener("click", (e) => { if (e.target === d) d.close() })
   d.addEventListener("close", () => d.remove())
   document.body.append(d)
   d.showModal()
 }
+const isTyping = (t) => t.isContentEditable || t instanceof HTMLTextAreaElement || t instanceof HTMLInputElement || t instanceof HTMLSelectElement
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return
-  const t = e.target
-  if (t.isContentEditable || t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return
+  const ctrl = e.ctrlKey || e.metaKey
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key
+  if (ctrl && !e.altKey && k === "k") {
+    e.preventDefault()
+    if ($("palette").open) $("palette").close()
+    else if (!$("dialog").open && !$("settings").open && !document.querySelector("dialog.keys-sheet[open]")) openPalette()
+    return
+  }
   if (document.querySelector("dialog[open]")) return
-  e.preventDefault()
-  openKeys()
+  const typing = isTyping(e.target)
+  if (ctrl && !e.altKey && !e.shiftKey && k === "i") { e.preventDefault(); toggleInfo(); return }
+  if (ctrl && e.altKey && (k === "b" || e.code === "KeyB")) { e.preventDefault(); if (panelAllowed()) setPanel(!gitOpenNow()); return }
+  if (ctrl && !e.altKey && !e.shiftKey && k === "b") { e.preventDefault(); toggleSide(); return }
+  if (ctrl && !e.altKey && k === ",") { e.preventDefault(); openSettings(); return }
+  if (e.altKey && !ctrl && (k === "n" || e.code === "KeyN")) { e.preventDefault(); newThread(); return }
+  if (e.altKey && !ctrl && (k === "g" || e.code === "KeyG")) { e.preventDefault(); if (panelAllowed()) setPanel(!gitOpenNow()); return }
+  if (e.altKey && !ctrl && ["1", "2", "3"].includes(e.code?.replace("Digit", "") ?? k)) {
+    e.preventDefault()
+    setView(["inbox", "working", "settled"][Number(e.code.replace("Digit", "")) - 1])
+    if (!S.sideOpen) setSide(true, !narrow.matches)
+    return
+  }
+  if (e.altKey && !ctrl && (k === "ArrowDown" || k === "ArrowUp")) {
+    e.preventDefault()
+    const next = neighbour(S.open?.id ?? "", k === "ArrowDown" ? 1 : -1)
+    if (next) go(`#/t/${next}`)
+    return
+  }
+  if (e.altKey && !ctrl && (k === "s" || e.code === "KeyS")) {
+    e.preventDefault()
+    const t = S.open
+    if (S.route.name !== "thread" || !t || t.status === "running" || stateOf(t) === "settled") return
+    // Settle, and go on to the next thing that needs you.
+    const next = S.view === "inbox" ? neighbour(t.id, 1) ?? neighbour(t.id, -1) : null
+    settle(threadMeta(t.id) ?? t)
+    if (next && next !== t.id) go(`#/t/${next}`)
+    return
+  }
+  if (k === "F2" && S.route.name === "thread" && !typing) { e.preventDefault(); startRename(); return }
+  if (k === "Escape") {
+    // A menu or a picker closes itself first (their own keys); then what lies over the thread; then a selection.
+    if (narrow.matches && S.sideOpen) { e.preventDefault(); return setSide(false, false) }
+    if (mid.matches && gitOpenNow()) { e.preventDefault(); return setPanel(false, false) }
+    if (!infoDocked() && S.infoOver) { e.preventDefault(); S.infoOver = false; return layoutInfo() }
+    // Escape with words selected (the Quote button up) puts the selection away; it doesn't stop the turn.
+    if ((quoteShown() || !(getSelection()?.isCollapsed ?? true)) && !typing) {
+      e.preventDefault()
+      hideQuote()
+      getSelection()?.removeAllRanges()
+      return
+    }
+    // Then zero's own: Esc stops a running turn.
+    if (S.open?.status === "running") {
+      e.preventDefault()
+      api("POST", `threads/${S.open.id}/stop`, {}).catch(fail)
+    }
+    return
+  }
+  if (typing || ctrl || e.altKey) return
+  if (k === "?") { e.preventDefault(); openKeys(); return }
+  if (k === "/" && liveBox) { e.preventDefault(); liveBox.focus(); return }
+  if (S.open && (k === "y" || k === "n")) {
+    const ask = pendingAsk()
+    if (ask) { e.preventDefault(); answerAsk(ask, k === "y") }
+  }
 })
+
+/** A new thread in the project you're in (the first one otherwise). */
+function newThread() {
+  const pid = S.open?.projectId ?? S.route.projectId ?? S.projects[0]?.id
+  if (pid) go(`#/new/${pid}`)
+  else addProject()
+  requestAnimationFrame(() => liveBox?.focus())
+}
+$("open-keys").addEventListener("click", () => openKeys())
 // An hour idle is reached by the clock, not by an event: look again each minute.
 setInterval(() => { if (S.open) paintCompact(S.open) }, 60_000)
-// A file dropped anywhere but the composer would open in place of the app; it does nothing instead.
+// A file dropped anywhere but the thread would open in place of the app; it does nothing instead.
 for (const type of ["dragover", "drop"]) {
   addEventListener(type, (e) => { if (e.dataTransfer?.types.includes("Files") && !e.target.closest?.(".composer")) e.preventDefault() })
 }
 addEventListener("resize", () => { if (S.route.name === "evolution" && S.evo) paintEvo() })
 setInterval(() => renderSide(), 60_000)
+// Clocks: a running call's, the header's, a compaction's; each second.
+setInterval(() => { for (const n of document.querySelectorAll("#main .clock[data-since]")) n.textContent = elapsed(n.dataset.since) }, 1000)
 
 // ---------- start ----------
 async function boot() {
@@ -5077,12 +5549,16 @@ async function boot() {
     const b = await api("GET", "bootstrap")
     Object.assign(S, { settings: b.settings, projects: b.projects, threads: b.threads, providers: b.providers, home: b.home, zeroRoot: b.zeroRoot, limits: b.limits ?? [] })
   } catch (e) {
-    $("main").replaceChildren(el("div", { class: "start" }, el("div", { class: "start-inner" },
+    $("main").replaceChildren(headBar(), el("div", { class: "view" }, el("div", { class: "blank" }, el("div", { class: "blank-in" },
       el("h1", { text: "Can't reach zero" }),
-      el("p", { class: "lede", text: `${e.message}. Restart the app; if it keeps happening, run it from a terminal with \`npm run app\` to see why.` }))))
+      el("p", { text: `${e.message}. Restart the app; if it keeps happening, run it from a terminal with \`npm run app\` to see why.` })))))
     return
   }
+  clampWidths()
+  applyShell()
   connect()
+  // With the layout in place, let things move.
+  requestAnimationFrame(() => requestAnimationFrame(() => app.classList.remove("no-anim")))
   if (!location.hash) {
     const last = load("last", null)
     if (last && S.threads.some((t) => t.id === last)) return go(`#/t/${last}`)

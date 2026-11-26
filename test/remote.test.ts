@@ -163,7 +163,7 @@ describe("remote access over HTTP", () => {
     expect(html).toContain('<script src="web.js"></script>')
     expect(page.headers.get("x-frame-options")).toBe("DENY")
     expect((await call("/web.js")).headers.get("content-type")).toMatch(/javascript/)
-    expect((await call("/fonts/martian-mono.woff2")).status).toBe(200)
+    expect((await call("/fonts/geist-mono.woff2")).status).toBe(200)
     expect((await call("/../package.json")).status).toBe(404)
     const boot = await call("/api/bootstrap", { headers: { "x-zero": "1" } })
     expect(boot.status).toBe(200)
