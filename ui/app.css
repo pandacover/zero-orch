@@ -247,7 +247,8 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 .run-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink); animation: pulse 1.6s ease-in-out infinite; flex: none; }
 .ask-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); flex: none; }
 
-.view { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; padding-right: var(--info-pad, 0px); transition: padding-right var(--move); }
+/* the scrollbar's room is kept on both sides, so the column stays centred over the composer's */
+.view { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; scrollbar-gutter: stable both-edges; padding-right: var(--info-pad, 0px); transition: padding-right var(--move); }
 .col { width: min(var(--col), 100%); margin: 0 auto; }
 .view > .col { padding: 0 16px; width: min(calc(var(--col) + 32px), 100%); }
 
@@ -433,7 +434,8 @@ a.att:hover { background: color-mix(in srgb, var(--ink) 11%, transparent); }
 .card-head .grow { flex: 1; }
 .card-head > .ico svg { width: 14px; height: 14px; color: var(--muted); }
 .feed .card-head .btn { margin-right: -6px; }
-.turn-files { margin-top: 10px; }
+/* under the answer, but on the column's edges like every card */
+.turn-files { margin: 10px calc(-1 * var(--gut)) 0; }
 .files-list { list-style: none; margin: 4px 0 0; padding: 0; }
 .files-list li { display: flex; align-items: center; gap: 10px; min-width: 0; height: 26px; font: 400 12px var(--mono); }
 .files-list .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--muted); padding: 0; border: 0; background: none; font: inherit; }
@@ -522,7 +524,8 @@ a.link-title:hover { text-decoration: underline; text-underline-offset: 2px; }
 .suggest-item:hover { color: var(--ink); background: var(--hover); }
 
 /* ---------- the dock: what's above the composer, the composer, and the row under it ---------- */
-.dock { position: relative; flex: none; padding: 0 calc(16px + var(--info-pad, 0px)) 12px 16px; transition: padding-right var(--move); }
+/* the dock keeps the same room at its sides as the feed's scrollbar takes (--sbw), so the two columns line up at any width */
+.dock { position: relative; flex: none; padding: 0 calc(16px + var(--sbw, 0px) + var(--info-pad, 0px)) 12px calc(16px + var(--sbw, 0px)); transition: padding-right var(--move); }
 .above { position: relative; display: flex; flex-direction: column; gap: 8px; }
 .above:has(> :not([hidden]):not(.jump)) { padding-bottom: 8px; }
 /* fade the feed out above the dock, so words don't stop at a hard line */
@@ -1228,7 +1231,7 @@ kbd.key { display: inline-grid; place-items: center; min-width: 22px; height: 22
   .crumb .seg.title { margin-left: -6px; }
   .thread-links { display: none; }
   .view > .col { padding: 0 12px; }
-  .dock { padding: 0 12px calc(10px + env(safe-area-inset-bottom)); }
+  .dock { padding: 0 calc(12px + var(--sbw, 0px)) calc(10px + env(safe-area-inset-bottom)); }
   html.keyboard .dock { padding-bottom: 10px; }
   .bp-trigger { max-width: 140px; }
   #model .eff { display: none; }
@@ -1275,6 +1278,7 @@ kbd.key { display: inline-grid; place-items: center; min-width: 22px; height: 22
   .nav-row { height: 40px; }
   .mb { height: 34px; }
   .mb-ic { width: 34px; }
+  .meta { padding-left: calc(var(--gut) - 10px); }
   .send { width: 40px; height: 40px; }
   .btn { height: 36px; }
   .btn.sm, .btn-sm, .btn-xs { height: 32px; }

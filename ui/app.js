@@ -766,6 +766,13 @@ S.panelW = load("gitWidth", 340)
 S.infoOpen = load("infoOpen", true)
 /** The card over a narrow thread: opened on purpose there, never kept. */
 S.infoOver = false
+/** How wide a scrollbar is here (0 where they lie over the page): the feed keeps that room on both sides, and so does the dock. */
+{
+  const probe = el("div", { style: "position:absolute;top:-999px;width:100px;height:50px;overflow-y:scroll;scrollbar-width:thin" })
+  document.body.append(probe)
+  document.documentElement.style.setProperty("--sbw", `${probe.offsetWidth - probe.clientWidth}px`)
+  probe.remove()
+}
 /** The Changes panel shows anywhere but Evolution, once there's a project. */
 const panelAllowed = () => S.route.name !== "evolution" && S.projects.length > 0
 const gitOpenNow = () => S.panelOpen && panelAllowed()
