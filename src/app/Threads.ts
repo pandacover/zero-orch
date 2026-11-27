@@ -18,8 +18,8 @@ import { lastWorktree, openedPr, toolPlaces } from "./WorkPlace.ts"
 import { loadGenome, solverPrompt } from "../Genome.ts"
 import { git, head } from "../Git.ts"
 import { type HandOver, Memory, MEMORY_NOTE, toolNotes } from "../Singularity.ts"
-import type { Access, Item, Project, ProviderId, Settings, Thread, UsageLimit } from "./Model.ts"
-import { atMost, isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
+import type { Access, Item, Origin, Project, ProviderId, Settings, Thread, UsageLimit } from "./Model.ts"
+import { allowKey, atMost, isCompact, isEffortFor, metaOf, newId, titleFrom } from "./Model.ts"
 import { type Provider, type SlashCommandInfo, type ThreadTools, turnStream, type Verdict } from "./providers/Provider.ts"
 import { claude, claudeModels, nameThread } from "./providers/Claude.ts"
 import { codex } from "./providers/Codex.ts"
@@ -34,6 +34,8 @@ export interface Hub {
 
 interface Pending {
   readonly done: (verdict: Verdict) => void
+  /** The call, as `allowKey` has it: an Always allow answers every waiting ask with the same key. */
+  readonly key: string
   /** What the thread's access makes of the call now. */
   readonly recheck?: (() => "allow" | "deny" | "ask") | undefined
 }
@@ -248,7 +250,7 @@ export const makeThreads = (options: {
 
     const create = (
       project: Project,
-      input: { provider?: ProviderId; model?: string; access?: Access; effort?: string; title?: string; cwd?: string; parentId?: string; branch?: string }
+      input: { provider?: ProviderId; model?: string; access?: Access; effort?: string; title?: string; cwd?: string; parentId?: string; branch?: string; origin?: Origin }
     ) => {
       const settings = store.settings()
       const provider = input.provider ?? settings.defaultProvider
@@ -263,6 +265,8 @@ export const makeThreads = (options: {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(input.parentId ? { parentId: input.parentId } : {}),
         ...(input.branch ? { branch: input.branch } : {}),
+        ...(input.origin ? { origin: input.origin } : {}),
+        settled: false,
         status: "idle",
         resume: null,
         createdAt: now(),
@@ -276,7 +280,7 @@ export const makeThreads = (options: {
 
     /** Change a thread's provider, model, access or effort. A new provider starts a new session. */
     /** `effort: ""` goes back to following the settings. */
-    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean; seen?: boolean }) => {
+    const update = (t: Thread, patch: { title?: string; provider?: ProviderId; model?: string; access?: Access; effort?: string; pinned?: boolean; seen?: boolean; settled?: boolean }) => {
       if (patch.provider && patch.provider !== t.provider) {
         // The old provider's live session, if it keeps one, has no more turns coming.
         PROVIDERS[t.provider].close?.(t.id)
@@ -307,8 +311,11 @@ export const makeThreads = (options: {
       else if (patch.pinned === false) delete t.pinned
       // The person opened the thread: the turn that ended is seen.
       if (patch.seen === true) delete t.unseen
-      // Pinning and looking aren't activity: the thread keeps its age, so unpinning puts it back where it was.
-      const onlyPin = Object.keys(patch).every((k) => k === "pinned" || k === "seen")
+      // Settled: done with for now (and so seen); back: in the inbox again. A running thread isn't settled.
+      if (patch.settled === true && !busy(t.id)) { t.settled = true; delete t.unseen }
+      else if (patch.settled === false) t.settled = false
+      // Pinning, looking and settling aren't activity: the thread keeps its age, so unpinning puts it back where it was.
+      const onlyPin = Object.keys(patch).every((k) => k === "pinned" || k === "seen" || k === "settled")
       if (onlyPin) hub.send("thread", metaOf(t))
       else touch(t)
       store.saveThread(t)
@@ -348,17 +355,21 @@ export const makeThreads = (options: {
 
     const ask = (t: Thread, l: Live) => (tool: string, detail: string, recheck?: () => "allow" | "deny" | "ask"): Promise<Verdict> =>
       new Promise((resolve) => {
-        const item: Item = { kind: "permission", id: newId("ask"), at: now(), tool, detail, state: "pending" }
+        const key = allowKey(tool, detail)
+        // Allowed for the rest of the thread: it runs without asking again.
+        if (t.alwaysAllow?.includes(key)) return resolve("allowed")
+        const item: Item & { kind: "permission" } = { kind: "permission", id: newId("ask"), at: now(), tool, detail, state: "pending" }
         put(t, item, false)
         const done = (verdict: Verdict) => {
           if (!l.asks.has(item.id)) return
           l.asks.delete(item.id)
           item.state = verdict === "allowed" ? "allowed" : "denied"
+          if (verdict === "allowed" && t.alwaysAllow?.includes(key)) item.always = true
           if (verdict === "declined") l.declined = true
           put(t, item, false)
           resolve(verdict)
         }
-        l.asks.set(item.id, { done, recheck })
+        l.asks.set(item.id, { done, recheck, key })
         l.abort.signal.addEventListener("abort", () => l.asks.has(item.id) && done("stopped"), { once: true })
       })
 
@@ -553,6 +564,8 @@ export const makeThreads = (options: {
           delete t.queued
         }
 
+        // A new message brings a settled thread back.
+        t.settled = false
         put(t, { kind: "user", id: newId("u"), at: now(), text, ...(attachments.length ? { attachments } : {}), ...(opts.from ? { from: opts.from } : {}) }, false)
         const refused = compact
           ? cantCompact(provider, t.resume)
@@ -562,6 +575,7 @@ export const makeThreads = (options: {
         if (refused) {
           put(t, { kind: "turn", id: newId("end"), at: now(), provider: t.provider, model: t.model, durationMs: 0, costUsd: null, tokens: null, outcome: "failed", error: refused }, false)
           t.unseen = "failed"
+          t.ended = "failed"
           live.delete(t.id)
           touch(t)
           store.saveThread(t)
@@ -708,6 +722,7 @@ export const makeThreads = (options: {
         // A turn the person stopped is one they saw end; one that finished or failed waits for them to look.
         if (result.outcome === "stopped") delete t.unseen
         else t.unseen = result.outcome
+        t.ended = result.outcome
         touch(t)
         store.saveThread(t)
         settle(t.id)
@@ -820,7 +835,8 @@ export const makeThreads = (options: {
             ...(a.title ? { title: a.title } : {}),
             ...(cwd ? { cwd } : {}),
             ...(branch ? { branch } : {}),
-            parentId: parent.id
+            parentId: parent.id,
+            origin: { kind: "thread", device: parent.title }
           })
           const link: Link = { kind: "link", id: newId("l"), at: now(), threadId: c.id, title: c.title, action: "started", state: a.wait ? "waiting" : "sent", text: a.prompt }
           show(link)
@@ -899,9 +915,19 @@ export const makeThreads = (options: {
         l.abort.abort()
         return true
       },
-      answer: (id: string, askId: string, allow: boolean) => {
-        const pending = live.get(id)?.asks.get(askId)
-        if (!pending) return false
+      /** The person's answer to an approval. `always`: allow this call for the rest of the thread, and any like it waiting now. */
+      answer: (id: string, askId: string, allow: boolean, always = false) => {
+        const l = live.get(id)
+        const pending = l?.asks.get(askId)
+        if (!l || !pending) return false
+        const t = store.thread(id)
+        if (allow && always && t) {
+          if (!t.alwaysAllow?.includes(pending.key)) t.alwaysAllow = [...(t.alwaysAllow ?? []), pending.key]
+          hub.send("thread", metaOf(t))
+          store.saveThread(t)
+          for (const p of [...l.asks.values()]) if (p.key === pending.key) p.done("allowed")
+          return true
+        }
         pending.done(allow ? "allowed" : "declined")
         return true
       },

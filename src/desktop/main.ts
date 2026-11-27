@@ -81,6 +81,11 @@ else {
     trusted(e) ? (await api).call(String(method), String(path), body) : refused)
   ipcMain.handle("upload", async (e, name: unknown, mime: unknown, bytes: unknown) =>
     trusted(e) && bytes instanceof Uint8Array ? (await api).upload(String(name), String(mime), bytes) : refused)
+  // Settings › Appearance: the window follows it (its own buttons, and the page's prefers-color-scheme).
+  ipcMain.handle("theme", (e, pick: unknown) => {
+    if (!trusted(e)) return
+    nativeTheme.themeSource = pick === "light" || pick === "dark" ? pick : "system"
+  })
 
   /**
    * A link out of the page: the web opens in the browser, an image in the OS viewer, any other file is saved.
@@ -117,15 +122,15 @@ else {
   /**
    * On Windows and Linux the page is the whole window: no system title bar or menu bar (the menu's
    * shortcuts still work), and the minimize, maximize and close buttons drawn over its top right, on the
-   * page's own background (app.css's --bg). Electron paints each button 45px wide whatever the height, so
+   * page's own background (app.css's --canvas). Electron paints each button 45px wide whatever the height, so
    * 45px tall makes them square; the page's header row takes the same height (env(titlebar-area-height)),
    * so they centre on it. app.css keeps its own buttons clear of them and drags by its headers; app.js
    * keeps tooltips out from under them. macOS keeps its own title bar.
    */
   const OVERLAY_HEIGHT = 45
   const overlay = () => nativeTheme.shouldUseDarkColors
-    ? { color: "#000000", symbolColor: "#a3a3a3", height: OVERLAY_HEIGHT }
-    : { color: "#ffffff", symbolColor: "#666666", height: OVERLAY_HEIGHT }
+    ? { color: "#0e0e0e", symbolColor: "#a3a3a0", height: OVERLAY_HEIGHT }
+    : { color: "#f5f5f4", symbolColor: "#5d5d5a", height: OVERLAY_HEIGHT }
   const frame = () => process.platform === "darwin" ? {} : { titleBarStyle: "hidden" as const, titleBarOverlay: overlay() }
   // The buttons follow the system's light or dark, as the page does.
   nativeTheme.on("updated", () => {
@@ -152,7 +157,7 @@ else {
       title: "zero",
       // Shown once painted, on the page's own background: no white flash.
       show: false,
-      backgroundColor: nativeTheme.shouldUseDarkColors ? "#000000" : "#ffffff",
+      backgroundColor: nativeTheme.shouldUseDarkColors ? "#0e0e0e" : "#f5f5f4",
       ...frame(),
       webPreferences: { preload: join(import.meta.dirname, "preload.cjs"), sandbox: true, contextIsolation: true }
     })

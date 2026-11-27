@@ -148,6 +148,8 @@ export type Item =
     tool: string
     detail: string
     state: "pending" | "allowed" | "denied"
+    /** Allowed for the rest of the thread: the same call runs without asking from now on. */
+    always?: boolean | undefined
   }
   | {
     readonly kind: "memory"
@@ -238,6 +240,18 @@ export interface ThreadMeta {
   parentId?: string | undefined
   /** A turn ended that the person hasn't looked at yet, and how: the sidebar lists the thread under Needs you. */
   unseen?: "done" | "failed" | undefined
+  /**
+   * The person is done with it for now, like archiving: it leaves the inbox for Settled, and a new
+   * message brings it back. Unset on a thread from before there was settling: it counts as settled
+   * once seen, which is where such a thread went then (out of Needs you, under its project).
+   */
+  settled?: boolean | undefined
+  /** How its last turn ended. */
+  ended?: "done" | "stopped" | "failed" | undefined
+  /** Where the thread was started from; unset on threads from before zero kept it. */
+  origin?: Origin | undefined
+  /** Calls the person allowed for the rest of the thread, as `allowKey(tool, detail)`. */
+  alwaysAllow?: Array<string> | undefined
   readonly createdAt: string
   updatedAt: string
 }
@@ -245,6 +259,22 @@ export interface ThreadMeta {
 export interface Thread extends ThreadMeta {
   items: Array<Item>
 }
+
+/**
+ * Where a thread was started: in zero's own window on this machine (`local`, its host name), on a
+ * device paired over remote access (`remote`, the device as its browser names it: "Safari on
+ * iPhone"), or by another thread's agent (`thread`).
+ */
+export interface Origin {
+  readonly kind: "local" | "remote" | "thread"
+  readonly device: string
+}
+
+/** Whether the person is done with a thread: said so, or (a thread from before settling) has seen how it ended. */
+export const isSettled = (t: Pick<ThreadMeta, "settled" | "unseen">): boolean => t.settled ?? !t.unseen
+
+/** The key a call is allowed by for the rest of a thread: the tool and exactly what it was asked to do. */
+export const allowKey = (tool: string, detail: string): string => `${tool}\u0000${detail}`
 
 /** Where the account stands against one of its plan's usage windows, as the provider last said. */
 export interface UsageLimit {

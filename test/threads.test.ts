@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { type Access, atMost, compactionOffered, DEFAULT_SETTINGS, isCompact, type Item, needsCompaction, type Project, type Thread } from "../src/app/Model.ts"
+import { type Access, atMost, compactionOffered, DEFAULT_SETTINGS, isCompact, isSettled, type Item, needsCompaction, type Project, type Thread } from "../src/app/Model.ts"
 import { claudeModels, cleanTitle, effortFor, gate, summaryOf, toLabels, TOOLS } from "../src/app/providers/Claude.ts"
 import type { Provider, TurnInput } from "../src/app/providers/Provider.ts"
 import * as StoreModule from "../src/app/Store.ts"
@@ -1100,5 +1100,80 @@ describe("a thread whose agent makes a worktree of its own", () => {
     expect(cwds.map((c) => resolve(c))).toEqual([resolve(proj), resolve(proj)])
     expect(t.branch).toBe("fix")
     expect(t.pr).toEqual({ number: 42, url, branch: "fix", state: "OPEN" })
+  })
+})
+
+describe("approvals and settling", () => {
+  it("allows a call for the rest of the thread when asked to, settles on request, and a new message brings it back", async () => {
+    const home = mkdtempSync(join(tmpdir(), "zero-home-"))
+    const proj = mkdtempSync(join(tmpdir(), "zero-proj-"))
+    const real = PROVIDERS.claude
+    const verdicts: Array<string> = []
+    // Asks for the same command twice in a turn, then another; a second turn asks for the first again.
+    PROVIDERS.claude = {
+      ...real,
+      turn: (async function*(input: TurnInput) {
+        verdicts.push(await input.ask("Bash", "npm test"))
+        verdicts.push(await input.ask("Bash", "npm test"))
+        verdicts.push(await input.ask("Bash", "rm -rf build"))
+        yield { type: "text", key: "a", delta: "done" }
+      }) as Provider["turn"]
+    }
+    try {
+      const memory = Layer.succeed(Singularity.Memory, Singularity.Memory.of({
+        recall: () => Effect.succeedNone,
+        handOver: () => Effect.succeed({ handOver: Option.none(), searched: false }),
+        afterTool: () => Effect.succeedNone,
+        store: () => Effect.void,
+        changes: () => Effect.succeed([])
+      }))
+      const layer = Layer.mergeAll(memory, StoreModule.layer(home)).pipe(Layer.provideMerge(NodeServices.layer))
+      const { t, asked } = await Effect.gen(function*() {
+        const store = yield* Store
+        let threads: Threads | undefined
+        const asked: Array<string> = []
+        // The person: Always allow for npm test, Deny for anything else.
+        const hub = {
+          send: (event: string, data: unknown) => {
+            const d = data as { threadId?: string; item?: Item }
+            if (event !== "item" || d.item?.kind !== "permission" || d.item.state !== "pending") return
+            asked.push(d.item.detail)
+            const { threadId, item } = { threadId: d.threadId!, item: d.item }
+            queueMicrotask(() => threads!.answer(threadId, item.id, item.detail === "npm test", item.detail === "npm test"))
+          }
+        }
+        threads = yield* makeThreads({ zeroRoot: join(home, "no-genome"), hub, nameThread: async () => "" })
+        const project = yield* store.addProject(proj)
+        const t = threads.create(project, { access: "ask", origin: { kind: "local", device: "here" } })
+        expect(t.settled).toBe(false)
+        yield* threads.turn(t, project, "run the tests")
+        expect(store.thread(t.id)!.ended).toBe("done")
+        threads.update(t, { settled: true })
+        expect(store.thread(t.id)!.settled).toBe(true)
+        // Settled is seen.
+        expect(store.thread(t.id)!.unseen).toBeUndefined()
+        yield* threads.turn(t, project, "again")
+        return { t: store.thread(t.id)!, asked }
+      }).pipe(Effect.provide(layer), Effect.runPromise)
+      // npm test was asked once; after Always allow it ran without asking, in this turn and the next.
+      expect(asked).toEqual(["npm test", "rm -rf build", "rm -rf build"])
+      expect(verdicts).toEqual(["allowed", "allowed", "declined", "allowed", "allowed", "declined"])
+      const perms = t.items.filter((i): i is Item & { kind: "permission" } => i.kind === "permission")
+      expect(perms.map((p) => [p.detail, p.state, p.always ?? false])).toEqual([["npm test", "allowed", true], ["rm -rf build", "denied", false], ["rm -rf build", "denied", false]])
+      expect(t.alwaysAllow).toHaveLength(1)
+      // The second message brought it back from Settled.
+      expect(t.settled).toBe(false)
+      expect(t.origin).toEqual({ kind: "local", device: "here" })
+    } finally {
+      PROVIDERS.claude = real
+      for (const d of [home, proj]) rmSync(d, { recursive: true, force: true })
+    }
+  })
+
+  it("counts a thread from before settling as settled once it's seen", () => {
+    expect(isSettled({ unseen: "done" })).toBe(false)
+    expect(isSettled({})).toBe(true)
+    expect(isSettled({ settled: false })).toBe(false)
+    expect(isSettled({ settled: true, unseen: "failed" })).toBe(true)
   })
 })

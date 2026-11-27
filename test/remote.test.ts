@@ -163,7 +163,7 @@ describe("remote access over HTTP", () => {
     expect(html).toContain('<script src="web.js"></script>')
     expect(page.headers.get("x-frame-options")).toBe("DENY")
     expect((await call("/web.js")).headers.get("content-type")).toMatch(/javascript/)
-    expect((await call("/fonts/martian-mono.woff2")).status).toBe(200)
+    expect((await call("/fonts/geist-mono.woff2")).status).toBe(200)
     expect((await call("/../package.json")).status).toBe(404)
     const boot = await call("/api/bootstrap", { headers: { "x-zero": "1" } })
     expect(boot.status).toBe(200)
@@ -192,6 +192,21 @@ describe("remote access over HTTP", () => {
     expect((await call(`/api/threads/${thread.id}`, { headers: { "x-zero": "1" } })).status).toBe(200)
     expect((await call("/api/threads/nope", { headers: { "x-zero": "1" } })).status).toBe(404)
     expect((await call("/api/threads", { method: "POST", headers: { "x-zero": "1", "content-type": "application/json" }, body: "{not json" })).status).toBe(400)
+  })
+
+  it("keeps on a thread the device it was started from", async () => {
+    const projectId = ((await (await call("/api/bootstrap", { headers: { "x-zero": "1" } })).json()) as { projects: Array<{ id: string }> }).projects[0]!.id
+    const iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+    const made = await call("/api/threads", { method: "POST", headers: { "x-zero": "1", "content-type": "application/json", "user-agent": iphone }, body: JSON.stringify({ projectId }) })
+    const thread = (await made.json()) as { id: string; origin: unknown }
+    expect(thread.origin).toEqual({ kind: "remote", device: "Safari on iPhone" })
+    // Read back later, it still says so.
+    const again = (await (await call(`/api/threads/${thread.id}`, { headers: { "x-zero": "1" } })).json()) as { origin: unknown }
+    expect(again.origin).toEqual({ kind: "remote", device: "Safari on iPhone" })
+    // One made in zero's own window (no origin given) is this machine's.
+    const local = (await api.call("POST", "threads", { projectId })).body as { origin: { kind: string; device: string } }
+    expect(local.origin.kind).toBe("local")
+    expect(local.origin.device).not.toBe("")
   })
 
   it("takes an attached file and hands it back, never as something to run", async () => {
