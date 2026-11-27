@@ -316,14 +316,15 @@ body.resizing iframe, body.resizing .main { pointer-events: none; }
 .msg-meta .stopped { color: var(--red); }
 .turn-meta { display: flex; gap: 12px; padding: 0 var(--gut); font: 400 11px var(--mono); color: var(--faint); }
 .turn-meta .stopped { color: var(--red); }
-/* a file in a message: a chip in the line; a picture as itself */
+/* a file with a message: a chip; a picture as itself. They sit above the words, in the composer and once sent. */
 .att { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; max-width: min(260px, 100%); margin: 1px; height: 24px; padding: 0 6px 0 3px; border: 0; border-radius: 7px; background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); font: 500 12.5px/20px var(--sans); text-decoration: none; white-space: nowrap; user-select: none; -webkit-user-select: none; }
 a.att:hover { background: color-mix(in srgb, var(--ink) 11%, transparent); }
 .att-thumb { width: 18px; height: 18px; flex: none; border-radius: 4px; object-fit: cover; background: var(--line); }
 .att-icon { width: 18px; height: 18px; color: var(--muted); }
 .att-icon svg { width: 14px; height: 14px; }
 .att-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.att-x { width: 18px; height: 18px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--faint); font-size: 13px; line-height: 1; }
+.att-x { width: 18px; height: 18px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--faint); }
+.att-x svg { width: 12px; height: 12px; }
 .att-x:hover { background: var(--hover); color: var(--ink); }
 .att[data-state="uploading"] { opacity: .6; }
 .att[data-state="uploading"] :is(.att-thumb, .att-icon) { animation: pulse 1.2s ease-in-out infinite; }
@@ -333,6 +334,23 @@ a.att:hover { background: color-mix(in srgb, var(--ink) 11%, transparent); }
 .att-pic-name { position: absolute; inset: auto 0 0 0; padding: 14px 8px 5px; font: 500 11.5px/1.3 var(--sans); color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: linear-gradient(transparent, #000000b3); opacity: 0; transition: opacity .15s ease; }
 .att-pic:hover .att-pic-name { opacity: 1; }
 @media (hover: none) { .att-pic-name { opacity: 1; } }
+/* above a sent message, at its right like the bubble */
+.msg-atts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: flex-end; gap: 6px; max-width: min(85%, 600px); margin-bottom: 6px; }
+.msg-atts > * { margin: 0; }
+.msg-atts .att { height: 30px; padding: 0 9px 0 5px; border-radius: 9px; }
+.msg-atts .att-thumb { width: 22px; height: 22px; border-radius: 5px; }
+/* the tray above the words in a message box: chips, and pictures as small tiles with their × on them */
+.att-tray { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 10px 0 var(--gut); }
+.att-tray:empty { display: none; }
+.msg-edit .att-tray { padding: 0 0 8px; }
+.att-tray .att { height: 30px; margin: 0; padding: 0 4px 0 5px; border-radius: 9px; }
+.att-tray .att-thumb { width: 22px; height: 22px; border-radius: 5px; }
+.att-tray .att.pic { position: relative; width: 56px; height: 56px; padding: 0; overflow: hidden; background: var(--fill-2); }
+.att-tray .att.pic .att-thumb { width: 100%; height: 100%; border-radius: 0; }
+.att-tray .att.pic .att-name { display: none; }
+.att-tray .att.pic .att-x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; background: #000000a6; color: #fff; opacity: 0; transition: opacity .12s ease; }
+.att-tray .att.pic:is(:hover, :focus-within) .att-x { opacity: 1; }
+@media (hover: none) { .att-tray .att.pic .att-x { opacity: 1; } }
 /* a file or folder picked with @: a chip, sent as @path */
 .mention { display: inline-flex; align-items: center; gap: 4px; padding: 0 6px 0 4px; margin: 0 1px; border-radius: 6px; vertical-align: baseline; background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); font: 500 .94em/1.5 var(--sans); white-space: nowrap; user-select: all; }
 .mention .mention-ico { width: 13px; height: 13px; color: var(--muted); }
@@ -993,9 +1011,9 @@ a.ck-name:hover { text-decoration: underline; }
 .file-chip { display: inline-block; font: 400 11px/1.6 var(--mono); padding: 1px 7px; border-radius: 6px; background: var(--fill); color: var(--muted); margin: 0 6px 4px 0; }
 .card-head > .file-chip { flex: none; margin: 2px 0 0; }
 .knobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin: 4px 0 18px; border-radius: 10px; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
-.knob { padding: 10px 14px 11px; min-width: 0; box-shadow: -1px 0 0 var(--line); }
-.knob dt { font-size: 12px; color: var(--faint); }
-.knob dd { margin: 2px 0 0; font-size: 13.5px; font-weight: 500; overflow-wrap: anywhere; }
+.knobs .knob { padding: 10px 14px 11px; min-width: 0; box-shadow: -1px 0 0 var(--line); }
+.knobs .knob dt { font-size: 12px; color: var(--faint); }
+.knobs .knob dd { margin: 2px 0 0; font-size: 13.5px; font-weight: 500; overflow-wrap: anywhere; }
 .files { padding-top: 2px; }
 .file-tabs { display: flex; gap: 2px; margin-bottom: 8px; padding: 2px; border-radius: 8px; background: var(--fill); width: max-content; }
 .file-tabs button { border: 0; background: none; padding: 4px 10px; border-radius: 6px; font: 400 12px var(--mono); color: var(--muted); }

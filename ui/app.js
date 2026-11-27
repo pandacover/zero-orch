@@ -1679,6 +1679,27 @@ function attChip(tag, { name, mime, src, attrs = {} }) {
     isRaster(mime) && src ? el("img", { class: "att-thumb", src, alt: "" }) : icon(FILE_PATHS, "att-icon"),
     el("span", { class: "att-name", text: name }))
 }
+/**
+ * A file in the tray above a message box: a picture as a small tile, any other file as a chip, each with its ×
+ * (`removed` runs after it's taken out). `a` is an uploaded file ({id, name, mime, size}), or one still uploading
+ * ({name, mime, src} with no id yet).
+ */
+function trayChip(a, removed) {
+  const src = a.src ?? (a.id && isRaster(a.mime) ? fileUrl(a.id) : null)
+  const chip = attChip("span", { name: a.name, mime: a.mime, src, attrs: a.id ? { "data-att": a.id, title: `${a.name}${a.size ? ` · ${bytes(a.size)}` : ""}` } : { "data-state": "uploading", title: "Uploading…" } })
+  if (isRaster(a.mime) && src) chip.classList.add("pic")
+  const x = el("button", { class: "att-x", type: "button", "aria-label": `Remove ${a.name}`, title: "Remove", html: I.x })
+  x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
+  x.addEventListener("click", () => {
+    const tray = chip.parentNode
+    chip.remove()
+    removed?.(tray)
+  })
+  chip.append(x)
+  return chip
+}
+/** The uploaded files in a tray, in order. */
+const trayIds = (tray) => [...tray.querySelectorAll(".att[data-att]")].map((c) => c.dataset.att)
 /** Words with each @path in them (a file picked with @) as the chip the composer showed: its name, the path on hover. */
 function mentions(text) {
   const out = []
@@ -1705,25 +1726,25 @@ function mentionChip(path, inComposer = false) {
   return el("span", { class: `mention${dir ? " dir" : ""}`, title: path, ...(inComposer ? { contenteditable: "false", "data-path": path } : {}) },
     icon(dir ? FOLDER_PATHS : FILE_PATHS, "mention-ico"), el("span", { class: "mention-name", text: name }))
 }
-/** A sent message: its words, with each attached file as a chip where it was put. */
-function userNodes(item) {
-  const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
-  const out = []
-  let last = 0
-  for (const m of item.text.matchAll(ATT)) {
-    if (m.index > last) out.push(...mentions(item.text.slice(last, m.index)))
-    const a = known.get(m[1])
-    // A picture shows as itself, big enough to see what it is; any other file as a chip.
-    out.push(a && isRaster(a.mime)
-      ? el("a", { class: "att-pic", href: fileUrl(a.id), target: "_blank", rel: "noopener", title: `${a.name} · ${bytes(a.size)}` },
-        el("img", { src: fileUrl(a.id), alt: a.name }), el("span", { class: "att-pic-name", text: a.name }))
-      : a
-      ? attChip("a",{ name: a.name, mime: a.mime, src: fileUrl(a.id), attrs: { href: fileUrl(a.id), target: "_blank", rel: "noopener", title: `${a.name} · ${bytes(a.size)}` } })
-      : el("span", { class: "att gone", text: "a file" }))
-    last = m.index + m[0].length
-  }
-  if (last < item.text.length) out.push(...mentions(item.text.slice(last)))
-  return out
+/**
+ * A message's text split into its words and its files: the files, in the order they were put in, are drawn
+ * above the words (in the composer and once sent), wherever their markers sit in the text.
+ */
+function splitFiles(text, attachments = []) {
+  const known = new Map(attachments.map((a) => [a.id, a]))
+  const ids = [...new Set([...text.matchAll(ATT)].map((m) => m[1]))]
+  const words = text.replace(ATT, " ").replace(/[ \t]+\n/g, "\n").replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim()
+  return { words, files: ids.map((id) => known.get(id) ?? { id, gone: true }) }
+}
+/** The text sent for a message: its files' markers on a line of their own, then the words. */
+const joinFiles = (ids, words) => [ids.map((id) => `{{att:${id}}}`).join(" "), words].filter(Boolean).join("\n\n")
+/** A sent file above its message: a picture as itself, big enough to see what it is; any other file as a chip. */
+function sentFile(a) {
+  if (a.gone) return el("span", { class: "att gone", text: "a file" })
+  const attrs = { href: fileUrl(a.id), target: "_blank", rel: "noopener", title: `${a.name} · ${bytes(a.size)}` }
+  return isRaster(a.mime)
+    ? el("a", { class: "att-pic", ...attrs }, el("img", { src: fileUrl(a.id), alt: a.name }), el("span", { class: "att-pic-name", text: a.name }))
+    : attChip("a", { name: a.name, mime: a.mime, src: fileUrl(a.id), attrs })
 }
 
 const COPY_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="2"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>'
@@ -1816,11 +1837,14 @@ function plainText(item) {
 /** How many lines of a sent prompt show before Show more: 3 on a phone, where it sticks above a small screen (app.css). */
 const userLines = () => (narrow.matches ? 3 : 5)
 function userMessage(item) {
+  const { words, files } = splitFiles(item.text, item.attachments)
+  // Its files sit above the bubble; a message of files alone has no bubble.
+  const atts = files.length ? el("div", { class: "msg-atts" }, files.map(sentFile)) : null
   // A long prompt shows its first lines (userLines); Show more opens the rest (and stays open while the page is).
-  const body = el("div", { class: "msg-user-body" }, userNodes(item))
+  const body = el("div", { class: "msg-user-body" }, mentions(words))
   const key = `msg:${item.id}`
   const more = el("button", { class: "msg-more", type: "button", hidden: true })
-  const bubble = el("div", { class: "msg-user", tabindex: "0" }, body, more)
+  const bubble = el("div", { class: "msg-user", tabindex: "0", hidden: !words }, body, more)
   const paintMore = () => {
     const open = S.expanded.has(key)
     const lines = parseFloat(getComputedStyle(body).lineHeight) * userLines()
@@ -1837,8 +1861,8 @@ function userMessage(item) {
   new ResizeObserver(paintMore).observe(body)
   // A message from the agent in the thread that started this one, not from the person: it says whose.
   const from = item.from ? el("div", { class: "msg-from" }, icon(LINK_PATHS), el("span", { text: "From the agent in" }), threadLink(item.from.threadId, item.from.title)) : null
-  const wrap = el("div", { class: `msg msg-u${from ? " from-thread" : ""}` }, from, bubble, msgActions(() => plainText(item)))
-  const start = () => { if (!wrap.classList.contains("editing")) editMessage(item, wrap, bubble) }
+  const wrap = el("div", { class: `msg msg-u${from ? " from-thread" : ""}` }, from, atts, bubble, msgActions(() => plainText(item)))
+  const start = () => { if (!wrap.classList.contains("editing")) editMessage(item, wrap, bubble, atts) }
   bubble.addEventListener("click", (e) => {
     // A file chip opens the file; a drag that selected words is for copying them.
     if (e.target.closest("a") || String(getSelection()).length) return
@@ -1851,30 +1875,24 @@ function userMessage(item) {
  * Edit a sent message in place. The agent's history can't be rewound, so
  * sending the edit posts it as a new message at the end of the thread.
  */
-function editMessage(item, wrap, bubble) {
-  const known = new Map((item.attachments ?? []).map((a) => [a.id, a]))
-  const nodes = []
-  let last = 0
-  for (const m of item.text.matchAll(ATT)) {
-    if (m.index > last) nodes.push(item.text.slice(last, m.index))
-    const a = known.get(m[1])
-    // Chips keep their file: serialize() turns each back into its marker.
-    if (a) nodes.push(attChip("span", { name: a.name, mime: a.mime, src: fileUrl(a.id), attrs: { contenteditable: "false", "data-att": a.id, title: a.name } }))
-    last = m.index + m[0].length
-  }
-  if (last < item.text.length) nodes.push(item.text.slice(last))
-  const input = el("div", { class: "msg-edit-input", contenteditable: "true", role: "textbox", "aria-multiline": "true", "aria-label": "Edit message" }, nodes)
+function editMessage(item, wrap, bubble, atts) {
+  const { words, files } = splitFiles(item.text, item.attachments)
+  // Its files ride along above the words, each with its × to leave it out.
+  const tray = el("div", { class: "att-tray" }, files.filter((a) => !a.gone).map((a) => trayChip(a, () => { input.dispatchEvent(new Event("input")) })))
+  const input = el("div", { class: "msg-edit-input", contenteditable: "true", role: "textbox", "aria-multiline": "true", "aria-label": "Edit message" }, words)
   const cancel = el("button", { class: "btn btn-quiet btn-sm", type: "button", text: "Cancel" })
   const send = el("button", { class: "btn btn-primary btn-sm", type: "button", text: "Send" })
-  const editor = el("div", { class: "msg-edit" }, input,
+  const editor = el("div", { class: "msg-edit" }, tray, input,
     el("div", { class: "msg-edit-foot" }, el("span", { class: "hint", text: touchFirst.matches ? "Sends as a new message" : "Sends as a new message · Esc cancels" }), cancel, send))
   const close = () => {
     editor.replaceWith(bubble)
+    if (atts) atts.hidden = false
     wrap.classList.remove("editing")
     bubble.focus({ preventScroll: true })
   }
+  const textNow = () => joinFiles(trayIds(tray), serialize(input).trim())
   const submit = async () => {
-    const text = serialize(input).trim()
+    const text = textNow()
     if (!text || send.disabled) return
     send.disabled = true
     try {
@@ -1882,7 +1900,7 @@ function editMessage(item, wrap, bubble) {
       close()
     } catch (e) { send.disabled = false; fail(e) }
   }
-  input.addEventListener("input", () => { send.disabled = serialize(input).trim() === "" })
+  input.addEventListener("input", () => { send.disabled = textNow() === "" })
   input.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close() }
     else if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touchFirst.matches) { e.preventDefault(); submit() }
@@ -1895,6 +1913,7 @@ function editMessage(item, wrap, bubble) {
   cancel.addEventListener("click", close)
   send.addEventListener("click", submit)
   wrap.classList.add("editing")
+  if (atts) atts.hidden = true
   bubble.replaceWith(editor)
   input.focus()
   const r = document.createRange()
@@ -1946,24 +1965,24 @@ const sendKey = () => (S.sendWith === "ctrl" ? chord("Ctrl Enter") : "Enter")
  * nodes (so file chips come back too), the words as one line for the sidebar, and when they changed.
  */
 const drafts = new Map()
-/** A draft as one line: its words, each file by its name. */
-function draftTitle(input) {
-  const names = new Map([...input.querySelectorAll(".att[data-att]")].map((c) => [c.dataset.att, c.querySelector(".att-name")?.textContent || "a file"]))
-  return serialize(input).replace(ATT, (_, id) => names.get(id) ?? "a file").replace(/\s+/g, " ").trim() || "A file"
+/** A draft as one line: its words, or else its files by name. */
+function draftTitle(input, tray) {
+  const words = serialize(input).replace(ATT, "").replace(/\s+/g, " ").trim()
+  return words || [...tray.querySelectorAll(".att-name")].map((n) => n.textContent).join(", ") || "A file"
 }
-/** Throw a draft away, and empty its box if it's on screen. */
+/** Throw a draft away, and empty its box (and its files) if it's on screen. */
 function discardDraft(key) {
   const d = drafts.get(key)
   drafts.delete(key)
-  const box = d?.nodes.find((n) => n.parentNode)?.parentNode
+  const box = d?.nodes.find((n) => n.parentNode)?.parentNode ?? d?.files?.find((n) => n.parentNode)?.closest(".composer")?.querySelector(".input")
+  for (const f of d?.files ?? []) f.remove()
   if (box) { box.replaceChildren(); box.dispatchEvent(new Event("input")) }
   paintDrafts()
 }
 /**
- * The message box. It's an editable div rather than a textarea so a file
- * can sit among the words: paste one, drop one, or pick one with Attach and
- * it lands as a chip where the caret was. Each file uploads as it lands;
- * Send waits until they all have.
+ * The message box. Files (pasted, dropped, or picked with Attach) sit in a tray above the words, a picture as
+ * a small tile; each uploads as it lands, and Send waits until they all have. The box is an editable div so
+ * a file picked with @ can sit among the words as a chip.
  */
 /**
  * How well an entry's path matches what was typed after @: its name first (exactly, then at its start, then
@@ -2135,18 +2154,21 @@ function mentionMenu(input, { files, commands = [] }) {
 
 function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], running = false, disabled = false, draftKey = "", files = null, commands = [] }) {
   const input = el("div", { class: "input empty", contenteditable: disabled ? "false" : "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message", "data-placeholder": "" })
-  // What was written here before going elsewhere comes back, chips and all.
-  const kept = draftKey && drafts.get(draftKey)?.nodes
-  if (kept) input.append(...kept)
+  // What was written here before going elsewhere comes back, files and all.
+  const kept = draftKey && drafts.get(draftKey)
+  if (kept) input.append(...kept.nodes)
+  // The files going with the message, above its words.
+  const tray = el("div", { class: "att-tray" }, kept?.files ?? [])
   const picker = el("input", { type: "file", multiple: true, hidden: true, tabindex: "-1" })
   const attach = el("button", { class: "mb mb-ic", type: "button", title: "Attach files. You can paste or drop them too.", "aria-label": "Attach files", html: I.clip })
   const send = el("button", { class: "send", type: "button" })
   let busy = running
   let canAttach = true
-  let range = null // where the caret last was inside the box
 
-  const uploading = () => input.querySelector('.att[data-state="uploading"]') !== null
-  const empty = () => !input.querySelector(".att") && serialize(input).trim() === ""
+  const uploading = () => tray.querySelector('.att[data-state="uploading"]') !== null
+  const empty = () => !tray.querySelector(".att") && serialize(input).trim() === ""
+  /** What Send sends: the files' markers, then the words. */
+  const textNow = () => joinFiles(trayIds(tray), serialize(input).trim())
   /** Working with nothing typed: the button stops the turn. With a message typed it sends it, to wait for the turn's end. */
   const stops = () => busy && empty()
   const STOP_SVG = I.stop
@@ -2177,65 +2199,32 @@ function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], r
       const was = drafts.get(draftKey)
       if (isEmpty) drafts.delete(draftKey)
       else {
-        const title = draftTitle(input)
-        drafts.set(draftKey, { nodes: [...input.childNodes], title, at: was?.title === title ? was.at : new Date().toISOString() })
+        const title = draftTitle(input, tray)
+        drafts.set(draftKey, { nodes: [...input.childNodes], files: [...tray.children], title, at: was?.title === title ? was.at : new Date().toISOString() })
       }
       // The sidebar's Drafts follow along, once per burst of typing.
       if (Boolean(was) !== !isEmpty || (was && was.title !== drafts.get(draftKey)?.title)) paintDraftsSoon()
     }
     paint(isEmpty)
   }
-  const track = () => {
-    if (!input.isConnected) return document.removeEventListener("selectionchange", track)
-    const s = getSelection()
-    if (s.rangeCount && input.contains(s.anchorNode)) range = s.getRangeAt(0).cloneRange()
-  }
-  document.addEventListener("selectionchange", track)
   const caretTo = (r) => {
     const s = getSelection()
     s.removeAllRanges()
     s.addRange(r)
-    range = r.cloneRange()
   }
-  /** Put nodes where the caret was (the end if it never was in the box), and the caret after them. */
-  const insert = (nodes) => {
-    input.focus()
-    let r = range && input.contains(range.startContainer) ? range : null
-    if (!r) { r = document.createRange(); r.selectNodeContents(input); r.collapse(false) }
-    r.deleteContents()
-    const frag = document.createDocumentFragment()
-    frag.append(...nodes)
-    r.insertNode(frag)
-    const after = document.createRange()
-    after.setStartAfter(nodes.at(-1))
-    after.collapse(true)
-    caretTo(after)
-  }
-  // A chip can move to another composer with its draft: it tells the box it's in now, not this one.
-  const changed = (box) => box?.dispatchEvent(new Event("input"))
-  /** A file chip in the box, with its × to take the file out. */
-  const removable = (chip, name) => {
-    const x = el("button", { class: "att-x", type: "button", tabindex: "-1", "aria-label": `Remove ${name}`, title: "Remove", text: "×" })
-    x.addEventListener("mousedown", (e) => e.preventDefault()) // keep the caret in the box
-    x.addEventListener("click", () => {
-      const box = chip.closest(".input")
-      const next = chip.nextSibling
-      if (next?.nodeType === Node.TEXT_NODE && next.nodeValue === " ") next.remove()
-      chip.remove()
-      changed(box)
-    })
-    chip.append(x)
-    return chip
-  }
+  // A file can move to another composer with its draft: it tells the box it's in now, not this one.
+  const changed = (tray) => tray?.closest(".composer")?.querySelector(".input")?.dispatchEvent(new Event("input"))
+  /** Files go in the tray above the words, in the order they came; each uploads at once. */
   const addFiles = (files) => {
     if (disabled) return
     if (!canAttach) return toast(attach.title, true)
-    const nodes = []
+    let added = 0
     for (const file of files) {
       if (file.size > MAX_FILE) { toast(`${file.name} is over 25 MB, too big to attach.`, true); continue }
       const local = isRaster(file.type) ? URL.createObjectURL(file) : null
-      const chip = removable(attChip("span", { name: file.name || "pasted file", mime: file.type, src: local, attrs: { contenteditable: "false", "data-state": "uploading", title: "Uploading…" } }), file.name || "file")
-      nodes.push(chip, document.createTextNode(" "))
+      const chip = trayChip({ name: file.name || "pasted file", mime: file.type, src: local }, changed)
+      tray.append(chip)
+      added++
       // The preview gives way to the server's copy once it's there.
       upload(file).then((a) => {
         if (local) { chip.querySelector(".att-thumb").src = fileUrl(a.id); URL.revokeObjectURL(local) }
@@ -2243,17 +2232,16 @@ function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], r
         delete chip.dataset.state
         chip.title = `${a.name} · ${bytes(a.size)}`
         chip.querySelector(".att-name").textContent = a.name
-        changed(chip.closest(".input"))
+        changed(chip.parentNode)
       }, (e) => {
-        const box = chip.closest(".input")
+        const at = chip.parentNode
         if (local) URL.revokeObjectURL(local)
-        chip.nextSibling?.nodeValue === " " && chip.nextSibling.remove()
         chip.remove()
         fail(e)
-        changed(box)
+        changed(at)
       })
     }
-    if (nodes.length) { insert(nodes); sync() }
+    if (added) { sync(); if (!touchFirst.matches) input.focus() }
   }
 
   /** The send button: Stop while the thread works and nothing's typed, Send (or queue) otherwise. */
@@ -2265,12 +2253,12 @@ function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], r
   const enter = () => sendNow()
   const sendNow = async () => {
     if (disabled || uploading() || empty()) return
-    const text = serialize(input).trim()
+    const text = textNow()
     send.disabled = true
     try {
       await onSend(text)
       input.replaceChildren()
-      range = null
+      tray.replaceChildren()
       remember(text)
     } catch (e) { fail(e) }
     painted = "" // the button was disabled by hand above
@@ -2330,15 +2318,12 @@ function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], r
     node.classList.add("drop")
   })
   node.addEventListener("dragleave", (e) => { if (!node.contains(e.relatedTarget)) node.classList.remove("drop") })
-  // Dropped files land where they were dropped (when that's inside the box); dropped text is the browser's.
+  // Dropped files go in the tray; dropped text is the browser's.
   node.addEventListener("drop", (e) => {
     node.classList.remove("drop")
     const files = [...(e.dataTransfer?.files ?? [])]
     if (!files.length) return
     e.preventDefault()
-    const at = document.caretRangeFromPoint?.(e.clientX, e.clientY)
-      ?? (() => { const p = document.caretPositionFromPoint?.(e.clientX, e.clientY); if (!p) return null; const r = document.createRange(); r.setStart(p.offsetNode, p.offset); return r })()
-    if (at && input.contains(at.startContainer)) range = at
     addFiles(files)
   })
   attach.addEventListener("click", () => picker.click())
@@ -2350,7 +2335,7 @@ function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], r
   send.addEventListener("mousedown", (e) => e.preventDefault())
   send.addEventListener("click", submit)
   // Attach on the left; the model picker sits on the right, beside Send.
-  node.append(menu.pop, el("div", { class: "input-row" }, input, send), picker)
+  node.append(menu.pop, tray, el("div", { class: "input-row" }, input, send), picker)
   // The row under the box: Attach and the branch on the left; the model, Compact and the context on the right.
   const meta = el("div", { class: "meta" }, el("div", { class: "meta-l" }, attach, tools), el("div", { class: "meta-r" }, controls))
   sync()
@@ -2399,20 +2384,11 @@ function composer({ onSend, onStop, onAllow = null, controls = [], tools = [], r
      * to be edited and sent again.
      */
     restore: (text, attachments = []) => {
-      const known = new Map(attachments.map((a) => [a.id, a]))
-      const nodes = []
-      let last = 0
-      for (const m of text.matchAll(ATT)) {
-        if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)))
-        const a = known.get(m[1])
-        // Chips keep their file: serialize() turns each back into its marker.
-        if (a) nodes.push(removable(attChip("span", { name: a.name, mime: a.mime, src: isRaster(a.mime) ? fileUrl(a.id) : null, attrs: { contenteditable: "false", "data-att": a.id, title: `${a.name} · ${bytes(a.size)}` } }), a.name))
-        last = m.index + m[0].length
-      }
-      if (last < text.length) nodes.push(document.createTextNode(text.slice(last)))
-      if (!nodes.length) return
-      if (!empty()) nodes.unshift(document.createTextNode("\n\n"))
-      input.append(...nodes)
+      const { words, files } = splitFiles(text, attachments)
+      const back = files.filter((a) => !a.gone)
+      if (!words && !back.length) return
+      tray.append(...back.map((a) => trayChip(a, changed)))
+      if (words) input.append(document.createTextNode(`${serialize(input).trim() ? "\n\n" : ""}${words}`))
       sync()
       input.focus()
       const r = document.createRange()

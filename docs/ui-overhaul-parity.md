@@ -80,7 +80,7 @@ zero didn't have is either built for real (said so) or left out (said so).
 | [x] | Send / Stop / Queue | — | Same; bare-icon button |
 | [x] | Enter | Enter sends (not on touch) | Same. **New, real:** Settings › Send messages with Enter or Ctrl Enter |
 | [x] | Prompt recall ↑/↓ | — | Kept |
-| [x] | Attachments | Attach, paste, drop on the composer; 25 MB | Attach icon in the meta row; paste; drop anywhere on the thread (overlay) or where the caret goes in the box |
+| [x] | Attachments | Attach, paste, drop on the composer; 25 MB | Attach icon in the meta row; paste; drop anywhere on the thread (overlay). Files sit in a tray above the words (pictures as tiles, each with ×), and once sent above the message bubble; an older message with a file among its words shows it above too |
 | [x] | @ picker, / commands | — | Kept; `/git` toggles Changes |
 | [x] | Approvals | In the feed: Allow (Y), Deny (N) | Above the composer: Deny (N), Always allow, Allow (Y, Ctrl Enter in an empty box) |
 | [x] | Always allow | — | **Built for real:** the same tool and command runs without asking for the rest of the thread (`alwaysAllow` on the thread); like asks waiting now are allowed too. Test: threads.test.ts |
